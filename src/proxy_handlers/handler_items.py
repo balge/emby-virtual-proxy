@@ -384,7 +384,16 @@ async def _handle_random_library(
             source_libs = [lid for lid in source_libs if lid not in ignore_set]
 
         if not source_libs:
-            logger.warning(f"Random library '{found_vlib.name}': no source libraries configured, returning empty.")
+            # No source libraries configured: fetch from all real libraries minus ignored
+            from admin_server import get_real_libraries_hybrid_mode
+            try:
+                real_libs = await get_real_libraries_hybrid_mode()
+                source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+            except Exception as e:
+                logger.error(f"Random library: failed to fetch real libraries: {e}")
+
+        if not source_libs:
+            logger.warning(f"Random library '{found_vlib.name}': no libraries available.")
             empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
             return Response(content=json.dumps(empty).encode('utf-8'), status_code=200, media_type="application/json")
 
