@@ -127,8 +127,8 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
             return
 
         # 检查自定义字体路径，如果未设置则使用默认值
-        zh_font_path = config.custom_zh_font_path or "/app/src/assets/fonts/multi_1_zh.ttf"
-        en_font_path = config.custom_en_font_path or "/app/src/assets/fonts/multi_1_en.otf"
+        zh_font_path = config.custom_zh_font_path or "/app/src/assets/fonts/ch.ttf"
+        en_font_path = config.custom_en_font_path or "/app/src/assets/fonts/en.ttf"
         
         kwargs = {
             "title": (vlib.cover_title_zh or vlib.name, vlib.cover_title_en or ""),
