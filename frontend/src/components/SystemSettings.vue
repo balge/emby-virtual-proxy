@@ -10,7 +10,7 @@
     </template>
     <el-form label-position="top" label-width="100px" v-if="store.config">
 
-      <el-form-item label="Emby 服务器地址">
+      <el-form-item label="Emby 服务器地址（如果使用了302，请填写302地址）">
         <el-input
           v-model="store.config.emby_url"
           placeholder="例如: http://192.168.1.10:8096"

@@ -119,13 +119,6 @@ async def websocket_proxy(client_ws: WebSocket, full_path: str):
 
 @proxy_app.api_route("/{full_path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def reverse_proxy(request: Request, full_path: str):
-    try:
-        return await _reverse_proxy_inner(request, full_path)
-    except Exception as e:
-        logger.error(f"FATAL proxy error for {request.method} /{full_path}: {e}", exc_info=True)
-        return Response(content=f"Proxy error: {e}", status_code=502)
-
-async def _reverse_proxy_inner(request: Request, full_path: str):
     config = config_manager.load_config()
     real_emby_url = config.emby_url.rstrip('/')
     
@@ -145,19 +138,15 @@ async def _reverse_proxy_inner(request: Request, full_path: str):
     session = request.app.state.aiohttp_session
     response = None
 
-    try:
-        if not response: response = await handler_images.handle_virtual_library_image(request, full_path)
-        if not response: response = await handler_virtual_items.handle_get_virtual_item_info(request, full_path, config)
-        if not response: response = await handler_latest.handle_home_latest_items(request, full_path, request.method, real_emby_url, session, config)
-        if not response: response = await handler_system.handle_system_and_playback_info(request, full_path, request.method, real_emby_url, proxy_address, session)
-        if not response: response = await handler_episodes.handle_episodes_merge(request, full_path, session, real_emby_url)
-        if not response: response = await handler_seasons.handle_seasons_merge(request, full_path, session, real_emby_url)
-        if not response: response = await handler_items.handle_virtual_library_items(request, full_path, request.method, real_emby_url, session, config)
-        if not response: response = await handler_views.handle_view_injection(request, full_path, request.method, real_emby_url, session, config)
-        if not response: response = await handler_default.forward_request(request, full_path, request.method, real_emby_url, session)
-    except Exception as e:
-        logger.error(f"Handler chain error for {request.method} {full_path}: {e}", exc_info=True)
-        return Response(content=f"Proxy error: {e}", status_code=502)
+    if not response: response = await handler_images.handle_virtual_library_image(request, full_path)
+    if not response: response = await handler_virtual_items.handle_get_virtual_item_info(request, full_path, config)
+    if not response: response = await handler_latest.handle_home_latest_items(request, full_path, request.method, real_emby_url, session, config)
+    if not response: response = await handler_system.handle_system_and_playback_info(request, full_path, request.method, real_emby_url, proxy_address, session)
+    if not response: response = await handler_episodes.handle_episodes_merge(request, full_path, session, real_emby_url)
+    if not response: response = await handler_seasons.handle_seasons_merge(request, full_path, session, real_emby_url)
+    if not response: response = await handler_items.handle_virtual_library_items(request, full_path, request.method, real_emby_url, session, config)
+    if not response: response = await handler_views.handle_view_injection(request, full_path, request.method, real_emby_url, session, config)
+    if not response: response = await handler_default.forward_request(request, full_path, request.method, real_emby_url, session)
 
     if config.enable_cache and cache_key and response and response.status_code == 200 and not isinstance(response, StreamingResponse):
         content_type = response.headers.get("Content-Type", "")
