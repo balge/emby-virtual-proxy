@@ -26,7 +26,7 @@
 
         <el-table :data="store.virtualLibraries" style="width: 100%" v-loading="store.dataLoading">
             <el-table-column prop="name" label="虚拟库名称" width="200" />
-            <el-table-column label="资源类型" width="180">
+            <el-table-column label="资源类型" width="140">
                 <template #default="scope">
                     {{ getResourceTypeLabel(scope.row.resource_type) }}
                 </template>
@@ -48,7 +48,7 @@
                      <el-tag v-else type="info" size="small">全部</el-tag>
                 </template>
             </el-table-column>
-            <el-table-column label="操作" width="340" align="right">
+            <el-table-column label="操作" width="380" align="right">
                 <template #default="scope">
                     <div class="action-buttons">
                         <el-button v-if="scope.row.resource_type === 'rsshub'" size="small" type="success" @click="store.refreshRssLibrary(scope.row.id)">刷新RSS</el-button>

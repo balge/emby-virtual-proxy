@@ -26,7 +26,7 @@ from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import docker
-from proxy_cache import api_cache
+from proxy_cache import api_cache, vlib_items_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter
 import config_manager
 from db_manager import DBManager, RSS_CACHE_DB
@@ -86,6 +86,96 @@ async def save_advanced_filters(filters: List[AdvancedFilter]):
         # 打印详细错误以供调试
         print(f"保存高级筛选器时发生严重错误: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
+    """
+    Simulate browsing a virtual library by querying Emby directly.
+    Writes the fetched items into vlib_items_cache so cover generation can use them.
+    """
+    if not config.emby_url or not config.emby_api_key:
+        logger.warning(f"Cannot populate cache for '{vlib.name}': Emby URL or API key not configured.")
+        return
+
+    headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
+
+    # Get a reference user ID for the query
+    users = await _fetch_from_emby("/Users")
+    if not users:
+        logger.warning("Cannot populate cache: no Emby users found.")
+        return
+    user_id = users[0].get("Id")
+
+    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+    params = {
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie,Series,Video",
+        "Fields": "ImageTags,ProviderIds,Genres",
+        "Limit": "200",
+        "SortBy": "Random",
+        "SortOrder": "Ascending",
+    }
+
+    # Apply resource type filter
+    resource_map = {
+        "collection": "CollectionIds", "tag": "TagIds",
+        "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds"
+    }
+    if vlib.resource_type in resource_map:
+        params[resource_map[vlib.resource_type]] = vlib.resource_id
+    elif vlib.resource_type in ("rsshub",):
+        # RSS libraries don't need Emby item fetching for covers
+        logger.info(f"Skipping cache population for RSS library '{vlib.name}'.")
+        return
+
+    # Apply advanced filter if configured
+    if vlib.advanced_filter_id:
+        adv_filter = next((f for f in config.advanced_filters if f.id == vlib.advanced_filter_id), None)
+        if adv_filter:
+            emby_native_params, _ = translate_rules(adv_filter.rules)
+            params.update(emby_native_params)
+
+    # Determine source libraries
+    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
+
+    all_items = []
+    try:
+        async with aiohttp.ClientSession() as session:
+            if source_libs:
+                # Fetch from each source library
+                for pid in source_libs:
+                    p = dict(params)
+                    p["ParentId"] = pid
+                    async with session.get(base_url, params=p, headers=headers, timeout=30) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            all_items.extend(data.get("Items", []))
+            else:
+                # Fetch globally (for 'all', 'random', or no source_libraries)
+                async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        all_items.extend(data.get("Items", []))
+    except Exception as e:
+        logger.error(f"Failed to populate cache for '{vlib.name}': {e}")
+        return
+
+    # Deduplicate
+    seen = set()
+    deduped = []
+    for item in all_items:
+        iid = item.get("Id")
+        if iid and iid not in seen:
+            seen.add(iid)
+            deduped.append(item)
+
+    if deduped:
+        vlib_items_cache[vlib.id] = deduped
+        logger.info(f"Populated cache for '{vlib.name}': {len(deduped)} items.")
+    else:
+        logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
+
 
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
 async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig):
@@ -355,12 +445,16 @@ async def refresh_rss_library(library_id: str, request: Request):
 
 
 async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
-    """Regenerate cover for a single virtual library using its saved settings."""
+    """Populate vlib cache first, then regenerate cover."""
     config = config_manager.load_config()
     style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
+        # Populate cache only if not already present
+        if vlib.id not in vlib_items_cache:
+            await _populate_vlib_cache(vlib, config)
+
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
             current_config = config_manager.load_config()
