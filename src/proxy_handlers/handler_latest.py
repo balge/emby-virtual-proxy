@@ -47,6 +47,19 @@ async def handle_home_latest_items(
             except (ValueError, IndexError): pass
     if not user_id: return None
 
+    # Random library branch: reuse cached random items for latest
+    if found_vlib.resource_type == 'random':
+        from proxy_cache import random_recommend_cache
+        cache_key = f"random:{user_id}:{found_vlib.id}"
+        cached = random_recommend_cache.get(cache_key)
+        if cached:
+            limit = int(params.get("Limit", 20))
+            items = cached[:limit]
+        else:
+            items = []
+        content = json.dumps(items).encode('utf-8')
+        return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})
+
     # RSS library branch
     if found_vlib.resource_type == 'rsshub':
         logger.info(f"HOME_LATEST_HANDLER: Intercepting request for latest items in RSS vlib '{found_vlib.name}'.")

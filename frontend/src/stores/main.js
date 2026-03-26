@@ -167,7 +167,7 @@ export const useMainStore = defineStore('main', {
           ElMessage.warning('请填写所有必填字段');
           return;
         }
-      } else if (libraryToSave.resource_type !== 'all') {
+      } else if (libraryToSave.resource_type !== 'all' && libraryToSave.resource_type !== 'random') {
         if (!libraryToSave.resource_id) {
           ElMessage.warning('请填写所有必填字段');
           return;

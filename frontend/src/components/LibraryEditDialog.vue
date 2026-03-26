@@ -20,6 +20,7 @@
           <el-option label="工作室 (Studio)" value="studio"></el-option>
           <el-option label="人员 (Person)" value="person"></el-option>
           <el-option label="RSSHUB" value="rsshub"></el-option>
+          <el-option label="随机推荐 (Random)" value="random"></el-option>
         </el-select>
       </el-form-item>
       
@@ -59,7 +60,7 @@
         </el-select>
       </el-form-item>
 
-      <el-form-item label="选择资源" required v-if="store.currentLibrary.resource_type !== 'all' && store.currentLibrary.resource_type !== 'rsshub'">
+      <el-form-item label="选择资源" required v-if="store.currentLibrary.resource_type !== 'all' && store.currentLibrary.resource_type !== 'rsshub' && store.currentLibrary.resource_type !== 'random'">
         <el-select 
           v-model="store.currentLibrary.resource_id"
           filterable

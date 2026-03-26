@@ -24,7 +24,7 @@ class AdvancedFilter(BaseModel):
 class VirtualLibrary(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     name: str
-    resource_type: Literal["collection", "tag", "genre", "studio", "person", "all", "rsshub"]
+    resource_type: Literal["collection", "tag", "genre", "studio", "person", "all", "rsshub", "random"]
     resource_id: Optional[str] = None
     # image: Optional[str] = None  <-- 我们不再需要这个字段了，可以删除或注释掉
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签

@@ -3,6 +3,8 @@
 import logging
 import json
 import asyncio
+import random as random_module
+from collections import Counter
 from fastapi import Request, Response
 from aiohttp import ClientSession
 from models import AppConfig, AdvancedFilter, VirtualLibrary
@@ -11,7 +13,7 @@ from typing import List, Any, Dict, Optional
 from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
-from proxy_cache import vlib_items_cache
+from proxy_cache import vlib_items_cache, random_recommend_cache
 logger = logging.getLogger(__name__)
 
 # Country code to possible name variants for ProductionLocations matching
@@ -289,6 +291,212 @@ async def _handle_source_library_scoped_request(
     return Response(content=content, status_code=200, media_type="application/json")
 
 
+async def _fetch_user_genre_preferences(
+    session: ClientSession, real_emby_url: str, user_id: str, headers: Dict
+) -> List[str]:
+    """Fetch the logged-in user's played items and extract top genre preferences."""
+    url = f"{real_emby_url}/emby/Users/{user_id}/Items"
+    params = {
+        "IsPlayed": "true",
+        "SortBy": "DatePlayed",
+        "SortOrder": "Descending",
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie,Series",
+        "Fields": "Genres",
+        "Limit": "200",
+    }
+    genre_counter = Counter()
+    try:
+        async with session.get(url, params=params, headers=headers) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for item in data.get("Items", []):
+                    for genre in item.get("Genres", []):
+                        genre_counter[genre] += 1
+    except Exception as e:
+        logger.warning(f"Failed to fetch user play history for recommendations: {e}")
+    # Return genres sorted by frequency
+    return [g for g, _ in genre_counter.most_common(10)]
+
+
+def _weighted_random_select(items: List[Dict], preferred_genres: List[str], count: int) -> List[Dict]:
+    """Select items with preference weighting. Items matching user's genres get higher weight."""
+    if not items:
+        return []
+    if not preferred_genres:
+        return random_module.sample(items, min(count, len(items)))
+
+    preferred_set = set(g.lower() for g in preferred_genres)
+    weighted_items = []
+    for item in items:
+        item_genres = [g.lower() for g in item.get("Genres", [])]
+        # More matching genres = higher weight
+        match_count = sum(1 for g in item_genres if g in preferred_set)
+        weight = 1 + match_count * 2  # base weight 1, +2 per matching genre
+        weighted_items.append((item, weight))
+
+    # Weighted random sampling without replacement
+    selected = []
+    remaining = list(weighted_items)
+    for _ in range(min(count, len(remaining))):
+        if not remaining:
+            break
+        total_weight = sum(w for _, w in remaining)
+        r = random_module.uniform(0, total_weight)
+        cumulative = 0
+        for i, (item, weight) in enumerate(remaining):
+            cumulative += weight
+            if cumulative >= r:
+                selected.append(item)
+                remaining.pop(i)
+                break
+    return selected
+
+
+async def _handle_random_library(
+    request: Request, method: str, found_vlib: VirtualLibrary,
+    new_params: Dict, user_id: str, real_emby_url: str,
+    session: ClientSession, config: AppConfig,
+    client_start_index: str, client_limit: str
+) -> Response:
+    """
+    Handle 'random' type virtual library.
+    - Only fetches from configured source_libraries (required for random type)
+    - Uses user's play history for weighted genre-based recommendations
+    - Falls back to pure random if no play history
+    - Auto-fills to 30 items (15+15) from random pool if preference-based selection is insufficient
+    - Cached per user+vlib for 12 hours
+    """
+    cache_key = f"random:{user_id}:{found_vlib.id}"
+    cached = random_recommend_cache.get(cache_key)
+    if cached:
+        logger.info(f"Random library '{found_vlib.name}': serving cached result for user {user_id}")
+        all_items = cached
+    else:
+        logger.info(f"Random library '{found_vlib.name}': generating new recommendations for user {user_id}")
+        headers_to_forward = _build_headers_to_forward(request)
+        search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
+
+        # 1. Source libraries are required for random type; filter out ignored
+        ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+        source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
+        if source_libs and ignore_set:
+            source_libs = [lid for lid in source_libs if lid not in ignore_set]
+
+        if not source_libs:
+            logger.warning(f"Random library '{found_vlib.name}': no source libraries configured, returning empty.")
+            empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
+            return Response(content=json.dumps(empty).encode('utf-8'), status_code=200, media_type="application/json")
+
+        # 2. Fetch user's genre preferences from play history
+        preferred_genres = await _fetch_user_genre_preferences(
+            session, real_emby_url, user_id, headers_to_forward
+        )
+        has_preferences = len(preferred_genres) > 0
+        if has_preferences:
+            logger.info(f"User {user_id} preferred genres: {preferred_genres[:5]}")
+        else:
+            logger.info(f"User {user_id} has no play history, will use pure random selection.")
+
+        # 3. Fetch candidate items from source libraries (unplayed only)
+        fetch_params = {
+            "Recursive": "true",
+            "IsPlayed": "false",
+            "Fields": "Genres,ProviderIds,ProductionYear,CommunityRating,DateCreated,ImageTags",
+            "SortBy": "Random",
+            "SortOrder": "Ascending",
+        }
+        # Inherit auth token
+        token = new_params.get("X-Emby-Token")
+        if token:
+            fetch_params["X-Emby-Token"] = token
+
+        all_movies = []
+        all_series = []
+
+        for pid in source_libs:
+            for item_type, target_list in [("Movie", all_movies), ("Series", all_series)]:
+                p = fetch_params.copy()
+                p["ParentId"] = pid
+                p["IncludeItemTypes"] = item_type
+                p["Limit"] = "300"
+                try:
+                    async with session.get(search_url, params=p, headers=headers_to_forward) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            target_list.extend(data.get("Items", []))
+                except Exception as e:
+                    logger.warning(f"Random fetch failed for ParentId={pid}, type={item_type}: {e}")
+
+        # Deduplicate
+        seen = set()
+        for lst in [all_movies, all_series]:
+            deduped = []
+            for item in lst:
+                iid = item.get("Id")
+                if iid and iid not in seen:
+                    seen.add(iid)
+                    deduped.append(item)
+            lst.clear()
+            lst.extend(deduped)
+
+        logger.info(f"Random pool: {len(all_movies)} movies, {len(all_series)} series")
+
+        # 4. Selection logic
+        target_per_type = 15
+
+        if has_preferences:
+            # Weighted selection based on genre preferences
+            selected_movies = _weighted_random_select(all_movies, preferred_genres, target_per_type)
+            selected_series = _weighted_random_select(all_series, preferred_genres, target_per_type)
+        else:
+            # No play history: pure random
+            selected_movies = random_module.sample(all_movies, min(target_per_type, len(all_movies)))
+            selected_series = random_module.sample(all_series, min(target_per_type, len(all_series)))
+
+        # 5. Auto-fill if insufficient: pick random from remaining pool
+        if len(selected_movies) < target_per_type:
+            selected_ids = {item.get("Id") for item in selected_movies}
+            remaining_movies = [m for m in all_movies if m.get("Id") not in selected_ids]
+            fill_count = target_per_type - len(selected_movies)
+            selected_movies.extend(random_module.sample(remaining_movies, min(fill_count, len(remaining_movies))))
+
+        if len(selected_series) < target_per_type:
+            selected_ids = {item.get("Id") for item in selected_series}
+            remaining_series = [s for s in all_series if s.get("Id") not in selected_ids]
+            fill_count = target_per_type - len(selected_series)
+            selected_series.extend(random_module.sample(remaining_series, min(fill_count, len(remaining_series))))
+
+        # If one type is still short, fill from the other type's pool
+        total_selected = len(selected_movies) + len(selected_series)
+        if total_selected < 30:
+            all_selected_ids = {item.get("Id") for item in selected_movies + selected_series}
+            remaining_all = [i for i in all_movies + all_series if i.get("Id") not in all_selected_ids]
+            fill_count = 30 - total_selected
+            extra = random_module.sample(remaining_all, min(fill_count, len(remaining_all)))
+            selected_movies.extend(extra)  # just append to combined list
+
+        all_items = selected_movies + selected_series
+        random_module.shuffle(all_items)
+
+        logger.info(f"Random library '{found_vlib.name}': selected {len(selected_movies)} movies + {len(selected_series)} series for user {user_id}")
+
+        # Cache the result
+        random_recommend_cache[cache_key] = all_items
+
+        if all_items:
+            vlib_items_cache[found_vlib.id] = all_items
+
+    # Paginate
+    total = len(all_items)
+    start_idx = int(client_start_index)
+    limit_count = int(client_limit)
+    paginated = all_items[start_idx : start_idx + limit_count]
+
+    final_data = {"Items": paginated, "TotalRecordCount": total, "StartIndex": start_idx}
+    return Response(content=json.dumps(final_data).encode('utf-8'), status_code=200, media_type="application/json")
+
+
 async def handle_virtual_library_items(
     request: Request,
     full_path: str,
@@ -388,6 +596,13 @@ async def handle_virtual_library_items(
 
         final_response = {"Items": paginated_items, "TotalRecordCount": len(final_items)}
         return Response(content=json.dumps(final_response).encode('utf-8'), media_type="application/json")
+
+    # --- Random type: delegate to dedicated handler ---
+    if found_vlib.resource_type == "random":
+        return await _handle_random_library(
+            request, method, found_vlib, new_params, user_id,
+            real_emby_url, session, config, client_start_index, client_limit
+        )
 
     # --- Source library scoping: if configured, use multi-library merge branch ---
     # Also handles ignore_libraries: filter out ignored libs from source_libraries,

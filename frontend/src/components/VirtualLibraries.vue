@@ -86,7 +86,8 @@ const resourceTypeMap = {
     genre: '类型',
     studio: '工作室',
     person: '人员',
-    rsshub: 'RSSHUB'
+    rsshub: 'RSSHUB',
+    random: '随机推荐'
 };
 
 const getResourceTypeLabel = (type) => resourceTypeMap[type] || '未知';
