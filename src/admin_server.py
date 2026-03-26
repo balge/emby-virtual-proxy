@@ -610,7 +610,7 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
         elif config.custom_zh_font_path:
             zh_font_path = config.custom_zh_font_path
         else:
-            zh_font_path = os.path.join(FONT_DIR, "ch.ttf")
+            zh_font_path = os.path.join(FONT_DIR, "multi_1_zh.ttf")
 
         # 确定英文字体
         if vlib and vlib.cover_custom_en_font_path:
@@ -618,12 +618,12 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
         elif config.custom_en_font_path:
             en_font_path = config.custom_en_font_path
         else:
-            en_font_path = os.path.join(FONT_DIR, "en.ttf")
+            en_font_path = os.path.join(FONT_DIR, "multi_1_en.ttf")
 
         kwargs = {
             "title": (title_zh, title_en),
             "font_path": (zh_font_path, en_font_path),
-            "font_size": (1, 1.2)
+            "font_size": (1, 1)
         }
 
         if style_name == 'style_multi_1':
