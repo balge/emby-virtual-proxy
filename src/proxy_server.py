@@ -119,6 +119,13 @@ async def websocket_proxy(client_ws: WebSocket, full_path: str):
 
 @proxy_app.api_route("/{full_path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def reverse_proxy(request: Request, full_path: str):
+    try:
+        return await _reverse_proxy_inner(request, full_path)
+    except Exception as e:
+        logger.error(f"FATAL proxy error for {request.method} /{full_path}: {e}", exc_info=True)
+        return Response(content=f"Proxy error: {e}", status_code=502)
+
+async def _reverse_proxy_inner(request: Request, full_path: str):
     config = config_manager.load_config()
     real_emby_url = config.emby_url.rstrip('/')
     
