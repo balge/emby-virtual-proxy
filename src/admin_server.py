@@ -1,7 +1,7 @@
 # src/admin_server.py
 
 import uvicorn
-from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile, Depends
+from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from pathlib import Path
@@ -77,24 +77,43 @@ def _cleanup_expired_tokens():
     for t in expired:
         del _valid_tokens[t]
 
-async def require_auth(request: Request):
-    """认证依赖项：如果启用了认证，则验证请求中的 token"""
-    if not AUTH_ENABLED:
-        return
-    auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
-        token = auth_header[7:]
-        if _verify_token(token):
-            return
-    raise HTTPException(status_code=401, detail="未授权，请先登录")
-
 scheduler = AsyncIOScheduler()
 
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
-# 公开路由（不需要认证）
+
+# 认证中间件：在请求到达路由之前统一拦截
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse as StarletteJSONResponse
+
+# 不需要认证的路径白名单
+AUTH_PUBLIC_PATHS = {"/api/login", "/api/auth-status", "/api/logout"}
+
+class AuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not AUTH_ENABLED:
+            return await call_next(request)
+        # 非 /api 开头的请求（静态文件、前端路由）不拦截
+        if not request.url.path.startswith("/api"):
+            return await call_next(request)
+        # 白名单路径不拦截
+        if request.url.path in AUTH_PUBLIC_PATHS:
+            return await call_next(request)
+        # 验证 token
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+            if _verify_token(token):
+                return await call_next(request)
+        return StarletteJSONResponse(
+            status_code=401,
+            content={"detail": "未授权，请先登录"}
+        )
+
+admin_app.add_middleware(AuthMiddleware)
+
+# 所有 API 路由（认证由中间件统一处理，不再需要 Depends）
 public_router = APIRouter(prefix="/api")
-# 受保护路由（需要认证）
-api_router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
+api_router = APIRouter(prefix="/api")
 
 # Define path for the library items DB, as it's not in db_manager
 RSS_LIBRARY_ITEMS_DB = Path("/app/config/rss_library_items.db")
