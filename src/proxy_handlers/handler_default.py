@@ -57,10 +57,14 @@ async def forward_request(
             resp.release()
             return Response(content=redirect_body, status_code=resp.status, headers=redirect_headers)
 
-        # Build response headers, preserving content-length for Range/streaming support
+        # Build response headers: remove hop-by-hop, content-encoding, and content-length.
+        # content-length is removed because aiohttp auto-decompresses gzip responses,
+        # making the original Content-Length incorrect. FastAPI will set it correctly.
+        # For streaming, content-length is also wrong since we use chunked transfer.
         resp_headers = {
             k: v for k, v in resp.headers.items()
-            if k.lower() not in HOP_BY_HOP and k.lower() != 'content-encoding'
+            if k.lower() not in HOP_BY_HOP
+            and k.lower() not in ('content-encoding', 'content-length')
         }
 
         # For small non-streaming responses (< 1MB with known length), read fully
