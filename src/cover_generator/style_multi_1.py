@@ -1081,7 +1081,7 @@ def create_style_multi_1(library_dir, title, font_path, font_size=(1,1), is_blur
                 result,
                 library_eng_name,
                 (124.68, 624.55),
-                en_font_path, "en.otf",
+                en_font_path, "en.ttf",
                 int(font_size),
                 line_spacing,
                 shadow=is_blur, 

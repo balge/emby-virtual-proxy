@@ -550,7 +550,8 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
 
         kwargs = {
             "title": (title_zh, title_en),
-            "font_path": (zh_font_path, en_font_path)
+            "font_path": (zh_font_path, en_font_path),
+            "font_size": (1, 1.2)
         }
 
         if style_name == 'style_multi_1':
