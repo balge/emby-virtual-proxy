@@ -215,7 +215,7 @@ const getResourceNameById = (type, id, row) => {
 
 .lib-card-tags {
     display: flex;
-    gap: 6px;
+    gap: 3px;
     margin-bottom: 12px;
     flex-wrap: wrap;
 }
@@ -223,7 +223,7 @@ const getResourceNameById = (type, id, row) => {
 .lib-card-actions {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 3px;
 }
 
 /* Responsive */
@@ -236,23 +236,25 @@ const getResourceNameById = (type, id, row) => {
         display: block;
     }
 
-    .header-actions {
-        width: 100%;
-    }
-
-    .header-actions .el-button {
-        flex: 1;
-        min-width: 0;
-    }
-}
-
-@media (max-width: 480px) {
-    .header-actions {
+    .card-header {
         flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .header-actions {
+        width: 100%;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
     }
 
     .header-actions .el-button {
-        width: 100%;
+        margin-left: 0 !important;
+    }
+
+    /* 让"添加虚拟库"独占一行突出显示 */
+    .header-actions .el-button:last-child {
+        grid-column: 1 / -1;
     }
 }
 </style>
