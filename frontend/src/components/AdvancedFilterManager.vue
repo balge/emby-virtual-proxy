@@ -54,6 +54,7 @@
                 <el-option label="发行年份 (ProductionYear)" value="ProductionYear"></el-option>
                 <el-option label="首播日期 (PremiereDate)" value="PremiereDate"></el-option>
                 <el-option label="添加日期 (DateCreated)" value="DateCreated"></el-option>
+                <el-option label="最后入库时间 (DateLastMediaAdded)" value="DateLastMediaAdded"></el-option>
                 <el-option label="类型 (Genres)" value="Genres"></el-option>
                 <el-option label="标签 (Tags)" value="Tags"></el-option>
                 <el-option label="工作室 (Studios)" value="Studios"></el-option>
@@ -84,7 +85,7 @@
             </el-select>
             <!-- 根据字段类型动态显示输入控件 -->
             <template v-if="!['is_empty', 'is_not_empty'].includes(rule.operator)">
-              <div v-if="['PremiereDate', 'DateCreated'].includes(rule.field)" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-grow: 1;">
+              <div v-if="['PremiereDate', 'DateCreated', 'DateLastMediaAdded'].includes(rule.field)" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-grow: 1;">
                 <el-date-picker
                   v-model="rule.value"
                   type="date"

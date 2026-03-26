@@ -14,6 +14,40 @@ from .handler_rss import RssHandler
 from proxy_cache import vlib_items_cache
 logger = logging.getLogger(__name__)
 
+# Country code to possible name variants for ProductionLocations matching
+COUNTRY_CODE_MAP = {
+    "AR": ["ar", "argentina"], "AU": ["au", "australia"],
+    "BE": ["be", "belgium"], "BR": ["br", "brazil"],
+    "CA": ["ca", "canada"], "CH": ["ch", "switzerland"],
+    "CL": ["cl", "chile"], "CO": ["co", "colombia"],
+    "CZ": ["cz", "czech", "czech republic", "czechia"],
+    "DE": ["de", "germany", "deutschland"],
+    "DK": ["dk", "denmark"], "EG": ["eg", "egypt"],
+    "ES": ["es", "spain"], "FR": ["fr", "france"],
+    "GR": ["gr", "greece"], "HK": ["hk", "hong kong"],
+    "IL": ["il", "israel"], "IN": ["in", "india"],
+    "IQ": ["iq", "iraq"], "IR": ["ir", "iran"],
+    "IT": ["it", "italy"], "JP": ["jp", "japan"],
+    "MM": ["mm", "myanmar", "burma"],
+    "MO": ["mo", "macao", "macau"],
+    "MX": ["mx", "mexico"], "MY": ["my", "malaysia"],
+    "NL": ["nl", "netherlands", "holland"],
+    "NO": ["no", "norway"], "PH": ["ph", "philippines"],
+    "PK": ["pk", "pakistan"], "PL": ["pl", "poland"],
+    "RU": ["ru", "russia", "russian federation"],
+    "SE": ["se", "sweden"], "SG": ["sg", "singapore"],
+    "TH": ["th", "thailand"], "TR": ["tr", "turkey", "turkiye"],
+    "US": ["us", "usa", "united states", "united states of america"],
+    "VN": ["vn", "vietnam", "viet nam"],
+    "CN": ["cn", "china", "people's republic of china"],
+    "GB": ["gb", "uk", "united kingdom", "great britain"],
+    "TW": ["tw", "taiwan"], "NZ": ["nz", "new zealand"],
+    "SA": ["sa", "saudi arabia"], "LA": ["la", "laos"],
+    "KP": ["kp", "north korea", "democratic people's republic of korea"],
+    "KR": ["kr", "south korea", "korea, republic of", "korea"],
+    "PT": ["pt", "portugal"], "MN": ["mn", "mongolia"],
+}
+
 # --- Post-filter logic ---
 def _get_nested_value(item: Dict[str, Any], field_path: str) -> Any:
     keys = field_path.split('.')
@@ -23,17 +57,41 @@ def _get_nested_value(item: Dict[str, Any], field_path: str) -> Any:
         else: return None
     return value
 
-def _check_condition(item_value: Any, operator: str, rule_value: str) -> bool:
+def _check_condition(item_value: Any, operator: str, rule_value: str, field: str = "") -> bool:
     if operator not in ["is_empty", "is_not_empty"]:
         if item_value is None: return False
         if isinstance(item_value, list):
-            # For list values, check if any element contains the rule_value (case-insensitive)
+            # For ProductionLocations, expand country code to match multiple name variants
+            if field == "ProductionLocations" and rule_value:
+                code_upper = rule_value.upper()
+                variants = COUNTRY_CODE_MAP.get(code_upper, [rule_value.lower()])
+                if operator == "contains":
+                    return any(
+                        any(v in str(el).lower() for v in variants)
+                        for el in item_value
+                    )
+                if operator == "not_contains":
+                    return not any(
+                        any(v in str(el).lower() for v in variants)
+                        for el in item_value
+                    )
+                if operator == "equals":
+                    return any(
+                        any(str(el).lower() == v for v in variants)
+                        for el in item_value
+                    )
+                if operator == "not_equals":
+                    return not any(
+                        any(str(el).lower() == v for v in variants)
+                        for el in item_value
+                    )
+                return False
+            # Generic list matching (case-insensitive substring)
             rule_lower = str(rule_value).lower()
             if operator == "contains":
                 return any(rule_lower in str(el).lower() for el in item_value)
             if operator == "not_contains":
                 return not any(rule_lower in str(el).lower() for el in item_value)
-            # For equals on list, check exact element membership
             if operator == "equals":
                 return any(str(el).lower() == rule_lower for el in item_value)
             if operator == "not_equals":
@@ -43,7 +101,15 @@ def _check_condition(item_value: Any, operator: str, rule_value: str) -> bool:
             try:
                 if operator == "greater_than": return float(item_value) > float(rule_value)
                 if operator == "less_than": return float(item_value) < float(rule_value)
-            except (ValueError, TypeError): return False
+            except (ValueError, TypeError):
+                # Fallback: string comparison works for ISO datetime strings
+                try:
+                    iv = str(item_value)[:19]  # Trim to "YYYY-MM-DDTHH:MM:SS"
+                    rv = str(rule_value)[:19]
+                    if operator == "greater_than": return iv > rv
+                    if operator == "less_than": return iv < rv
+                except Exception:
+                    return False
         item_value_str = str(item_value).lower()
         rule_value_str = str(rule_value).lower()
         if operator == "equals": return item_value_str == rule_value_str
@@ -59,7 +125,7 @@ def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict
     logger.info(f"Applying {len(post_filter_rules)} post-filter rules on {len(items)} items.")
     filtered_items = []
     for item in items:
-        if all(_check_condition(_get_nested_value(item, rule.field), rule.operator, rule.value) for rule in post_filter_rules):
+        if all(_check_condition(_get_nested_value(item, rule.field), rule.operator, rule.value, rule.field) for rule in post_filter_rules):
             filtered_items.append(item)
     return filtered_items
 
@@ -265,7 +331,7 @@ async def handle_virtual_library_items(
     for key in safe_params_to_inherit:
         if key in params: new_params[key] = params[key]
 
-    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container", "ProductionLocations"]
+    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container", "ProductionLocations", "DateLastMediaAdded"]
     if "Fields" in new_params:
         existing_fields = set(new_params["Fields"].split(','))
         missing_fields = [f for f in required_fields if f not in existing_fields]

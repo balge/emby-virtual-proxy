@@ -68,13 +68,16 @@ def translate_rules(rules: List[AdvancedFilterRule]) -> Tuple[Dict[str, Any], Li
         value = rule.value
         translated = False
 
-        # 新增：处理相对日期
+        # Handle relative dates
         if rule.relative_days and field in ["PremiereDate", "DateCreated"]:
-            # 计算目标日期
             target_date = datetime.utcnow() - timedelta(days=rule.relative_days)
-            # 将其格式化为字符串，并赋值给 value 变量，以便后续逻辑复用
             value = target_date.strftime('%Y-%m-%d')
-            # 确保操作符是 greater_than
+            operator = "greater_than"
+
+        # DateLastMediaAdded: always post-filter, but compute relative date value here
+        if rule.relative_days and field == "DateLastMediaAdded":
+            target_date = datetime.utcnow() - timedelta(days=rule.relative_days)
+            value = target_date.strftime('%Y-%m-%dT%H:%M:%S')
             operator = "greater_than"
 
         if operator == "is_not_empty":
@@ -132,8 +135,17 @@ def translate_rules(rules: List[AdvancedFilterRule]) -> Tuple[Dict[str, Any], Li
                 translated = True
 
         if not translated:
-            logger.info(f"高级筛选规则无法翻译，将进行后筛选: {rule.field} {rule.operator} {rule.value}")
-            post_filter_rules.append(rule)
+            # For rules with computed values (e.g. DateLastMediaAdded with relative_days),
+            # create a modified rule copy with the resolved value and operator
+            if value != rule.value or operator != rule.operator:
+                modified_rule = AdvancedFilterRule(
+                    field=rule.field, operator=operator,
+                    value=value, relative_days=rule.relative_days
+                )
+                post_filter_rules.append(modified_rule)
+            else:
+                post_filter_rules.append(rule)
+            logger.info(f"Post-filter rule: {rule.field} {operator} {value}")
         else:
             logger.info(f"高级筛选规则已成功翻译为原生参数: {rule.field} -> {emby_native_params}")
 
