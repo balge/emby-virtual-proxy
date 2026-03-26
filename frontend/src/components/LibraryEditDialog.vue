@@ -221,7 +221,8 @@ const store = useMainStore();
 const resourceLoading = ref(false);
 
 const realLibrariesList = computed(() => {
-  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
+  const ignored = new Set(store.config.ignore_libraries || []);
+  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real' && !ignored.has(lib.id));
 });
 const availableResources = ref([]);
 const currentQuery = ref('');

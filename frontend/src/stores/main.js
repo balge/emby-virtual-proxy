@@ -10,6 +10,7 @@ export const useMainStore = defineStore('main', {
         emby_url: '', 
         emby_api_key: '', 
         hide: [], 
+        ignore_libraries: [],
         display_order: [], 
         advanced_filters: [],
         library: [] // 确保 config 对象中有 library 数组

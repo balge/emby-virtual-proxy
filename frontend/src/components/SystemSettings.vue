@@ -9,10 +9,9 @@
       </div>
     </template>
     <el-form label-position="top" label-width="100px" v-if="store.config">
-      
-      <!-- 【【【 在这里恢复了 Emby 服务器地址和 API 密钥的设置 】】】 -->
+
       <el-form-item label="Emby 服务器地址">
-        <el-input 
+        <el-input
           v-model="store.config.emby_url"
           placeholder="例如: http://192.168.1.10:8096"
         />
@@ -20,10 +19,10 @@
           您的 Emby 或 Jellyfin 服务器的完整访问地址。
         </div>
       </el-form-item>
-      
+
       <el-form-item label="Emby API 密钥">
-        <el-input 
-          v-model="store.config.emby_api_key" 
+        <el-input
+          v-model="store.config.emby_api_key"
           type="password"
           show-password
           placeholder="请输入您的 API Key"
@@ -34,8 +33,8 @@
       </el-form-item>
 
       <el-form-item label="TMDB API 密钥">
-        <el-input 
-          v-model="store.config.tmdb_api_key" 
+        <el-input
+          v-model="store.config.tmdb_api_key"
           type="password"
           show-password
           placeholder="请输入您的 TMDB API Key"
@@ -46,7 +45,7 @@
       </el-form-item>
 
       <el-form-item label="TMDB HTTP 代理">
-        <el-input 
+        <el-input
           v-model="store.config.tmdb_proxy"
           placeholder="例如: http://127.0.0.1:7890"
         />
@@ -66,7 +65,6 @@
 
       <el-divider />
 
-      <!-- 【【【 新增：缓存开关 】】】 -->
       <el-form-item label="启用内存缓存">
         <el-switch v-model="store.config.enable_cache" />
         <div class="form-item-description">
@@ -101,12 +99,12 @@
           <el-option label="样式三 (单图)" value="style_single_2"></el-option>
         </el-select>
         <div class="form-item-description">
-          此处选择的样式，将作为触发封面“自动生成”时的默认样式。您仍然可以在编辑虚拟库时手动选择其他样式生成。
+          此处选择的样式，将作为触发封面"自动生成"时的默认样式。您仍然可以在编辑虚拟库时手动选择其他样式生成。
         </div>
       </el-form-item>
 
       <el-form-item label="自定义中文字体路径 (可选)">
-        <el-input 
+        <el-input
           v-model="store.config.custom_zh_font_path"
           placeholder="请输入容器内的绝对路径, e.g., /config/fonts/myfont.ttf"
         />
@@ -116,7 +114,7 @@
       </el-form-item>
 
       <el-form-item label="全局自定义图片目录 (可选)">
-        <el-input 
+        <el-input
           v-model="store.config.custom_image_path"
           placeholder="请输入容器内的绝对路径, e.g., /config/images/custom"
         />
@@ -126,7 +124,7 @@
       </el-form-item>
 
       <el-form-item label="自定义英文字体路径 (可选)">
-        <el-input 
+        <el-input
           v-model="store.config.custom_en_font_path"
           placeholder="请输入容器内的绝对路径, e.g., /config/fonts/myfont.otf"
         />
@@ -150,7 +148,7 @@
             </template>
         </el-popconfirm>
         <div class="form-item-description">
-          此操作将删除 `config/images` 目录下的所有图片和临时文件，并重置所有虚拟库的封面状态。此操作不可逆。
+          此操作将删除 config/images 目录下的所有图片和临时文件，并重置所有虚拟库的封面状态。此操作不可逆。
         </div>
       </el-form-item>
 
@@ -174,7 +172,29 @@
           />
         </el-select>
         <div class="form-item-description">
-          在这里选择或输入的类型将被默认隐藏。您可以在“调整主页布局”中覆盖此设置。
+          在这里选择或输入的类型将被默认隐藏。您可以在"调整主页布局"中覆盖此设置。
+        </div>
+      </el-form-item>
+
+      <el-form-item label="忽略媒体库">
+        <el-select
+          v-model="store.config.ignore_libraries"
+          multiple
+          filterable
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="选择要忽略的真实媒体库"
+          style="width: 100%;"
+        >
+          <el-option
+            v-for="lib in realLibraries"
+            :key="lib.id"
+            :label="lib.name"
+            :value="lib.id"
+          />
+        </el-select>
+        <div class="form-item-description">
+          被忽略的媒体库不会出现在虚拟库的「全库」查询范围和「源库范围」选择列表中。适用于排除音乐库、有声书库等不需要参与虚拟库的真实库。
         </div>
       </el-form-item>
 
@@ -187,6 +207,10 @@ import { ref, computed } from 'vue';
 import { useMainStore } from '@/stores/main';
 
 const store = useMainStore();
+
+const realLibraries = computed(() => {
+  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
+});
 
 const collectionTypes = ref([
   { value: 'movies', label: '电影 (movies)' },

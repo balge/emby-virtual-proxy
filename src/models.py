@@ -49,6 +49,10 @@ class AppConfig(BaseModel):
     emby_server_id: Optional[str] = Field(default=None) # 新增：用于TMDB缓存占位符的备用服务器ID
     log_level: Literal["debug", "info", "warn", "error"] = Field(default="info")
     display_order: List[str] = Field(default_factory=list)
+    # Global ignore libraries list
+    ignore_libraries: List[str] = Field(default_factory=list)
+
+    # Global hide collection types
     hide: List[str] = Field(default_factory=list)
     
     # 使用别名 'library' 来兼容旧的 config.json

@@ -299,9 +299,29 @@ async def handle_virtual_library_items(
         return Response(content=json.dumps(final_response).encode('utf-8'), media_type="application/json")
 
     # --- Source library scoping: if configured, use multi-library merge branch ---
-    if found_vlib.source_libraries and found_vlib.resource_type != "rsshub":
+    # Also handles ignore_libraries: filter out ignored libs from source_libraries,
+    # and for "all" type, auto-scope to all real libs minus ignored ones.
+    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+
+    effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
+    if effective_source_libs and ignore_set:
+        effective_source_libs = [lid for lid in effective_source_libs if lid not in ignore_set]
+
+    if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
+        # "all" type with ignored libraries: we need to fetch the real library list
+        # and exclude ignored ones, then use scoped request
+        from admin_server import get_real_libraries_hybrid_mode
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")
+
+    if effective_source_libs and found_vlib.resource_type != "rsshub":
+        # Temporarily set source_libraries on the vlib for the scoped handler
+        found_vlib_copy = found_vlib.model_copy(update={"source_libraries": effective_source_libs})
         return await _handle_source_library_scoped_request(
-            request, method, found_vlib, new_params, user_id,
+            request, method, found_vlib_copy, new_params, user_id,
             real_emby_url, session, config, client_start_index, client_limit
         )
 

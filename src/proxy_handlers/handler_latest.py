@@ -149,15 +149,29 @@ async def handle_home_latest_items(
     target_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
 
     # --- Source library scoping for latest items ---
-    if found_vlib.source_libraries and found_vlib.resource_type != "rsshub":
-        logger.info(f"HOME_LATEST_HANDLER: Source library scoping for '{found_vlib.name}': {found_vlib.source_libraries}")
+    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+
+    effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
+    if effective_source_libs and ignore_set:
+        effective_source_libs = [lid for lid in effective_source_libs if lid not in ignore_set]
+
+    if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
+        from admin_server import get_real_libraries_hybrid_mode
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")
+
+    if effective_source_libs and found_vlib.resource_type != "rsshub":
+        logger.info(f"HOME_LATEST_HANDLER: Source library scoping for '{found_vlib.name}': {effective_source_libs}")
         # Remove ParentId since we'll set it per source library
         new_params.pop("ParentId", None)
         client_limit_val = int(params.get("Limit", 20))
 
         tasks = [
             _fetch_items_for_parent_id(session, "GET", target_url, new_params, pid, headers_to_forward)
-            for pid in found_vlib.source_libraries
+            for pid in effective_source_libs
         ]
         results = await asyncio.gather(*tasks)
         all_items = []
