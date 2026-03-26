@@ -20,7 +20,7 @@
           <el-option label="工作室 (Studio)" value="studio"></el-option>
           <el-option label="人员 (Person)" value="person"></el-option>
           <el-option label="RSSHUB" value="rsshub"></el-option>
-          <el-option label="随机推荐 (Random)" value="random"></el-option>
+          <el-option label="偏好推荐 (Random)" value="random"></el-option>
         </el-select>
       </el-form-item>
       
