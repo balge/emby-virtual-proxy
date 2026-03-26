@@ -6,7 +6,6 @@ from aiohttp import ClientSession, ClientError
 
 logger = logging.getLogger(__name__)
 
-# Headers that should not be forwarded between proxy hops
 HOP_BY_HOP = frozenset({
     'transfer-encoding', 'connection', 'keep-alive',
     'proxy-authenticate', 'proxy-authorization', 'te',
@@ -22,16 +21,17 @@ async def forward_request(
 ) -> Response:
     target_url = f"{real_emby_url}/{full_path}"
 
-    # Build request headers: remove host and hop-by-hop
     req_headers = {
         k: v for k, v in request.headers.items()
         if k.lower() not in HOP_BY_HOP and k.lower() != 'host'
     }
 
-    # Only forward body for methods that have one
     body = None
     if method in ("POST", "PUT", "PATCH"):
         body = await request.body()
+        logger.debug(f"DEFAULT_PROXY: {method} {full_path} with body size={len(body)}")
+    else:
+        logger.debug(f"DEFAULT_PROXY: {method} {full_path}")
 
     try:
         resp = await session.request(
@@ -44,8 +44,24 @@ async def forward_request(
             auto_decompress=False,
         )
     except ClientError as e:
-        logger.error(f"Proxy connection error to {target_url}: {e}")
+        logger.error(f"DEFAULT_PROXY: Connection error to {target_url}: {e}")
         return Response(content=f"Proxy upstream error: {e}", status_code=502)
+    except Exception as e:
+        logger.error(f"DEFAULT_PROXY: Unexpected connection error to {target_url}: {e}", exc_info=True)
+        return Response(content=f"Proxy upstream error: {e}", status_code=502)
+
+    upstream_status = resp.status
+    upstream_ct = resp.headers.get('Content-Type', 'N/A')
+    upstream_cl = resp.headers.get('Content-Length', 'N/A')
+    upstream_ce = resp.headers.get('Content-Encoding', 'none')
+    upstream_loc = resp.headers.get('Location', '')
+
+    logger.info(
+        f"DEFAULT_PROXY: Upstream response for {method} {full_path}: "
+        f"status={upstream_status}, content-type={upstream_ct}, "
+        f"content-length={upstream_cl}, content-encoding={upstream_ce}"
+        f"{f', location={upstream_loc}' if upstream_loc else ''}"
+    )
 
     try:
         # Redirect: return immediately with Location header preserved
@@ -56,34 +72,53 @@ async def forward_request(
                 if k.lower() not in HOP_BY_HOP
             }
             resp.release()
+            logger.info(
+                f"DEFAULT_PROXY: Returning redirect {resp.status} for {full_path}, "
+                f"Location={upstream_loc}, body_size={len(redirect_body)}"
+            )
             return Response(content=redirect_body, status_code=resp.status, headers=redirect_headers)
 
-        # Build response headers: remove only hop-by-hop headers.
-        # Keep content-encoding and content-length intact since we disabled auto_decompress.
+        # Build response headers
         resp_headers = {
             k: v for k, v in resp.headers.items()
             if k.lower() not in HOP_BY_HOP
         }
 
-        # For small non-streaming responses (< 1MB with known length), read fully
+        # Small non-streaming responses
         content_length = resp.headers.get('Content-Length')
         content_type = resp.headers.get('Content-Type', '')
-        if content_length and int(content_length) < 1_048_576 and 'video' not in content_type and 'audio' not in content_type:
+
+        is_media = 'video' in content_type or 'audio' in content_type
+        is_small = content_length and int(content_length) < 1_048_576
+
+        if is_small and not is_media:
             full_body = await resp.read()
             resp.release()
+            logger.debug(
+                f"DEFAULT_PROXY: Small response for {full_path}: "
+                f"declared_cl={content_length}, actual_body={len(full_body)}"
+            )
             return Response(content=full_body, status_code=resp.status, headers=resp_headers)
 
-        # Stream large responses (video, audio, large files)
+        # Stream large / media responses
+        logger.info(
+            f"DEFAULT_PROXY: Streaming response for {full_path}: "
+            f"content-type={content_type}, content-length={upstream_cl}"
+        )
+
         async def stream_generator():
+            bytes_sent = 0
             try:
                 async for chunk in resp.content.iter_chunked(65536):
+                    bytes_sent += len(chunk)
                     yield chunk
             except ClientError as e:
-                logger.error(f"Stream error for {full_path}: {e}")
+                logger.error(f"DEFAULT_PROXY: Stream ClientError for {full_path} after {bytes_sent} bytes: {e}")
             except Exception as e:
-                logger.error(f"Unexpected stream error for {full_path}: {e}")
+                logger.error(f"DEFAULT_PROXY: Stream error for {full_path} after {bytes_sent} bytes: {e}", exc_info=True)
             finally:
                 resp.release()
+                logger.debug(f"DEFAULT_PROXY: Stream finished for {full_path}, total {bytes_sent} bytes sent.")
 
         return StreamingResponse(
             content=stream_generator(),
@@ -93,7 +128,7 @@ async def forward_request(
         )
 
     except Exception as e:
-        logger.error(f"Proxy response error for {target_url}: {e}", exc_info=True)
+        logger.error(f"DEFAULT_PROXY: Response processing error for {target_url}: {e}", exc_info=True)
         try:
             resp.release()
         except Exception:
