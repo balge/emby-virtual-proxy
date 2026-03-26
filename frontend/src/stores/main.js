@@ -253,6 +253,30 @@ export const useMainStore = defineStore('main', {
             this._handleApiError(error, '刷新 RSS 库失败');
         }
     },
+    async refreshLibraryCover(id) {
+        try {
+            await api.refreshLibraryCover(id);
+            ElMessage.success('封面刷新已启动，将在后台处理。');
+        } catch (error) {
+            this._handleApiError(error, '刷新封面失败');
+        }
+    },
+    async refreshLibraryData(id) {
+        try {
+            await api.refreshLibraryData(id);
+            ElMessage.success('数据和封面刷新已启动，将在后台处理。');
+        } catch (error) {
+            this._handleApiError(error, '刷新数据失败');
+        }
+    },
+    async refreshAllCovers() {
+        try {
+            await api.refreshAllCovers();
+            ElMessage.success('所有虚拟库封面刷新已启动，将在后台处理。');
+        } catch (error) {
+            this._handleApiError(error, '刷新所有封面失败');
+        }
+    },
     async restartProxyServer() {
         this.saving = true;
         try {

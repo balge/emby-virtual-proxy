@@ -17,6 +17,8 @@ export default {
     updateLibrary: (id, library) => apiClient.put(`/libraries/${id}`, library),
     deleteLibrary: (id) => apiClient.delete(`/libraries/${id}`),
     refreshRssLibrary: (id) => apiClient.post(`/libraries/${id}/refresh`),
+    refreshLibraryCover: (id) => apiClient.post(`/libraries/${id}/refresh-cover`),
+    refreshLibraryData: (id) => apiClient.post(`/libraries/${id}/refresh-data`),
 
     // Display Management
     getAllLibraries: () => apiClient.get('/all-libraries'),
@@ -40,4 +42,5 @@ export default {
         temp_image_paths: tempImagePaths
     }),
     clearCovers: () => apiClient.post('/covers/clear'),
+    refreshAllCovers: () => apiClient.post('/covers/refresh-all'),
 };

@@ -353,6 +353,87 @@ async def refresh_rss_library(library_id: str, request: Request):
     
     return {"message": "RSS library refresh process has been started."}
 
+
+async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
+    """Regenerate cover for a single virtual library using its saved settings."""
+    config = config_manager.load_config()
+    style_name = config.default_cover_style
+    title_zh = vlib.cover_title_zh or vlib.name
+    title_en = vlib.cover_title_en or ""
+    try:
+        image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
+        if image_tag:
+            current_config = config_manager.load_config()
+            for v in current_config.virtual_libraries:
+                if v.id == vlib.id:
+                    v.image_tag = image_tag
+                    break
+            config_manager.save_config(current_config)
+            logger.info(f"Cover regenerated for '{vlib.name}', tag={image_tag}")
+        else:
+            logger.warning(f"Cover generation returned None for '{vlib.name}'")
+    except Exception as e:
+        logger.error(f"Failed to regenerate cover for '{vlib.name}': {e}", exc_info=True)
+
+
+@api_router.post("/libraries/{library_id}/refresh-cover", status_code=202, tags=["Libraries"])
+async def refresh_library_cover(library_id: str):
+    """Regenerate cover for a single virtual library."""
+    config = config_manager.load_config()
+    vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    if not vlib:
+        raise HTTPException(status_code=404, detail="Virtual library not found")
+    asyncio.create_task(_regenerate_cover_for_vlib(vlib))
+    return {"message": f"Cover refresh started for '{vlib.name}'."}
+
+
+@api_router.post("/libraries/{library_id}/refresh-data", status_code=202, tags=["Libraries"])
+async def refresh_library_data(library_id: str):
+    """Refresh data for a single virtual library, then regenerate its cover."""
+    config = config_manager.load_config()
+    vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    if not vlib:
+        raise HTTPException(status_code=404, detail="Virtual library not found")
+
+    async def _refresh_data_and_cover():
+        # 1. Clear relevant caches
+        from proxy_cache import random_recommend_cache, vlib_items_cache, api_cache
+        # Clear api_cache entries related to this library
+        keys_to_remove = [k for k in api_cache if library_id in str(k)]
+        for k in keys_to_remove:
+            api_cache.pop(k, None)
+        vlib_items_cache.pop(library_id, None)
+        # Clear random cache for all users for this vlib
+        random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
+        for k in random_keys:
+            random_recommend_cache.pop(k, None)
+
+        # 2. Type-specific data refresh
+        if vlib.resource_type == "rsshub":
+            await refresh_rss_library_internal(vlib)
+
+        # 3. Regenerate cover
+        await _regenerate_cover_for_vlib(vlib)
+
+    asyncio.create_task(_refresh_data_and_cover())
+    return {"message": f"Data and cover refresh started for '{vlib.name}'."}
+
+
+@api_router.post("/covers/refresh-all", status_code=202, tags=["Cover Generator"])
+async def refresh_all_covers():
+    """Regenerate covers for all virtual libraries."""
+    config = config_manager.load_config()
+    vlibs = config.virtual_libraries
+
+    async def _refresh_all():
+        for vlib in vlibs:
+            await _regenerate_cover_for_vlib(vlib)
+        logger.info(f"All {len(vlibs)} virtual library covers have been refreshed.")
+
+    asyncio.create_task(_refresh_all())
+    return {"message": f"Cover refresh started for {len(vlibs)} virtual libraries."}
+
+
 @api_router.post("/generate-cover", tags=["Cover Generator"])
 async def generate_cover(body: CoverRequest):
     try:
