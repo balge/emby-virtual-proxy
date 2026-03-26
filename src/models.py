@@ -37,7 +37,7 @@ class VirtualLibrary(BaseModel):
     advanced_filter_id: Optional[str] = None
     merge_by_tmdb_id: bool = Field(default=False)
     order: int = 0
-    source_library: Optional[str] = None
+    source_libraries: List[str] = Field(default_factory=list) # 源库范围限制，空列表表示不限制
     conditions: Optional[list] = None
     cover_custom_zh_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义中文字体
     cover_custom_en_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义英文字体

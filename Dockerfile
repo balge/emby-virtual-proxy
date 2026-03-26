@@ -2,8 +2,9 @@
 FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json .
-# 使用 npm 淘宝镜像/阿里云镜像
-RUN npm config set registry https://registry.npmmirror.com && npm install
+# 使用 npm 淘宝镜像/阿里云镜像（本地构建加速，CI 中可通过 ARG 跳过）
+ARG USE_CN_MIRROR=true
+RUN if [ "$USE_CN_MIRROR" = "true" ]; then npm config set registry https://registry.npmmirror.com; fi && npm install
 COPY frontend/ .
 RUN npm run build
 RUN if [ ! -d "dist" ] || [ -z "$(ls -A dist)" ]; then echo "Frontend build failed: dist directory is empty or does not exist." && exit 1; fi
@@ -23,10 +24,17 @@ ENV PYTHONPATH=/app/src
 
 # 将依赖文件复制到工作目录根部并安装
 COPY src/requirements.txt .
-# 使用 debian 清华源加速 apt-get，并使用阿里云 pip 镜像加速依赖安装
-RUN sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources && \
+# 使用 debian 清华源和阿里云 pip 镜像加速（本地构建加速，CI 中可通过 ARG 跳过）
+ARG USE_CN_MIRROR=true
+RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
+      sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
+    fi && \
     apt-get update && apt-get install -y supervisor && \
-    pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt
+    if [ "$USE_CN_MIRROR" = "true" ]; then \
+      pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt; \
+    else \
+      pip install --no-cache-dir -r requirements.txt; \
+    fi
 
 # 关键改动：将编译好的前端文件复制到 /app/static，与 src 目录同级
 COPY --from=frontend-builder /app/frontend/dist /app/static

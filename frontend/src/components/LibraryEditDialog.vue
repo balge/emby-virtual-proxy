@@ -110,6 +110,29 @@
           <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
         </el-tooltip>
       </el-form-item>
+
+      <el-form-item label="源库范围" v-if="store.currentLibrary.resource_type !== 'rsshub'">
+        <el-select
+          v-model="store.currentLibrary.source_libraries"
+          multiple
+          filterable
+          collapse-tags
+          collapse-tags-tooltip
+          placeholder="不选则搜索全部真实库"
+          style="width: 100%;"
+          clearable
+        >
+          <el-option
+            v-for="lib in realLibrariesList"
+            :key="lib.id"
+            :label="lib.name"
+            :value="lib.id"
+          />
+        </el-select>
+        <el-tooltip content="限定虚拟库的数据来源。例如选中「外语电影」和「电影合集」两个真实库，则虚拟库仅包含这两个库中的影片。留空表示搜索所有真实库。" placement="top">
+          <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
+        </el-tooltip>
+      </el-form-item>
       
       <el-divider>封面生成</el-divider>
 
@@ -196,6 +219,10 @@ import api from '@/api';
 
 const store = useMainStore();
 const resourceLoading = ref(false);
+
+const realLibrariesList = computed(() => {
+  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
+});
 const availableResources = ref([]);
 const currentQuery = ref('');
 const page = ref(1);

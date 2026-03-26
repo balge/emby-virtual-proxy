@@ -41,6 +41,12 @@
                      <el-tag v-else type="info" size="small">未开启</el-tag>
                 </template>
             </el-table-column>
+            <el-table-column label="源库限定" width="100" align="center">
+                <template #default="scope">
+                     <el-tag v-if="scope.row.source_libraries && scope.row.source_libraries.length" type="warning" size="small">{{ scope.row.source_libraries.length }}个库</el-tag>
+                     <el-tag v-else type="info" size="small">全部</el-tag>
+                </template>
+            </el-table-column>
             <el-table-column label="操作" width="220" align="right">
                 <template #default="scope">
                     <div class="action-buttons">

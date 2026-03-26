@@ -18,3 +18,5 @@ __pycache__/
 *.pyc
 
 AI_DOCUMENTATION.md
+
+frontend/node_modules

@@ -299,7 +299,8 @@ export const useMainStore = defineStore('main', {
             merge_by_tmdb_id: false,
             image_tag: null,
             fallback_tmdb_id: null,
-            fallback_tmdb_type: null
+            fallback_tmdb_type: null,
+            source_libraries: []
         };
         this.dialogVisible = true;
     },
