@@ -21,7 +21,7 @@ async def handle_system_and_playback_info(
     target_url = f"{real_emby_url}/{full_path}"
     headers = dict(request.headers)
     params = request.query_params
-    data = await request.body()
+    # data = await request.body()
     
     # 关键功能 1: 欺骗客户端，使其始终通过代理通信
     if ("/System/Info" in full_path or "/system/info/public" in full_path) and method == "GET":
