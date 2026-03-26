@@ -42,6 +42,8 @@ class VirtualLibrary(BaseModel):
     cover_custom_zh_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义中文字体
     cover_custom_en_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义英文字体
     cover_custom_image_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义图片目录
+    cover_title_zh: Optional[str] = Field(default=None) # 海报中文标题（留空用虚拟库名称）
+    cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
 
 class AppConfig(BaseModel):
     emby_url: str = Field(default="http://127.0.0.1:8096")

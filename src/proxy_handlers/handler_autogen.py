@@ -131,7 +131,7 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
         en_font_path = config.custom_en_font_path or "/app/src/assets/fonts/multi_1_en.otf"
         
         kwargs = {
-            "title": (vlib.name, ""),
+            "title": (vlib.cover_title_zh or vlib.name, vlib.cover_title_en or ""),
             "font_path": (zh_font_path, en_font_path)
         }
 

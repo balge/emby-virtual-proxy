@@ -69,6 +69,7 @@
                 <el-option label="有官方评级 (HasOfficialRating)" value="HasOfficialRating"></el-option>
                 <el-option label="拥有TMDB ID (ProviderIds.Tmdb)" value="ProviderIds.Tmdb"></el-option>
                 <el-option label="拥有IMDB ID (ProviderIds.Imdb)" value="ProviderIds.Imdb"></el-option>
+                <el-option label="地区 (ProductionLocations)" value="ProductionLocations"></el-option>
                 <el-option label="名称 (Name)" value="Name"></el-option>
             </el-select>
             <el-select v-model="rule.operator" placeholder="选择操作" style="width: 150px; flex-shrink: 0;">
@@ -102,6 +103,15 @@
                 />
                 <el-button text @click="setRelativeDate(rule, null)" v-if="rule.relative_days">清除</el-button>
               </div>
+              <el-select
+                v-else-if="rule.field === 'ProductionLocations'"
+                v-model="rule.value"
+                filterable
+                placeholder="选择地区"
+                style="flex-grow: 1; min-width: 150px; max-width: 200px;"
+              >
+                <el-option v-for="c in countryList" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" />
+              </el-select>
               <el-input 
                 v-else 
                 v-model="rule.value" 
@@ -198,6 +208,25 @@ const currentFilter = ref(null);
 
 const helpDialogVisible = ref(false);
 
+const countryList = ref([
+  { code: 'CN', name: '中国内地' }, { code: 'HK', name: '香港' }, { code: 'TW', name: '中国台湾' },
+  { code: 'MO', name: '澳门' }, { code: 'JP', name: '日本' }, { code: 'KR', name: '韩国' },
+  { code: 'US', name: '美国' }, { code: 'GB', name: '英国' }, { code: 'FR', name: '法国' },
+  { code: 'DE', name: '德国' }, { code: 'IT', name: '意大利' }, { code: 'ES', name: '西班牙' },
+  { code: 'PT', name: '葡萄牙' }, { code: 'RU', name: '俄罗斯' }, { code: 'IN', name: '印度' },
+  { code: 'TH', name: '泰国' }, { code: 'VN', name: '越南' }, { code: 'PH', name: '菲律宾' },
+  { code: 'MY', name: '马来西亚' }, { code: 'SG', name: '新加坡' }, { code: 'AU', name: '澳大利亚' },
+  { code: 'NZ', name: '新西兰' }, { code: 'CA', name: '加拿大' }, { code: 'BR', name: '巴西' },
+  { code: 'MX', name: '墨西哥' }, { code: 'AR', name: '阿根廷' }, { code: 'CL', name: '智利' },
+  { code: 'CO', name: '哥伦比亚' }, { code: 'SE', name: '瑞典' }, { code: 'NO', name: '挪威' },
+  { code: 'DK', name: '丹麦' }, { code: 'NL', name: '荷兰' }, { code: 'BE', name: '比利时' },
+  { code: 'CH', name: '瑞士' }, { code: 'PL', name: '波兰' }, { code: 'CZ', name: '捷克' },
+  { code: 'GR', name: '希腊' }, { code: 'TR', name: '土耳其' }, { code: 'IL', name: '以色列' },
+  { code: 'EG', name: '埃及' }, { code: 'SA', name: '沙特阿拉伯' }, { code: 'IR', name: '伊朗' },
+  { code: 'IQ', name: '伊拉克' }, { code: 'PK', name: '巴基斯坦' }, { code: 'MM', name: '缅甸' },
+  { code: 'LA', name: '老挝' }, { code: 'KP', name: '朝鲜' }, { code: 'MN', name: '蒙古国' },
+]);
+
 // 修改：设置相对日期的方法
 const setRelativeDate = (rule, days) => {
   if (days) {
@@ -231,6 +260,7 @@ const efficientRulesTableData = ref([
   { field: '有官方评级 (HasOfficialRating)', operators: '<el-tag size="small">等于</el-tag>', notes: '值为 <code>true</code> 或 <code>false</code>' },
   { field: '拥有TMDB ID', operators: '<el-tag type="success" size="small">不为空</el-tag><el-tag type="danger" size="small">为空</el-tag>', notes: '选择此操作后，<strong>无需填写</strong>任何值。' },
   { field: '拥有IMDB ID', operators: '<el-tag type="success" size="small">不为空</el-tag><el-tag type="danger" size="small">为空</el-tag>', notes: '选择此操作后，<strong>无需填写</strong>任何值。' },
+  { field: "地区 (ProductionLocations)", operators: "<el-tag type=\"warning\" size=\"small\">包含</el-tag><el-tag type=\"warning\" size=\"small\">不包含</el-tag>", notes: "从下拉列表选择国家/地区代码。此规则为<strong>后筛选</strong>。" },
 ]);
 
 const openAddDialog = () => {

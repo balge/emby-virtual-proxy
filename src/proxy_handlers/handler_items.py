@@ -27,8 +27,17 @@ def _check_condition(item_value: Any, operator: str, rule_value: str) -> bool:
     if operator not in ["is_empty", "is_not_empty"]:
         if item_value is None: return False
         if isinstance(item_value, list):
-            if operator == "contains": return rule_value in item_value
-            if operator == "not_contains": return rule_value not in item_value
+            # For list values, check if any element contains the rule_value (case-insensitive)
+            rule_lower = str(rule_value).lower()
+            if operator == "contains":
+                return any(rule_lower in str(el).lower() for el in item_value)
+            if operator == "not_contains":
+                return not any(rule_lower in str(el).lower() for el in item_value)
+            # For equals on list, check exact element membership
+            if operator == "equals":
+                return any(str(el).lower() == rule_lower for el in item_value)
+            if operator == "not_equals":
+                return not any(str(el).lower() == rule_lower for el in item_value)
             return False
         if operator in ["greater_than", "less_than"]:
             try:
@@ -256,7 +265,7 @@ async def handle_virtual_library_items(
     for key in safe_params_to_inherit:
         if key in params: new_params[key] = params[key]
 
-    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container"]
+    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container", "ProductionLocations"]
     if "Fields" in new_params:
         existing_fields = set(new_params["Fields"].split(','))
         missing_fields = [f for f in required_fields if f not in existing_fields]

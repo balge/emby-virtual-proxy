@@ -144,11 +144,11 @@
       </el-form-item>
       
       <el-form-item label="封面中文标题">
-         <el-input v-model="coverTitleZh" placeholder="可选，留空则使用虚拟库名称"></el-input>
+         <el-input v-model="store.currentLibrary.cover_title_zh" placeholder="可选，留空则使用虚拟库名称"></el-input>
       </el-form-item>
 
       <el-form-item label="封面英文标题">
-         <el-input v-model="coverTitleEn" placeholder="可选，用于封面上的英文装饰文字"></el-input>
+         <el-input v-model="store.currentLibrary.cover_title_en" placeholder="可选，用于封面上的英文装饰文字"></el-input>
       </el-form-item>
 
       <el-form-item label="封面样式">
@@ -228,9 +228,7 @@ const availableResources = ref([]);
 const currentQuery = ref('');
 const page = ref(1);
 const hasMore = ref(true);
-const coverTitleZh = ref('');
-const coverTitleEn = ref('');
-const selectedStyle = ref('style_multi_1'); // 新增：用于存储所选样式
+const selectedStyle = ref('style_multi_1');
 const uploadedFiles = ref([]);
 
 const coverImageUrl = computed(() => {
@@ -307,11 +305,10 @@ const loadMore = async () => {
 };
 
 const handleGenerateCover = async () => {
-    // 如果中文标题为空，则使用虚拟库名称
-    const titleZh = coverTitleZh.value || store.currentLibrary.name;
+    const titleZh = store.currentLibrary.cover_title_zh || store.currentLibrary.name;
+    const titleEn = store.currentLibrary.cover_title_en || '';
     const tempImagePaths = uploadedFiles.value.map(file => file.response.path);
-    // 将所选样式和标题传递给 store action
-    const success = await store.generateLibraryCover(store.currentLibrary.id, titleZh, coverTitleEn.value, selectedStyle.value, tempImagePaths);
+    const success = await store.generateLibraryCover(store.currentLibrary.id, titleZh, titleEn, selectedStyle.value, tempImagePaths);
     // 成功后，store.currentLibrary.image_tag 会被更新，computed 属性 coverImageUrl 会自动重新计算
 }
 
@@ -338,9 +335,7 @@ const handleScroll = (event) => {
 // 监听对话框打开，并预加载资源
 watch(() => store.dialogVisible, (newVal) => {
   if (newVal) {
-    // 重置所有状态
-    coverTitleZh.value = '';
-    coverTitleEn.value = '';
+    // Reset local state
     selectedStyle.value = 'style_multi_1';
     uploadedFiles.value = [];
     availableResources.value = [];
