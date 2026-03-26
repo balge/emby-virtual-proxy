@@ -81,9 +81,6 @@ async def require_auth(request: Request):
     """认证依赖项：如果启用了认证，则验证请求中的 token"""
     if not AUTH_ENABLED:
         return
-    # 登录接口和认证状态接口不需要验证
-    if request.url.path in ("/api/login", "/api/auth-status"):
-        return
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header[7:]
@@ -94,6 +91,9 @@ async def require_auth(request: Request):
 scheduler = AsyncIOScheduler()
 
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
+# 公开路由（不需要认证）
+public_router = APIRouter(prefix="/api")
+# 受保护路由（需要认证）
 api_router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
 
 # Define path for the library items DB, as it's not in db_manager
@@ -110,13 +110,13 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
-# --- 认证 API ---
-@api_router.get("/auth-status", tags=["Auth"])
+# --- 认证 API（公开路由，不需要 token） ---
+@public_router.get("/auth-status", tags=["Auth"])
 async def auth_status():
     """返回当前认证是否启用"""
     return {"auth_enabled": AUTH_ENABLED}
 
-@api_router.post("/login", tags=["Auth"])
+@public_router.post("/login", tags=["Auth"])
 async def login(body: LoginRequest):
     """用户登录，验证用户名密码并返回 token"""
     if not AUTH_ENABLED:
@@ -129,7 +129,7 @@ async def login(body: LoginRequest):
     logger.warning(f"Failed login attempt for user '{body.username}'.")
     raise HTTPException(status_code=401, detail="用户名或密码错误")
 
-@api_router.post("/logout", tags=["Auth"])
+@public_router.post("/logout", tags=["Auth"])
 async def logout(request: Request):
     """登出，使当前 token 失效"""
     auth_header = request.headers.get("Authorization", "")
@@ -928,6 +928,7 @@ async def resolve_emby_item(item_id: str):
     except HTTPException as e:
         raise e
 
+admin_app.include_router(public_router)
 admin_app.include_router(api_router)
 static_dir = Path("/app/static")
 if not static_dir.is_dir():
@@ -985,4 +986,22 @@ async def shutdown_event():
     # 关闭调度器
     scheduler.shutdown()
 
-admin_app.mount("/", StaticFiles(directory=str(static_dir), html=True), name="static")
+# SPA 静态文件服务：先挂载静态资源（js/css/图片等），再用 catch-all 路由处理前端路由
+from fastapi.responses import FileResponse
+
+admin_app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
+
+# favicon 等根目录静态文件
+@admin_app.get("/favicon.svg")
+async def favicon():
+    return FileResponse(str(static_dir / "favicon.svg"))
+
+# Catch-all：所有非 API、非静态资源的请求都返回 index.html，交给前端路由处理
+@admin_app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    # 如果请求的是一个实际存在的静态文件，直接返回
+    file_path = static_dir / full_path
+    if file_path.is_file():
+        return FileResponse(str(file_path))
+    # 否则返回 index.html，让前端路由接管
+    return FileResponse(str(static_dir / "index.html"))
