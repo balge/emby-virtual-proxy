@@ -1,4 +1,4 @@
-// frontend/src/api/index.js (Corrected and Cleaned)
+// frontend/src/api/index.js
 
 import axios from 'axios';
 
@@ -6,7 +6,34 @@ const apiClient = axios.create({
     baseURL: '/api', 
 });
 
+// 请求拦截器：自动附加 auth token
+apiClient.interceptors.request.use((config) => {
+    const token = localStorage.getItem('auth_token');
+    if (token) {
+        config.headers.Authorization = `Bearer ${token}`;
+    }
+    return config;
+});
+
+// 响应拦截器：401 时清除 token 并跳转登录
+apiClient.interceptors.response.use(
+    (response) => response,
+    (error) => {
+        if (error.response && error.response.status === 401) {
+            localStorage.removeItem('auth_token');
+            // 触发自定义事件通知 App 切换到登录页
+            window.dispatchEvent(new Event('auth-expired'));
+        }
+        return Promise.reject(error);
+    }
+);
+
 export default {
+    // Auth
+    getAuthStatus: () => apiClient.get('/auth-status'),
+    login: (username, password) => apiClient.post('/login', { username, password }),
+    logout: () => apiClient.post('/logout'),
+
     // System
     getConfig: () => apiClient.get('/config'),
     updateConfig: (config) => apiClient.post('/config', config),
@@ -33,7 +60,7 @@ export default {
     getAdvancedFilters: () => apiClient.get('/advanced-filters'),
     saveAdvancedFilters: (filters) => apiClient.post('/advanced-filters', filters),
 
-    // 新增: Cover Generator
+    // Cover Generator
     generateCover: (libraryId, titleZh, titleEn, styleName, tempImagePaths) => apiClient.post('/generate-cover', {
         library_id: libraryId,
         title_zh: titleZh,

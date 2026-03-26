@@ -1,8 +1,9 @@
 # src/admin_server.py
 
 import uvicorn
-from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile
+from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile, Depends
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from pathlib import Path
 import uuid
 import random
@@ -13,7 +14,9 @@ import aiohttp
 import asyncio
 import sys
 import hashlib
+import hmac
 import time
+import secrets
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 import importlib
@@ -40,10 +43,58 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 # 【【【 添加/确认结束 】】】
 
+# ============================================
+# 认证配置 - 通过环境变量读取
+# ============================================
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+AUTH_ENABLED = bool(ADMIN_USERNAME and ADMIN_PASSWORD)
+AUTH_SECRET = os.environ.get("AUTH_SECRET", secrets.token_hex(32))
+AUTH_TOKEN_EXPIRY = int(os.environ.get("AUTH_TOKEN_EXPIRY", "86400"))  # 默认24小时
+
+# 存储有效 token 的集合（内存级，重启后失效）
+_valid_tokens: Dict[str, float] = {}
+
+def _generate_token() -> str:
+    """生成一个带过期时间的认证 token"""
+    token = secrets.token_hex(32)
+    _valid_tokens[token] = time.time() + AUTH_TOKEN_EXPIRY
+    return token
+
+def _verify_token(token: str) -> bool:
+    """验证 token 是否有效且未过期"""
+    if token not in _valid_tokens:
+        return False
+    if time.time() > _valid_tokens[token]:
+        del _valid_tokens[token]
+        return False
+    return True
+
+def _cleanup_expired_tokens():
+    """清理过期 token"""
+    now = time.time()
+    expired = [t for t, exp in _valid_tokens.items() if now > exp]
+    for t in expired:
+        del _valid_tokens[t]
+
+async def require_auth(request: Request):
+    """认证依赖项：如果启用了认证，则验证请求中的 token"""
+    if not AUTH_ENABLED:
+        return
+    # 登录接口和认证状态接口不需要验证
+    if request.url.path in ("/api/login", "/api/auth-status"):
+        return
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        if _verify_token(token):
+            return
+    raise HTTPException(status_code=401, detail="未授权，请先登录")
+
 scheduler = AsyncIOScheduler()
 
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
-api_router = APIRouter(prefix="/api")
+api_router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)])
 
 # Define path for the library items DB, as it's not in db_manager
 RSS_LIBRARY_ITEMS_DB = Path("/app/config/rss_library_items.db")
@@ -54,6 +105,38 @@ class CoverRequest(BaseModel):
     title_en: Optional[str] = None
     style_name: str # 新增：用于指定封面样式
     temp_image_paths: Optional[List[str]] = None
+
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
+# --- 认证 API ---
+@api_router.get("/auth-status", tags=["Auth"])
+async def auth_status():
+    """返回当前认证是否启用"""
+    return {"auth_enabled": AUTH_ENABLED}
+
+@api_router.post("/login", tags=["Auth"])
+async def login(body: LoginRequest):
+    """用户登录，验证用户名密码并返回 token"""
+    if not AUTH_ENABLED:
+        return {"token": "", "message": "认证未启用"}
+    if body.username == ADMIN_USERNAME and body.password == ADMIN_PASSWORD:
+        _cleanup_expired_tokens()
+        token = _generate_token()
+        logger.info(f"User '{body.username}' logged in successfully.")
+        return {"token": token}
+    logger.warning(f"Failed login attempt for user '{body.username}'.")
+    raise HTTPException(status_code=401, detail="用户名或密码错误")
+
+@api_router.post("/logout", tags=["Auth"])
+async def logout(request: Request):
+    """登出，使当前 token 失效"""
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        _valid_tokens.pop(token, None)
+    return {"message": "已登出"}
 
 # --- 高级筛选器 API ---
 @api_router.get("/advanced-filters", response_model=List[AdvancedFilter], tags=["Advanced Filters"])
