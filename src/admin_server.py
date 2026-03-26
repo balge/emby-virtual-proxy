@@ -180,43 +180,21 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
 async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig):
     """
-    从 proxy-core 的内部缓存中获取项目列表，并下载封面。
-    (最终架构版)
+    Read items from local vlib_items_cache and download cover images.
     """
-    logger.info(f"开始从内部缓存为虚拟库 {library_id} 获取封面素材...")
+    logger.info(f"Fetching cover images for vlib {library_id} from local cache...")
 
-    proxy_core_url = os.getenv("PROXY_CORE_URL")
-    if not proxy_core_url:
-        raise HTTPException(status_code=500, detail="环境变量 PROXY_CORE_URL 未设置。")
+    items = vlib_items_cache.get(library_id)
+    if not items:
+        raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
-    # --- 1. 向 proxy-core 请求缓存数据 ---
-    target_url = f"{proxy_core_url.rstrip('/')}/api/internal/get-cached-items/{library_id}"
-    items = []
-    
-    logger.info(f"正在向内部代理服务 {target_url} 请求缓存数据...")
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(target_url, timeout=10) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    items = data.get("Items", [])
-                else:
-                    error_detail = (await response.json()).get("detail")
-                    logger.error(f"从内部代理获取缓存失败 (Status: {response.status}): {error_detail}")
-                    raise HTTPException(status_code=response.status, detail=error_detail)
-    except aiohttp.ClientError as e:
-        logger.error(f"连接到内部代理服务时出错: {e}")
-        raise HTTPException(status_code=502, detail=f"无法连接到内部代理服务: {e}")
-
-    # --- 2. 后续处理 ---
     items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
 
     if not items_with_images:
-        raise HTTPException(status_code=404, detail="缓存数据中不包含任何带有主封面的项目。")
+        raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
 
     selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
 
-    # --- 并发下载图片 ---
     async def download_image(session, item, index):
         image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
         headers = {'X-Emby-Token': config.emby_api_key}
