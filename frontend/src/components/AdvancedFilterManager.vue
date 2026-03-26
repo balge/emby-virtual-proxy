@@ -2,33 +2,57 @@
   <el-card class="box-card" shadow="never">
     <template #header>
       <div class="card-header">
-        <span>高级筛选器管理</span>
-        <div>
-          <!-- 说明文档触发按钮 -->
+        <span class="card-title">高级筛选器管理</span>
+        <div class="header-actions">
           <el-button :icon="InfoFilled" circle @click="helpDialogVisible = true" title="查看筛选效率说明"></el-button>
           <el-button type="primary" :icon="Plus" @click="openAddDialog">新增筛选器</el-button>
         </div>
       </div>
     </template>
     
-    <el-table :data="filters" style="width: 100%" v-loading="store.saving">
-      <el-table-column prop="name" label="筛选器名称" width="200"></el-table-column>
-      <el-table-column label="匹配逻辑">
-        <template #default="scope">
-          匹配 {{ scope.row.match_all ? '所有' : '任意' }} 条件 (共 {{ scope.row.rules.length }} 条)
-        </template>
-      </el-table-column>
-      <el-table-column label="操作" width="150" align="right">
-        <template #default="scope">
-          <el-button size="small" @click="openEditDialog(scope.row)">编辑</el-button>
-          <el-popconfirm title="确定删除这个筛选器吗？" @confirm="deleteFilter(scope.row.id)">
+    <!-- Desktop table -->
+    <div class="filter-table-view">
+      <el-table :data="filters" style="width: 100%" v-loading="store.saving">
+        <el-table-column prop="name" label="筛选器名称" width="200"></el-table-column>
+        <el-table-column label="匹配逻辑">
+          <template #default="scope">
+            匹配 {{ scope.row.match_all ? '所有' : '任意' }} 条件 (共 {{ scope.row.rules.length }} 条)
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="150" align="right">
+          <template #default="scope">
+            <el-button size="small" @click="openEditDialog(scope.row)">编辑</el-button>
+            <el-popconfirm title="确定删除这个筛选器吗？" @confirm="deleteFilter(scope.row.id)">
+              <template #reference>
+                <el-button size="small" type="danger">删除</el-button>
+              </template>
+            </el-popconfirm>
+          </template>
+        </el-table-column>
+      </el-table>
+    </div>
+
+    <!-- Mobile card view -->
+    <div class="filter-card-view" v-loading="store.saving">
+      <div v-for="row in filters" :key="row.id" class="filter-card">
+        <div class="filter-card-header">
+          <span class="filter-card-name">{{ row.name }}</span>
+          <el-tag size="small" :type="row.match_all ? 'success' : 'warning'" round>
+            {{ row.match_all ? 'AND' : 'OR' }}
+          </el-tag>
+        </div>
+        <div class="filter-card-info">共 {{ row.rules.length }} 条规则</div>
+        <div class="filter-card-actions">
+          <el-button size="small" @click="openEditDialog(row)">编辑</el-button>
+          <el-popconfirm title="确定删除这个筛选器吗？" @confirm="deleteFilter(row.id)">
             <template #reference>
               <el-button size="small" type="danger">删除</el-button>
             </template>
           </el-popconfirm>
-        </template>
-      </el-table-column>
-    </el-table>
+        </div>
+      </div>
+      <el-empty v-if="!store.saving && filters.length === 0" description="暂无筛选器" />
+    </div>
 
     <!-- 编辑/新增筛选器的对话框 -->
     <el-dialog v-model="dialogVisible" :title="isEditing ? '编辑筛选器' : '新增筛选器'" width="60%">
@@ -45,9 +69,8 @@
 
         <el-divider>规则</el-divider>
         
-        <!-- 【【【 MODIFIED: 优化了规则行的布局 】】】 -->
         <div v-for="(rule, index) in currentFilter.rules" :key="index" class="rule-row">
-            <el-select v-model="rule.field" placeholder="选择字段" style="width: 280px; flex-shrink: 0;">
+            <el-select v-model="rule.field" placeholder="选择字段" class="rule-field-select">
                 <el-option label="社区评分 (CommunityRating)" value="CommunityRating"></el-option>
                 <el-option label="影评人评分 (CriticRating)" value="CriticRating"></el-option>
                 <el-option label="官方分级 (OfficialRating)" value="OfficialRating"></el-option>
@@ -73,7 +96,7 @@
                 <el-option label="地区 (ProductionLocations)" value="ProductionLocations"></el-option>
                 <el-option label="名称 (Name)" value="Name"></el-option>
             </el-select>
-            <el-select v-model="rule.operator" placeholder="选择操作" style="width: 150px; flex-shrink: 0;">
+            <el-select v-model="rule.operator" placeholder="选择操作" class="rule-operator-select">
                 <el-option label="等于" value="equals"></el-option>
                 <el-option label="不等于" value="not_equals"></el-option>
                 <el-option label="包含" value="contains"></el-option>
@@ -85,13 +108,13 @@
             </el-select>
             <!-- 根据字段类型动态显示输入控件 -->
             <template v-if="!['is_empty', 'is_not_empty'].includes(rule.operator)">
-              <div v-if="['PremiereDate', 'DateCreated', 'DateLastMediaAdded'].includes(rule.field)" style="display: flex; flex-wrap: wrap; align-items: center; gap: 10px; flex-grow: 1;">
+              <div v-if="['PremiereDate', 'DateCreated', 'DateLastMediaAdded'].includes(rule.field)" class="rule-date-group">
                 <el-date-picker
                   v-model="rule.value"
                   type="date"
                   placeholder="选择日期"
                   value-format="YYYY-MM-DD"
-                  style="flex-grow: 1; min-width: 140px; max-width: 150px;"
+                  class="rule-date-picker"
                   :disabled="!!rule.relative_days"
                 />
                 <el-input-number
@@ -109,7 +132,7 @@
                 v-model="rule.value"
                 filterable
                 placeholder="选择地区"
-                style="flex-grow: 1; min-width: 150px; max-width: 200px;"
+                class="rule-value-select"
               >
                 <el-option v-for="c in countryList" :key="c.code" :label="`${c.name} (${c.code})`" :value="c.code" />
               </el-select>
@@ -117,7 +140,7 @@
                 v-else 
                 v-model="rule.value" 
                 placeholder="输入值" 
-                style="flex-grow: 1; min-width: 125px; max-width: 150px;"
+                class="rule-value-input"
               ></el-input>
             </template>
             <el-button type="danger" :icon="Delete" circle @click="removeRule(index)"></el-button>
@@ -135,11 +158,11 @@
 
     <!-- 最终版说明对话框 -->
     <el-dialog v-model="helpDialogVisible" title="高级筛选器性能指南" width="65%">
-      <div style="padding: 0 10px;">
-        <h4 style="font-size: 18px; margin-top: 0;">
-          <span style="color: #67C23A;">🚀 高效筛选规则对照表</span>
+      <div class="help-content">
+        <h4 class="help-section-title help-efficient">
+          <span>🚀 高效筛选规则对照表</span>
         </h4>
-        <p>当您创建的规则完全符合下表中的“字段”和“高效操作符”组合时，筛选将由 Emby/Jellyfin 服务器原生执行，速度最快。</p>
+        <p>当您创建的规则完全符合下表中的"字段"和"高效操作符"组合时，筛选将由 Emby/Jellyfin 服务器原生执行，速度最快。</p>
         
         <el-table :data="efficientRulesTableData" border style="width: 100%" size="small">
           <el-table-column prop="field" label="字段" width="220"></el-table-column>
@@ -157,8 +180,8 @@
 
         <el-divider></el-divider>
 
-        <h4 style="font-size: 18px;">
-          <span style="color: #E6A23C;">🐢 低效筛选规则说明</span>
+        <h4 class="help-section-title help-slow">
+          <span>🐢 低效筛选规则说明</span>
         </h4>
         <p>当出现以下任意一种情况时，筛选将被降级到代理服务器处理，<strong style="color: #F56C6C;">可能导致性能问题</strong>：</p>
         <ul class="low-efficiency-list">
@@ -167,7 +190,7 @@
             <li>当 <strong>操作符</strong> 选择为 <el-tag type="warning" size="small">不等于</el-tag> <el-tag type="warning" size="small">包含</el-tag> <el-tag type="warning" size="small">不包含</el-tag> 时。</li>
             <li>当 <strong>操作符</strong> 为 <el-tag type="warning" size="small">为空</el-tag> / <el-tag type="warning" size="small">不为空</el-tag>，但 <strong>字段</strong> 不是 <el-tag type="success" size="small">拥有TMDB/IMDB ID</el-tag> 时。
                 <br>
-                <small><i>例如：检查 “社区评分” <el-tag type="warning" size="small">为空</el-tag> 是低效的。</i></small>
+                <small><i>例如：检查 "社区评分" <el-tag type="warning" size="small">为空</el-tag> 是低效的。</i></small>
             </li>
         </ul>
         
@@ -178,7 +201,7 @@
           show-icon
           style="margin-top: 25px;"
         >
-          <p style="margin: 0; line-height: 1.5;">优先使用 <el-tag size="small">匹配所有条件 (AND)</el-tag>，并确保每一条规则都符合上方“高效筛选对照表”。</p>
+          <p style="margin: 0; line-height: 1.5;">优先使用 <el-tag size="small">匹配所有条件 (AND)</el-tag>，并确保每一条规则都符合上方"高效筛选对照表"。</p>
         </el-alert>
 
       </div>
@@ -228,14 +251,13 @@ const countryList = ref([
   { code: 'LA', name: '老挝' }, { code: 'KP', name: '朝鲜' }, { code: 'MN', name: '蒙古国' },
 ]);
 
-// 修改：设置相对日期的方法
 const setRelativeDate = (rule, days) => {
   if (days) {
     rule.relative_days = days;
-    rule.value = null; // 清除绝对日期以避免混淆
-    rule.operator = 'greater_than'; // 自动将操作符设置为“大于”
+    rule.value = null;
+    rule.operator = 'greater_than';
   } else {
-    rule.relative_days = null; // 清除相对日期
+    rule.relative_days = null;
   }
 };
 
@@ -246,9 +268,9 @@ const efficientRulesTableData = ref([
   { field: '首播日期 (PremiereDate)', operators: '<el-tag type="info" size="small">大于</el-tag><el-tag type="info" size="small">小于</el-tag><el-tag type="info" size="small">等于</el-tag>', notes: '用于筛选确切日期。例：大于 <code>2023-01-01</code><br>💡 支持输入最近 N 天。' },
   { field: '添加日期 (DateCreated)', operators: '<el-tag type="info" size="small">大于</el-tag><el-tag type="info" size="small">小于</el-tag><el-tag type="info" size="small">等于</el-tag>', notes: '用于筛选项目添加到库的时间。例：大于 <code>2023-01-01</code><br>💡 支持输入最近 N 天。' },
   { field: '官方分级 (OfficialRating)', operators: '<el-tag size="small">等于</el-tag>', notes: '例：等于 <code>PG-13</code> (输入时不含引号)' },
-  { field: '类型 (Genres)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为“包含该类型”。例：等于 <code>动作</code> (输入时不含引号)' },
-  { field: '标签 (Tags)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为“包含该标签”。例：等于 <code>4K臻享</code> (输入时不含引号)' },
-  { field: '工作室 (Studios)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为“包含该工作室”。例：等于 <code>Disney</code> (输入时不含引号)' },
+  { field: '类型 (Genres)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为"包含该类型"。例：等于 <code>动作</code> (输入时不含引号)' },
+  { field: '标签 (Tags)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为"包含该标签"。例：等于 <code>4K臻享</code> (输入时不含引号)' },
+  { field: '工作室 (Studios)', operators: '<el-tag size="small">等于</el-tag>', notes: '效果为"包含该工作室"。例：等于 <code>Disney</code> (输入时不含引号)' },
   { field: '视频范围 (VideoRange)', operators: '<el-tag size="small">等于</el-tag>', notes: '例：等于 <code>HDR</code> (输入时不含引号)' },
   { field: '文件容器 (Container)', operators: '<el-tag size="small">等于</el-tag>', notes: '例：等于 <code>mkv</code> (输入时不含引号)' },
   { field: '名称以...开头 (NameStartsWith)', operators: '<el-tag size="small">等于</el-tag>', notes: '例：等于 <code>The</code>' },
@@ -286,7 +308,7 @@ const addRule = () => {
     field: '',
     operator: 'equals',
     value: '',
-    relative_days: null, // 确保新规则对象包含此字段
+    relative_days: null,
   });
 };
 
@@ -335,7 +357,57 @@ const deleteFilter = async (id) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
 }
+
+.card-title {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Mobile card view - hidden by default */
+.filter-card-view {
+  display: none;
+}
+
+.filter-card {
+  padding: 16px;
+  border-radius: 10px;
+  background: var(--el-fill-color-lighter);
+  margin-bottom: 12px;
+}
+
+.filter-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.filter-card-name {
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--el-text-color-primary);
+}
+
+.filter-card-info {
+  font-size: 13px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 12px;
+}
+
+.filter-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Rule row */
 .rule-row {
   display: flex;
   align-items: center;
@@ -344,7 +416,61 @@ const deleteFilter = async (id) => {
   gap: 10px;
 }
 
-/* 使用 :deep() 以确保样式能应用到 v-html 和 el-tag 组件 */
+.rule-field-select {
+  width: 280px;
+  flex-shrink: 0;
+}
+
+.rule-operator-select {
+  width: 150px;
+  flex-shrink: 0;
+}
+
+.rule-date-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  flex-grow: 1;
+}
+
+.rule-date-picker {
+  flex-grow: 1;
+  min-width: 140px;
+  max-width: 150px;
+}
+
+.rule-value-select {
+  flex-grow: 1;
+  min-width: 150px;
+  max-width: 200px;
+}
+
+.rule-value-input {
+  flex-grow: 1;
+  min-width: 125px;
+  max-width: 150px;
+}
+
+/* Help dialog */
+.help-content {
+  padding: 0 10px;
+}
+
+.help-section-title {
+  font-size: 18px;
+  margin-top: 0;
+}
+
+.help-efficient span {
+  color: #67C23A;
+}
+
+.help-slow span {
+  color: #E6A23C;
+}
+
+/* Deep styles for v-html content */
 :deep(code) {
   background-color: var(--el-color-info-light-8);
   padding: 2px 5px;
@@ -354,12 +480,10 @@ const deleteFilter = async (id) => {
   margin: 0 2px;
 }
 
-/* 为表格中的操作符标签添加间距 */
 :deep(.operator-tags .el-tag) {
   margin: 2px;
 }
 
-/* 优化低效列表的行高和边距 */
 .low-efficiency-list {
   list-style-type: disc;
   padding-left: 25px;
@@ -367,5 +491,44 @@ const deleteFilter = async (id) => {
 .low-efficiency-list li {
   margin-bottom: 12px;
   line-height: 1.8;
+}
+
+/* Responsive */
+@media (max-width: 900px) {
+  .filter-table-view {
+    display: none;
+  }
+
+  .filter-card-view {
+    display: block;
+  }
+
+  .rule-field-select {
+    width: 100%;
+  }
+
+  .rule-operator-select {
+    width: 100%;
+  }
+
+  .rule-value-input,
+  .rule-value-select {
+    max-width: 100%;
+    width: 100%;
+  }
+
+  .rule-date-picker {
+    max-width: 100%;
+  }
+}
+
+@media (max-width: 768px) {
+  .header-actions {
+    width: 100%;
+  }
+
+  .header-actions .el-button {
+    flex: 1;
+  }
 }
 </style>

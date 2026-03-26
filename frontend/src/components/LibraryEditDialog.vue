@@ -6,7 +6,7 @@
     @close="store.dialogVisible = false"
     :close-on-click-modal="false"
   >
-    <el-form :model="store.currentLibrary" label-width="120px" v-loading="store.saving">
+    <el-form :model="store.currentLibrary" label-width="120px" v-loading="store.saving" class="lib-form">
       <el-form-item label="虚拟库名称" required>
         <el-input v-model="store.currentLibrary.name" placeholder="例如：豆瓣高分电影"></el-input>
       </el-form-item>
@@ -80,12 +80,10 @@
             <span v-if="store.currentLibrary.resource_type === 'person'">{{ store.personNameCache[item.id] || item.name }}</span>
             <span v-else>{{ item.name }}</span>
           </el-option>
-          <!-- 手动添加加载状态提示 -->
           <div v-if="resourceLoading" class="loading-indicator">加载中...</div>
         </el-select>
       </el-form-item>
 
-      <!-- 【【【 核心修改在这里 】】】 -->
       <el-form-item label="高级筛选器">
         <el-select 
           v-model="store.currentLibrary.advanced_filter_id" 
@@ -93,7 +91,6 @@
           style="width: 100%;"
           clearable  
         >
-          <!-- 手动添加一个“无”选项，其值为 null -->
           <el-option label="无" :value="null" /> 
           <el-option
             v-for="filter in store.config.advanced_filters"
@@ -103,11 +100,10 @@
           />
         </el-select>
       </el-form-item>
-      <!-- 【【【 修改结束 】】】 -->
       
       <el-form-item label="TMDB ID 合并">
         <el-switch v-model="store.currentLibrary.merge_by_tmdb_id"></el-switch>
-        <el-tooltip content="开启后，同一TMDB ID的影视项目（无论在哪个资料库）将只显示一个版本，通常用于整合4K和1080p版本。注意：这可能会略微增加加载时间。" placement="top">
+        <el-tooltip content="开启后，同一TMDB ID的影视项目将只显示一个版本，通常用于整合4K和1080p版本。" placement="top">
           <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
         </el-tooltip>
       </el-form-item>
@@ -130,7 +126,7 @@
             :value="lib.id"
           />
         </el-select>
-        <el-tooltip content="限定虚拟库的数据来源。例如选中「外语电影」和「电影合集」两个真实库，则虚拟库仅包含这两个库中的影片。留空表示搜索所有真实库。" placement="top">
+        <el-tooltip content="限定虚拟库的数据来源。留空表示搜索所有真实库。" placement="top">
           <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
         </el-tooltip>
       </el-form-item>
@@ -234,16 +230,14 @@ const uploadedFiles = ref([]);
 
 const coverImageUrl = computed(() => {
   if (store.currentLibrary?.image_tag) {
-    // 添加时间戳来强制刷新缓存
     return `/covers/${store.currentLibrary.id}.jpg?t=${store.currentLibrary.image_tag}`;
   }
   return '';
 });
 
-// 远程搜索资源的逻辑
 const searchResource = async (query) => {
   currentQuery.value = query;
-  page.value = 1; // 新的搜索总是从第一页开始
+  page.value = 1;
   availableResources.value = [];
   hasMore.value = true;
   await loadMore();
@@ -264,12 +258,11 @@ const loadMore = async () => {
             }
         });
         page.value++;
-        hasMore.value = response.data.length === 100; // 如果返回的少于100，说明没有更多了
+        hasMore.value = response.data.length === 100;
       } else {
         hasMore.value = false;
       }
     } else {
-      // 对于其他类型，我们从已加载的分类数据中进行前端分页
       const resourceKeyMap = {
         collection: 'collections',
         tag: 'tags',
@@ -310,7 +303,6 @@ const handleGenerateCover = async () => {
     const titleEn = store.currentLibrary.cover_title_en || '';
     const tempImagePaths = uploadedFiles.value.map(file => file.response.path);
     const success = await store.generateLibraryCover(store.currentLibrary.id, titleZh, titleEn, selectedStyle.value, tempImagePaths);
-    // 成功后，store.currentLibrary.image_tag 会被更新，computed 属性 coverImageUrl 会自动重新计算
 }
 
 const handleUploadSuccess = (response, file, fileList) => {
@@ -325,7 +317,6 @@ let scrollWrapper = null;
 
 const handleScroll = (event) => {
   const { scrollTop, clientHeight, scrollHeight } = event.target;
-  // 增加一个小的缓冲值（例如 10px），以确保在接近底部时就能触发
   if (scrollHeight - scrollTop <= clientHeight + 10) {
     if (!resourceLoading.value && hasMore.value) {
       loadMore();
@@ -333,10 +324,8 @@ const handleScroll = (event) => {
   }
 };
 
-// 监听对话框打开，并预加载资源
 watch(() => store.dialogVisible, (newVal) => {
   if (newVal) {
-    // Reset local state
     selectedStyle.value = 'style_multi_1';
     uploadedFiles.value = [];
     availableResources.value = [];
@@ -347,20 +336,17 @@ watch(() => store.dialogVisible, (newVal) => {
     const resourceType = store.currentLibrary.resource_type;
     const resourceId = store.currentLibrary.resource_id;
 
-    // 预加载第一页数据
     if (resourceType && resourceType !== 'all' && resourceType !== 'rsshub') {
       loadMore();
     }
 
-    // 【核心修复】: 使用唯一的 popper-class 来精确查找 DOM 元素并附加事件监听器
     setTimeout(() => {
       scrollWrapper = document.querySelector('.resource-select-popper .el-scrollbar__wrap');
       if (scrollWrapper) {
         scrollWrapper.addEventListener('scroll', handleScroll);
       }
-    }, 300); // 延迟以确保 popper 渲染完成
+    }, 300);
     
-    // 如果是编辑模式且有资源ID，尝试解析并显示它
     if (store.isEditing && resourceId) {
         if (resourceType === 'person') {
             if(store.personNameCache[resourceId]){
@@ -380,11 +366,9 @@ watch(() => store.dialogVisible, (newVal) => {
              if(found) availableResources.value = [found];
         }
     } else {
-        // 在添加模式下，确保列表为空
         availableResources.value = [];
     }
   } else {
-    // 【核心修复】: 对话框关闭时，移除事件监听器以防止内存泄漏
     if (scrollWrapper) {
       scrollWrapper.removeEventListener('scroll', handleScroll);
       scrollWrapper = null;
@@ -392,18 +376,21 @@ watch(() => store.dialogVisible, (newVal) => {
   }
 });
 
-// 【核心修复】: 监听资源类型变化，以便在对话框内切换时能刷新列表
 watch(() => store.currentLibrary.resource_type, (newVal, oldVal) => {
-  // 确保仅在对话框可见且类型确实发生变化时执行
   if (store.dialogVisible && newVal !== oldVal) {
-    // 重置资源ID和列表
     store.currentLibrary.resource_id = '';
-    searchResource(''); // 使用空查询重新开始搜索
+    searchResource('');
   }
 });
 </script>
 
 <style scoped>
+.lib-form {
+  max-height: 65vh;
+  overflow-y: auto;
+  padding-right: 8px;
+}
+
 .button-tips {
   margin-left: 10px;
   line-height: 1.4;
@@ -411,18 +398,18 @@ watch(() => store.currentLibrary.resource_type, (newVal, oldVal) => {
 }
 .tip {
   font-size: 12px;
-  color: #999;
+  color: var(--el-text-color-secondary);
   margin: 0;
   padding: 0;
 }
 .tip-warning {
-    color: #E6A23C; /* Element Plus warning color */
+    color: #E6A23C;
 }
 .cover-preview-wrapper {
   width: 200px;
-  height: 112.5px; /* 16:9 ratio */
-  background-color: #2c2c2c;
-  border-radius: 4px;
+  height: 112.5px;
+  background-color: var(--el-fill-color-darker);
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -434,13 +421,28 @@ watch(() => store.currentLibrary.resource_type, (newVal, oldVal) => {
   object-fit: cover;
 }
 .cover-preview-placeholder {
-  color: #666;
+  color: var(--el-text-color-secondary);
   font-size: 14px;
 }
 .loading-indicator {
   padding: 10px 0;
   text-align: center;
-  color: #999;
+  color: var(--el-text-color-secondary);
   font-size: 14px;
+}
+
+@media (max-width: 768px) {
+  .lib-form {
+    max-height: 60vh;
+  }
+
+  .lib-form :deep(.el-form-item__label) {
+    font-size: 13px;
+  }
+
+  .button-tips {
+    margin-left: 0;
+    margin-top: 8px;
+  }
 }
 </style>

@@ -1,1 +1,197 @@
-/* 这个文件可以留空，或者保留默认内容 */
+/* ============================================
+   Global Styles & Responsive Foundation
+   ============================================ */
+
+/* CSS Variables for theming */
+:root {
+  --app-bg: #f5f7fa;
+  --app-header-bg: rgba(255, 255, 255, 0.85);
+  --app-header-shadow: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --card-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
+  --card-hover-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --card-border-radius: 12px;
+  --transition-fast: 0.2s ease;
+  --transition-normal: 0.3s ease;
+}
+
+html.dark {
+  --app-bg: #141414;
+  --app-header-bg: rgba(30, 30, 30, 0.88);
+  --app-header-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
+  --card-shadow: 0 2px 12px rgba(0, 0, 0, 0.2);
+  --card-hover-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+}
+
+/* Reset & Base */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--app-bg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  transition: background-color var(--transition-normal);
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* ============================================
+   Element Plus Global Overrides
+   ============================================ */
+
+/* Card enhancements */
+.el-card {
+  border-radius: var(--card-border-radius) !important;
+  border: none !important;
+  box-shadow: var(--card-shadow) !important;
+  transition: box-shadow var(--transition-normal) !important;
+  overflow: hidden;
+}
+
+.el-card:hover {
+  box-shadow: var(--card-hover-shadow) !important;
+}
+
+.el-card__header {
+  border-bottom: 1px solid var(--el-border-color-lighter) !important;
+  padding: 16px 20px !important;
+}
+
+.el-card__body {
+  padding: 20px !important;
+}
+
+/* Button refinements */
+.el-button {
+  border-radius: 8px !important;
+  font-weight: 500 !important;
+  transition: all var(--transition-fast) !important;
+}
+
+/* Tag refinements */
+.el-tag {
+  border-radius: 6px !important;
+}
+
+/* Dialog refinements */
+.el-dialog {
+  border-radius: 16px !important;
+  overflow: hidden;
+}
+
+.el-dialog__header {
+  padding: 20px 24px 16px !important;
+  margin-right: 0 !important;
+}
+
+.el-dialog__body {
+  padding: 16px 24px !important;
+}
+
+.el-dialog__footer {
+  padding: 12px 24px 20px !important;
+}
+
+/* Table refinements */
+.el-table {
+  border-radius: 8px !important;
+  overflow: hidden;
+}
+
+.el-table th.el-table__cell {
+  background-color: var(--el-fill-color-light) !important;
+  font-weight: 600 !important;
+}
+
+/* Tabs refinements */
+.el-tabs__header {
+  margin-bottom: 20px !important;
+}
+
+.el-tabs__item {
+  font-size: 15px !important;
+  font-weight: 500 !important;
+}
+
+/* Form refinements */
+.el-form-item__label {
+  font-weight: 500 !important;
+}
+
+/* Input refinements */
+.el-input__wrapper,
+.el-textarea__inner {
+  border-radius: 8px !important;
+}
+
+/* Switch refinements */
+.el-switch {
+  --el-switch-on-color: var(--el-color-primary);
+}
+
+/* Divider refinements */
+.el-divider--horizontal {
+  margin: 20px 0 !important;
+}
+
+/* Text button fix for dark mode */
+.el-button.is-text {
+  color: var(--el-button-text-color);
+}
+
+/* ============================================
+   Responsive Dialog Widths
+   ============================================ */
+@media (max-width: 768px) {
+  .el-dialog {
+    --el-dialog-width: 92vw !important;
+    width: 92vw !important;
+    margin: 8vh auto !important;
+  }
+
+  .el-dialog__header {
+    padding: 16px 16px 12px !important;
+  }
+
+  .el-dialog__body {
+    padding: 12px 16px !important;
+  }
+
+  .el-dialog__footer {
+    padding: 8px 16px 16px !important;
+  }
+
+  .el-message-box {
+    width: 85vw !important;
+  }
+}
+
+/* ============================================
+   Responsive Table Scroll
+   ============================================ */
+@media (max-width: 1024px) {
+  .el-table {
+    font-size: 13px !important;
+  }
+}
+
+/* ============================================
+   Utility: Fade transition
+   ============================================ */
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity var(--transition-normal);
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}

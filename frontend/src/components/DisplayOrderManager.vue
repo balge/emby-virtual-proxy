@@ -18,7 +18,7 @@
           >
             <template #item="{ element }">
               <div class="sortable-item">
-                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light">
+                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light" round>
                   {{ element.type === 'real' ? '真实库' : '虚拟库' }}
                 </el-tag>
                 <span class="lib-name">{{ element.name }}</span>
@@ -40,7 +40,7 @@
           >
             <template #item="{ element }">
               <div class="sortable-item">
-                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light">
+                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light" round>
                   {{ element.type === 'real' ? '真实库' : '虚拟库' }}
                 </el-tag>
                 <span class="lib-name">{{ element.name }}</span>
@@ -64,7 +64,7 @@
 
 <script setup>
 import { ref, watch, onMounted } from 'vue';
-import draggable from 'vuedraggable'; // 确保你已安装 vuedraggable
+import draggable from 'vuedraggable';
 import { useMainStore } from '@/stores/main';
 
 const store = useMainStore();
@@ -106,7 +106,6 @@ const saveLayout = async () => {
 };
 
 onMounted(() => {
-    // 确保 vuedraggable 已安装
     if (typeof draggable === 'undefined') {
         console.error("vuedraggable is not installed or imported correctly. Please run 'npm install vuedraggable@next'");
     }
@@ -123,39 +122,62 @@ onMounted(() => {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 .list-title {
   margin-top: 0;
   margin-bottom: 10px;
   font-weight: 600;
+  font-size: 15px;
   color: var(--el-text-color-primary);
 }
 .list-wrapper {
   flex-grow: 1;
-  border: 1px solid var(--el-border-color-light);
-  border-radius: 4px;
-  padding: 10px;
-  background-color: var(--el-fill-color-light);
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 10px;
+  padding: 12px;
+  background-color: var(--el-fill-color-lighter);
   overflow-y: auto;
 }
 .sortable-list {
   min-height: 350px;
 }
 .sortable-item {
-  padding: 8px 12px;
+  padding: 10px 14px;
   margin-bottom: 8px;
   background-color: var(--el-bg-color);
-  border-radius: 4px;
+  border-radius: 8px;
   cursor: grab;
   display: flex;
   align-items: center;
-  gap: 8px;
-  border: 1px solid var(--el-border-color);
+  gap: 10px;
+  border: 1px solid var(--el-border-color-lighter);
+  transition: box-shadow var(--transition-fast), transform var(--transition-fast);
+}
+.sortable-item:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+.sortable-item:active {
+  transform: scale(1.01);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
 }
 .sortable-item:last-child {
   margin-bottom: 0;
 }
 .lib-name {
   color: var(--el-text-color-regular);
+  font-size: 14px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .layout-manager-container {
+    flex-direction: column;
+    min-height: auto;
+  }
+
+  .sortable-list {
+    min-height: 150px;
+  }
 }
 </style>
