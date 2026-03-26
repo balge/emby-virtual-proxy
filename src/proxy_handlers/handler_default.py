@@ -38,6 +38,17 @@ async def forward_request(
         )
 
         # 定义一个异步生成器，用于逐块读取来自 Emby 服务器的响应体并将其 yield 出去。
+        # For redirect responses (301, 302, 307, 308), return immediately without streaming.
+        # Critical for 302-based playback (e.g., cloud storage direct links).
+        if resp.status in (301, 302, 307, 308):
+            body = await resp.read()
+            redirect_headers = {
+                k: v for k, v in resp.headers.items()
+                if k.lower() not in ('transfer-encoding', 'connection', 'content-encoding')
+            }
+            resp.release()
+            return Response(content=body, status_code=resp.status, headers=redirect_headers)
+
         async def stream_generator():
             try:
                 # resp.content 是一个 aiohttp.StreamReader 对象。
