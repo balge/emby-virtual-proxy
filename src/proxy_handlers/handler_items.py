@@ -120,12 +120,26 @@ def _check_condition(item_value: Any, operator: str, rule_value: str, field: str
     if operator == "is_not_empty": return item_value is not None and item_value != '' and item_value != []
     return False
 
-def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict]) -> List[Dict[str, Any]]:
+def _get_value_for_rule(item: Dict[str, Any], field: str) -> Any:
+    """Get item value for a rule field, with smart logic for special fields."""
+    # DateLastMediaAdded: Movie uses DateCreated, Series uses DateLastMediaAdded
+    if field == "DateLastMediaAdded":
+        item_type = item.get("Type", "")
+        if item_type == "Series":
+            return _get_nested_value(item, "DateLastMediaAdded") or _get_nested_value(item, "DateCreated")
+        else:
+            # Movie / Video / others: use DateCreated as "last added" time
+            return _get_nested_value(item, "DateCreated")
+    return _get_nested_value(item, field)
+
+def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict], match_all: bool = True) -> List[Dict[str, Any]]:
     if not post_filter_rules: return items
-    logger.info(f"Applying {len(post_filter_rules)} post-filter rules on {len(items)} items.")
+    mode = "AND" if match_all else "OR"
+    logger.info(f"Applying {len(post_filter_rules)} post-filter rules ({mode}) on {len(items)} items.")
     filtered_items = []
+    combiner = all if match_all else any
     for item in items:
-        if all(_check_condition(_get_nested_value(item, rule.field), rule.operator, rule.value, rule.field) for rule in post_filter_rules):
+        if combiner(_check_condition(_get_value_for_rule(item, rule.field), rule.operator, rule.value, rule.field) for rule in post_filter_rules):
             filtered_items.append(item)
     return filtered_items
 
@@ -195,11 +209,13 @@ async def _handle_source_library_scoped_request(
 
     # Apply advanced filter translation
     post_filter_rules = []
+    filter_match_all = True
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
+            filter_match_all = adv_filter.match_all
 
     if new_params.get("IsMovie") == "true":
         new_params["IncludeItemTypes"] = "Movie"
@@ -234,7 +250,7 @@ async def _handle_source_library_scoped_request(
 
     # Apply post-filter
     if post_filter_rules:
-        all_items = _apply_post_filter(all_items, post_filter_rules)
+        all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
 
     # Apply TMDB merge
     if is_tmdb_merge_enabled:
@@ -331,7 +347,7 @@ async def handle_virtual_library_items(
     for key in safe_params_to_inherit:
         if key in params: new_params[key] = params[key]
 
-    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container", "ProductionLocations", "DateLastMediaAdded"]
+    required_fields = ["ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings", "CommunityRating", "ProductionYear", "VideoRange", "Container", "ProductionLocations", "DateLastMediaAdded", "DateCreated"]
     if "Fields" in new_params:
         existing_fields = set(new_params["Fields"].split(','))
         missing_fields = [f for f in required_fields if f not in existing_fields]
@@ -402,12 +418,14 @@ async def handle_virtual_library_items(
 
     # --- Advanced filter translation ---
     post_filter_rules = []
+    filter_match_all = True
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
             logger.info(f"Translating advanced filter '{adv_filter.name}' rules...")
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
+            filter_match_all = adv_filter.match_all
             if post_filter_rules: logger.info(f"{len(post_filter_rules)} rules require proxy-side post-filtering.")
         else:
             logger.warning(f"Virtual library references advanced filter ID '{found_vlib.advanced_filter_id}', but it was not found.")
@@ -445,7 +463,7 @@ async def handle_virtual_library_items(
                     items_list = data.get("Items", [])
 
                     if post_filter_rules:
-                        items_list = _apply_post_filter(items_list, post_filter_rules)
+                        items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
 
                     if is_tmdb_merge_enabled:
                         items_list = await handler_merger.merge_items_by_tmdb(items_list)

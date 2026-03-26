@@ -54,7 +54,7 @@
                 <el-option label="发行年份 (ProductionYear)" value="ProductionYear"></el-option>
                 <el-option label="首播日期 (PremiereDate)" value="PremiereDate"></el-option>
                 <el-option label="添加日期 (DateCreated)" value="DateCreated"></el-option>
-                <el-option label="最后入库时间 (DateLastMediaAdded)" value="DateLastMediaAdded"></el-option>
+                <el-option label="最近入库/更新 (DateLastMediaAdded)" value="DateLastMediaAdded"></el-option>
                 <el-option label="类型 (Genres)" value="Genres"></el-option>
                 <el-option label="标签 (Tags)" value="Tags"></el-option>
                 <el-option label="工作室 (Studios)" value="Studios"></el-option>

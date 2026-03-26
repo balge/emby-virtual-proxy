@@ -115,11 +115,13 @@ async def handle_home_latest_items(
     new_params["IncludeItemTypes"] = "Movie,Series,Video"
 
     post_filter_rules = []
+    filter_match_all = True
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
+            filter_match_all = adv_filter.match_all
 
     is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
     if post_filter_rules or is_tmdb_merge_enabled:
@@ -191,7 +193,7 @@ async def handle_home_latest_items(
         all_items = deduped
 
         if post_filter_rules:
-            all_items = _apply_post_filter(all_items, post_filter_rules)
+            all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
         if is_tmdb_merge_enabled:
             all_items = await handler_merger.merge_items_by_tmdb(all_items)
 
@@ -214,7 +216,7 @@ async def handle_home_latest_items(
         items_list = data.get("Items", [])
 
         if post_filter_rules:
-            items_list = _apply_post_filter(items_list, post_filter_rules)
+            items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
 
         if is_tmdb_merge_enabled:
             items_list = await handler_merger.merge_items_by_tmdb(items_list)
