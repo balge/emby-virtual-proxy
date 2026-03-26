@@ -133,7 +133,7 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
         kwargs = {
             "title": (vlib.cover_title_zh or vlib.name, vlib.cover_title_en or ""),
             "font_path": (zh_font_path, en_font_path),
-            "font_size": (1, 1)
+            "font_size": (1, 1.2)
         }
 
         if style_name == 'style_multi_1':
