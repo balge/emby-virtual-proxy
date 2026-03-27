@@ -489,6 +489,127 @@ async def _handle_source_library_scoped_request(
 
     is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
 
+    # Optimized DateLastMediaAdded flow for scoped libraries:
+    # derive updated Series from Episode.DateCreated and avoid broad post-filter scans.
+    date_last_media_added_rule = None
+    if post_filter_rules:
+        dla_rules = [
+            r for r in post_filter_rules
+            if getattr(r, "field", None) == "DateLastMediaAdded"
+            and getattr(r, "operator", None) == "greater_than"
+            and getattr(r, "value", None)
+        ]
+        if len(dla_rules) == 1 and (filter_match_all or len(post_filter_rules) == 1):
+            date_last_media_added_rule = dla_rules[0]
+
+    if date_last_media_added_rule:
+        threshold_dt = _parse_iso_dt(getattr(date_last_media_added_rule, "value", None))
+        if threshold_dt:
+            logger.info(
+                f"Scoped optimized DateLastMediaAdded flow for '{found_vlib.name}', "
+                f"threshold={threshold_dt.isoformat()}"
+            )
+
+            scan_base_params = dict(new_params)
+            scan_base_params.pop("StartIndex", None)
+            scan_base_params.pop("Limit", None)
+            scan_base_params.pop("SortBy", None)
+            scan_base_params.pop("SortOrder", None)
+
+            series_ids_hit, series_latest_map = await _fetch_recent_episodes_series_ids(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                source_parent_ids=list(found_vlib.source_libraries),
+            )
+
+            series_items: List[Dict] = []
+            if series_ids_hit:
+                series_items = await _get_items_by_ids_chunked(
+                    session=session,
+                    search_url=search_url,
+                    headers=headers_to_forward,
+                    ids=list(series_ids_hit),
+                    fields=new_params.get("Fields", ""),
+                )
+
+            movie_video_items = await _fetch_items_recent_by_datecreated(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                include_item_types="Movie,Video",
+                source_parent_ids=list(found_vlib.source_libraries),
+            )
+
+            remaining_post_filters = [r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"]
+            if remaining_post_filters:
+                series_items = _apply_post_filter(series_items, remaining_post_filters, filter_match_all)
+                movie_video_items = _apply_post_filter(movie_video_items, remaining_post_filters, filter_match_all)
+
+            all_items = series_items + movie_video_items
+
+            if is_tmdb_merge_enabled:
+                all_items = await handler_merger.merge_items_by_tmdb(all_items)
+
+            seen_ids = set()
+            deduped_items = []
+            for item in all_items:
+                item_id = item.get("Id")
+                if item_id and item_id not in seen_ids:
+                    seen_ids.add(item_id)
+                    deduped_items.append(item)
+                elif not item_id:
+                    deduped_items.append(item)
+            all_items = deduped_items
+
+            sort_by = request.query_params.get("SortBy", "DateCreated")
+            sort_order = request.query_params.get("SortOrder", "Descending")
+            reverse = sort_order.startswith("Descending")
+            primary_sort = sort_by.split(",")[0] if sort_by else "DateCreated"
+
+            if primary_sort == "DateCreated":
+                def _k(it: Dict[str, Any]):
+                    if it.get("Type") == "Series":
+                        sid = str(it.get("Id") or "")
+                        dt = series_latest_map.get(sid)
+                        return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                    return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                all_items.sort(key=_k, reverse=reverse)
+            else:
+                sort_field_map = {
+                    "SortName": "SortName", "DateCreated": "DateCreated",
+                    "PremiereDate": "PremiereDate", "ProductionYear": "ProductionYear",
+                    "CommunityRating": "CommunityRating", "DatePlayed": "DatePlayed",
+                }
+                emby_field = sort_field_map.get(primary_sort, "SortName")
+                all_items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+            if custom_sort_field and custom_sort_order:
+                all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
+
+            total_record_count = len(all_items)
+            start_idx = int(client_start_index)
+            limit_count = int(client_limit)
+            paginated_items = all_items[start_idx : start_idx + limit_count]
+
+            if paginated_items:
+                vlib_items_cache[found_vlib.id] = paginated_items
+
+            final_data = {
+                "Items": paginated_items,
+                "TotalRecordCount": total_record_count,
+                "StartIndex": start_idx
+            }
+            logger.info(
+                f"Scoped optimized DateLastMediaAdded result: total={total_record_count}, page={len(paginated_items)}"
+            )
+            content = json.dumps(final_data).encode('utf-8')
+            return Response(content=content, status_code=200, media_type="application/json")
+
     # Performance: if client doesn't need TotalRecordCount, avoid full scans.
     enable_total = request.query_params.get("EnableTotalRecordCount", "true").lower() != "false"
 
