@@ -14,6 +14,7 @@ from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
 from proxy_cache import vlib_items_cache, random_recommend_cache
+from proxy_cache import get_vlib_total_count, make_vlib_total_cache_key
 logger = logging.getLogger(__name__)
 
 # Country code to possible name variants for ProductionLocations matching
@@ -399,6 +400,16 @@ async def _handle_source_library_scoped_request(
             f"Scoped result under-filled (page={len(paginated_items)}/{limit_count}), retrying with per_lib_target={retry_target}."
         )
         paginated_items, total_record_count = await _fetch_merge_sort_paginate(retry_target)
+
+    # Prefer accurate cached total if available (computed daily/on startup)
+    if enable_total:
+        try:
+            cache_key = make_vlib_total_cache_key(user_id, found_vlib.id)
+            cached_total, _updated_at = get_vlib_total_count(cache_key)
+            if isinstance(cached_total, int) and cached_total >= 0:
+                total_record_count = cached_total
+        except Exception:
+            pass
 
     if paginated_items:
         vlib_items_cache[found_vlib.id] = paginated_items

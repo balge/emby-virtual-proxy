@@ -32,6 +32,7 @@ class VirtualLibrary(BaseModel):
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签
     rsshub_url: Optional[str] = None # <-- 【新增】RSSHUB链接
     rss_type: Optional[Literal["douban", "bangumi"]] = None # <-- 【新增】RSS类型
+    rss_refresh_interval: Optional[int] = Field(default=None) # <-- 【新增】RSS库单独刷新间隔（小时）；未配置则使用全局 rss_refresh_interval
     fallback_tmdb_id: Optional[str] = None # <-- 【新增】RSS库的兜底TMDB ID
     fallback_tmdb_type: Optional[Literal["Movie", "TV"]] = None # <-- 【新增】RSS库的兜底TMDB类型
     enable_retention: bool = Field(default=False) # <-- 【新增】是否开启数据保留功能

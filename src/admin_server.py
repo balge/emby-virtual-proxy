@@ -977,19 +977,41 @@ admin_app.mount("/covers", StaticFiles(directory=str(covers_dir)), name="covers"
 
 
 def update_rss_refresh_job(config: AppConfig):
-    job_id = 'rss_refresh_job'
-    if scheduler.get_job(job_id):
-        scheduler.remove_job(job_id)
-    
-    if config.rss_refresh_interval and config.rss_refresh_interval > 0:
+    # Remove all existing rss refresh jobs (global + per-library)
+    for job in list(scheduler.get_jobs()):
+        if job.id == "rss_refresh_job" or job.id.startswith("rss_refresh:"):
+            scheduler.remove_job(job.id)
+
+    def _effective_hours(vlib: VirtualLibrary) -> int:
+        # vlib override wins; otherwise fall back to global
+        if vlib.rss_refresh_interval is not None:
+            return int(vlib.rss_refresh_interval)
+        return int(config.rss_refresh_interval or 0)
+
+    # Schedule per-library refresh jobs
+    rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub" and not lib.hidden]
+    for vlib in rss_libraries:
+        hours = _effective_hours(vlib)
+        if hours <= 0:
+            continue
+        job_id = f"rss_refresh:{vlib.id}"
         scheduler.add_job(
-            refresh_all_rss_libraries,
-            'interval',
-            hours=config.rss_refresh_interval,
+            refresh_rss_library_by_id,
+            "interval",
+            hours=hours,
             id=job_id,
-            replace_existing=True
+            replace_existing=True,
+            args=[vlib.id],
         )
-        logger.info(f"RSS refresh job scheduled to run every {config.rss_refresh_interval} hours.")
+        logger.info(f"RSS refresh job scheduled: {vlib.name} ({vlib.id}) every {hours} hours.")
+
+async def refresh_rss_library_by_id(library_id: str):
+    """Refresh RSS library by ID (reloads config each run)."""
+    config = config_manager.load_config()
+    vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    if not vlib or vlib.resource_type != "rsshub" or vlib.hidden:
+        return
+    await refresh_rss_library_internal(vlib)
 
 async def refresh_all_rss_libraries():
     """定时刷新所有 RSS 虚拟库"""

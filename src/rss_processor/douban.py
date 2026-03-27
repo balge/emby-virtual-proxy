@@ -2,6 +2,7 @@ import re
 import time
 import requests
 import logging
+import threading
 from bs4 import BeautifulSoup
 from db_manager import DBManager, DOUBAN_CACHE_DB
 from .base_processor import BaseRssProcessor
@@ -11,11 +12,14 @@ logger = logging.getLogger(__name__)
 # 豆瓣 API 的速率限制
 DOUBAN_API_RATE_LIMIT = 2  # 秒
 
+# 进程级全局限速（避免每次刷新新建 Processor 导致限速失效）
+_douban_rate_lock = threading.Lock()
+_douban_last_call_time = 0.0
+
 class DoubanProcessor(BaseRssProcessor):
     def __init__(self, vlib):
         super().__init__(vlib)
         self.douban_db = DBManager(DOUBAN_CACHE_DB)
-        self.last_api_call_time = 0
 
     def _parse_source_ids(self, xml_content):
         """从 RSS XML 中解析出豆瓣 ID、标题和年份。如果ID不存在，则尝试从描述中解析。"""
@@ -121,12 +125,14 @@ class DoubanProcessor(BaseRssProcessor):
             logger.info(f"豆瓣ID {douban_id}: 在缓存中找到 IMDb ID -> {cached['api_response']} (名称: {cached['name'] or 'N/A'})")
             return cached['api_response']
 
-        since_last_call = time.time() - self.last_api_call_time
-        if since_last_call < DOUBAN_API_RATE_LIMIT:
-            sleep_time = DOUBAN_API_RATE_LIMIT - since_last_call
-            logger.info(f"豆瓣页面访问速率限制：休眠 {sleep_time:.2f} 秒。")
-            time.sleep(sleep_time)
-        self.last_api_call_time = time.time()
+        global _douban_last_call_time
+        with _douban_rate_lock:
+            since_last_call = time.time() - _douban_last_call_time
+            if since_last_call < DOUBAN_API_RATE_LIMIT:
+                sleep_time = DOUBAN_API_RATE_LIMIT - since_last_call
+                logger.info(f"豆瓣页面访问速率限制：休眠 {sleep_time:.2f} 秒。")
+                time.sleep(sleep_time)
+            _douban_last_call_time = time.time()
 
         url = f"https://movie.douban.com/subject/{douban_id}/"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
