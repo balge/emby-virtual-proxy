@@ -153,7 +153,11 @@ const resourceTypeMap = {
 const getResourceTypeLabel = (type) => resourceTypeMap[type] || '未知';
 
 const getResourceNameById = (type, id, row) => {
-    if (type === 'rsshub') return row.rsshub_url;
+    if (type === 'rsshub') {
+        const custom = Number(row.rss_refresh_interval);
+        const refreshText = Number.isFinite(custom) && custom > 0 ? `${custom}h` : '跟随全局';
+        return `${row.rsshub_url}（刷新: ${refreshText}）`;
+    }
     if (type === 'random') return '基于播放记录推荐';
     if (type === 'all') return '全部媒体库';
     if (type === 'person') {

@@ -336,6 +336,7 @@ export const useMainStore = defineStore('main', {
             image_tag: null,
             fallback_tmdb_id: null,
             fallback_tmdb_type: null,
+            rss_refresh_interval: null,
             source_libraries: []
         };
         this.dialogVisible = true;

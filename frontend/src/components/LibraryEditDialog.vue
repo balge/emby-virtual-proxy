@@ -35,6 +35,20 @@
         </el-select>
       </el-form-item>
 
+      <el-form-item label="刷新间隔(小时)" v-if="store.currentLibrary.resource_type === 'rsshub'">
+        <el-input-number
+          v-model="store.currentLibrary.rss_refresh_interval"
+          :min="1"
+          :step="1"
+          :controls-position="'right'"
+          placeholder="留空使用全局配置"
+          style="width: 220px;"
+        />
+        <el-tooltip content="仅当前 RSSHUB 虚拟库生效。留空时将使用系统设置中的全局 RSS 刷新间隔。" placement="top">
+          <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
+        </el-tooltip>
+      </el-form-item>
+
       <el-form-item label="开启数据保留" v-if="store.currentLibrary.resource_type === 'rsshub'">
         <el-switch v-model="store.currentLibrary.enable_retention"></el-switch>
         <el-tooltip content="开启后，即使条目从 RSS 源中消失，也会在本地保留一段时间。关闭则每次刷新都会清空重建（与 RSS 源完全同步）。" placement="top">
