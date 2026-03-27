@@ -290,7 +290,7 @@
 
     services:
       emby-proxy:
-        image: pipi20xx/emby-virtual-proxy
+        image: ghcr.io/balge/emby-virtual-proxy:latest
         container_name: emby-proxy
         ports:
           # 管理后台端口，左边为主机端口，右边为容器端口
