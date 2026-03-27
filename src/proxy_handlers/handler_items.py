@@ -311,6 +311,30 @@ async def _get_items_by_ids_chunked(
             out.extend(data.get("Items", []) if isinstance(data, dict) else [])
     return out
 
+def _sort_by_effective_last_media_added(
+    items: List[Dict[str, Any]],
+    series_latest_map: Dict[str, datetime],
+    sort_order: str,
+) -> List[Dict[str, Any]]:
+    """
+    Sort by effective last-media-added time:
+    - Series: newest Episode.DateCreated from series_latest_map.
+    - Others: DateCreated.
+    """
+    reverse = (sort_order == "desc" or str(sort_order).startswith("Desc"))
+
+    def _k(it: Dict[str, Any]):
+        if it.get("Type") == "Series":
+            sid = str(it.get("Id") or "")
+            dt = series_latest_map.get(sid)
+            if dt is not None:
+                return dt
+            return _parse_iso_dt(it.get("DateLastMediaAdded")) or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+        return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+
+    items.sort(key=_k, reverse=reverse)
+    return items
+
 def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict], match_all: bool = True) -> List[Dict[str, Any]]:
     if not post_filter_rules: return items
     mode = "AND" if match_all else "OR"
@@ -571,14 +595,17 @@ async def _handle_source_library_scoped_request(
             reverse = sort_order.startswith("Descending")
             primary_sort = sort_by.split(",")[0] if sort_by else "DateCreated"
 
-            if primary_sort == "DateCreated":
-                def _k(it: Dict[str, Any]):
-                    if it.get("Type") == "Series":
-                        sid = str(it.get("Id") or "")
-                        dt = series_latest_map.get(sid)
-                        return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
-                    return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
-                all_items.sort(key=_k, reverse=reverse)
+            if primary_sort in ("DateCreated", "DateLastMediaAdded"):
+                if primary_sort == "DateLastMediaAdded":
+                    _sort_by_effective_last_media_added(all_items, series_latest_map, sort_order)
+                else:
+                    def _k(it: Dict[str, Any]):
+                        if it.get("Type") == "Series":
+                            sid = str(it.get("Id") or "")
+                            dt = series_latest_map.get(sid)
+                            return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                        return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                    all_items.sort(key=_k, reverse=reverse)
             else:
                 sort_field_map = {
                     "SortName": "SortName", "DateCreated": "DateCreated",
@@ -589,7 +616,10 @@ async def _handle_source_library_scoped_request(
                 all_items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
 
             if custom_sort_field and custom_sort_order:
-                all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
+                if custom_sort_field == "DateLastMediaAdded":
+                    _sort_by_effective_last_media_added(all_items, series_latest_map, custom_sort_order)
+                else:
+                    all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
 
             total_record_count = len(all_items)
             start_idx = int(client_start_index)
@@ -1177,14 +1207,17 @@ async def handle_virtual_library_items(
             reverse = sort_order.startswith("Descending")
             primary_sort = sort_by.split(",")[0] if sort_by else "DateCreated"
 
-            if primary_sort == "DateCreated":
-                def _k(it: Dict[str, Any]):
-                    if it.get("Type") == "Series":
-                        sid = str(it.get("Id") or "")
-                        dt = series_latest_map.get(sid)
-                        return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
-                    return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
-                deduped.sort(key=_k, reverse=reverse)
+            if primary_sort in ("DateCreated", "DateLastMediaAdded"):
+                if primary_sort == "DateLastMediaAdded":
+                    _sort_by_effective_last_media_added(deduped, series_latest_map, sort_order)
+                else:
+                    def _k(it: Dict[str, Any]):
+                        if it.get("Type") == "Series":
+                            sid = str(it.get("Id") or "")
+                            dt = series_latest_map.get(sid)
+                            return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                        return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                    deduped.sort(key=_k, reverse=reverse)
             else:
                 sort_field_map = {
                     "SortName": "SortName", "DateCreated": "DateCreated",
@@ -1195,7 +1228,10 @@ async def handle_virtual_library_items(
                 deduped.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
 
             if custom_sort_field and custom_sort_order:
-                deduped = _apply_custom_sort(deduped, custom_sort_field, custom_sort_order)
+                if custom_sort_field == "DateLastMediaAdded":
+                    _sort_by_effective_last_media_added(deduped, series_latest_map, custom_sort_order)
+                else:
+                    deduped = _apply_custom_sort(deduped, custom_sort_field, custom_sort_order)
 
             total_record_count = len(deduped)
             start_idx = int(client_start_index)
