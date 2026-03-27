@@ -5,6 +5,7 @@ import json
 import asyncio
 import random as random_module
 from collections import Counter
+from datetime import datetime, timezone
 from fastapi import Request, Response
 from aiohttp import ClientSession
 from models import AppConfig, AdvancedFilter, VirtualLibrary
@@ -14,7 +15,6 @@ from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
 from proxy_cache import vlib_items_cache, random_recommend_cache
-from proxy_cache import get_vlib_total_count, make_vlib_total_cache_key
 logger = logging.getLogger(__name__)
 
 # Country code to possible name variants for ProductionLocations matching
@@ -140,6 +140,176 @@ def _get_value_for_rule(item: Dict[str, Any], field: str) -> Any:
             # Movie / Video / others: use DateCreated as "last added" time
             return _get_nested_value(item, "DateCreated")
     return _get_nested_value(item, field)
+
+def _parse_iso_dt(value: Any) -> Optional[datetime]:
+    """Parse Emby ISO datetime string into UTC datetime."""
+    if not value:
+        return None
+    try:
+        s = str(value)
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+async def _fetch_recent_episodes_series_ids(
+    *,
+    session: ClientSession,
+    search_url: str,
+    headers: Dict[str, str],
+    base_params: Dict[str, Any],
+    threshold_dt: datetime,
+    source_parent_ids: Optional[List[str]],
+) -> tuple[set[str], Dict[str, datetime]]:
+    """
+    Use Episode.DateCreated to derive Series that updated recently.
+    Stops early once items are older than threshold (SortBy=DateCreated desc).
+    Returns (series_ids, series_latest_map).
+    """
+    series_ids: set[str] = set()
+    series_latest: Dict[str, datetime] = {}
+
+    async def _scan_one_parent(parent_id: Optional[str]):
+        start_index = 0
+        limit = 200
+        while True:
+            p = dict(base_params)
+            p["IncludeItemTypes"] = "Episode"
+            p["Recursive"] = "true"
+            p["SortBy"] = "DateCreated"
+            p["SortOrder"] = "Descending"
+            p["Fields"] = "DateCreated,SeriesId"
+            if parent_id:
+                p["ParentId"] = parent_id
+            p["StartIndex"] = str(start_index)
+            p["Limit"] = str(limit)
+
+            async with session.get(search_url, params=p, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Episode scan failed (ParentId={parent_id}), status={resp.status}")
+                    return
+                data = await resp.json()
+                items = data.get("Items", []) if isinstance(data, dict) else []
+                if not items:
+                    return
+
+                oldest_dt: Optional[datetime] = None
+                for it in items:
+                    created_dt = _parse_iso_dt(it.get("DateCreated"))
+                    if created_dt is None:
+                        continue
+                    if oldest_dt is None or created_dt < oldest_dt:
+                        oldest_dt = created_dt
+                    if created_dt < threshold_dt:
+                        continue
+                    sid = it.get("SeriesId")
+                    if not sid:
+                        continue
+                    sid_str = str(sid)
+                    series_ids.add(sid_str)
+                    prev = series_latest.get(sid_str)
+                    if prev is None or created_dt > prev:
+                        series_latest[sid_str] = created_dt
+
+                if oldest_dt is not None and oldest_dt < threshold_dt:
+                    return
+                start_index += len(items)
+                if len(items) < limit:
+                    return
+
+    if source_parent_ids:
+        for pid in source_parent_ids:
+            await _scan_one_parent(pid)
+    else:
+        await _scan_one_parent(None)
+
+    return series_ids, series_latest
+
+async def _fetch_items_recent_by_datecreated(
+    *,
+    session: ClientSession,
+    search_url: str,
+    headers: Dict[str, str],
+    base_params: Dict[str, Any],
+    threshold_dt: datetime,
+    include_item_types: str,
+    source_parent_ids: Optional[List[str]],
+) -> List[Dict]:
+    """Fetch items recent by DateCreated; stop early once older than threshold."""
+    collected: List[Dict] = []
+
+    async def _scan_one_parent(parent_id: Optional[str]):
+        start_index = 0
+        limit = 200
+        while True:
+            p = dict(base_params)
+            p["IncludeItemTypes"] = include_item_types
+            p["Recursive"] = "true"
+            p["SortBy"] = "DateCreated"
+            p["SortOrder"] = "Descending"
+            if parent_id:
+                p["ParentId"] = parent_id
+            p["StartIndex"] = str(start_index)
+            p["Limit"] = str(limit)
+
+            async with session.get(search_url, params=p, headers=headers) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Recent scan failed (ParentId={parent_id}), status={resp.status}")
+                    return
+                data = await resp.json()
+                items = data.get("Items", []) if isinstance(data, dict) else []
+                if not items:
+                    return
+
+                oldest_dt: Optional[datetime] = None
+                for it in items:
+                    created_dt = _parse_iso_dt(it.get("DateCreated"))
+                    if created_dt is None:
+                        continue
+                    if oldest_dt is None or created_dt < oldest_dt:
+                        oldest_dt = created_dt
+                    if created_dt >= threshold_dt:
+                        collected.append(it)
+
+                if oldest_dt is not None and oldest_dt < threshold_dt:
+                    return
+                start_index += len(items)
+                if len(items) < limit:
+                    return
+
+    if source_parent_ids:
+        for pid in source_parent_ids:
+            await _scan_one_parent(pid)
+    else:
+        await _scan_one_parent(None)
+
+    return collected
+
+async def _get_items_by_ids_chunked(
+    *,
+    session: ClientSession,
+    search_url: str,
+    headers: Dict[str, str],
+    ids: List[str],
+    fields: str,
+    chunk_size: int = 100,
+) -> List[Dict]:
+    out: List[Dict] = []
+    for i in range(0, len(ids), chunk_size):
+        chunk = ids[i:i + chunk_size]
+        params: Dict[str, Any] = {"Ids": ",".join(chunk)}
+        if fields:
+            params["Fields"] = fields
+        async with session.get(search_url, params=params, headers=headers) as resp:
+            if resp.status != 200:
+                continue
+            data = await resp.json()
+            out.extend(data.get("Items", []) if isinstance(data, dict) else [])
+    return out
 
 def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict], match_all: bool = True) -> List[Dict[str, Any]]:
     if not post_filter_rules: return items
@@ -400,16 +570,6 @@ async def _handle_source_library_scoped_request(
             f"Scoped result under-filled (page={len(paginated_items)}/{limit_count}), retrying with per_lib_target={retry_target}."
         )
         paginated_items, total_record_count = await _fetch_merge_sort_paginate(retry_target)
-
-    # Prefer accurate cached total if available (computed daily/on startup)
-    if enable_total:
-        try:
-            cache_key = make_vlib_total_cache_key(user_id, found_vlib.id)
-            cached_total, _updated_at = get_vlib_total_count(cache_key)
-            if isinstance(cached_total, int) and cached_total >= 0:
-                total_record_count = cached_total
-        except Exception:
-            pass
 
     if paginated_items:
         vlib_items_cache[found_vlib.id] = paginated_items
@@ -779,6 +939,7 @@ async def handle_virtual_library_items(
     filter_match_all = True
     custom_sort_field = None
     custom_sort_order = None
+    date_last_media_added_rule = None
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
@@ -791,6 +952,18 @@ async def handle_virtual_library_items(
             if post_filter_rules: logger.info(f"{len(post_filter_rules)} rules require proxy-side post-filtering.")
         else:
             logger.warning(f"Virtual library references advanced filter ID '{found_vlib.advanced_filter_id}', but it was not found.")
+
+    if post_filter_rules:
+        dla_rules = [
+            r for r in post_filter_rules
+            if getattr(r, "field", None) == "DateLastMediaAdded"
+            and getattr(r, "operator", None) == "greater_than"
+            and getattr(r, "value", None)
+        ]
+        # Only enable optimized path when DateLastMediaAdded is the only post-filter,
+        # or when match_all is True (AND semantics) so we can still apply other post-filters after.
+        if len(dla_rules) == 1 and (filter_match_all or len(post_filter_rules) == 1):
+            date_last_media_added_rule = dla_rules[0]
 
     if new_params.get("IsMovie") == "true":
         new_params["IncludeItemTypes"] = "Movie"
@@ -805,6 +978,112 @@ async def handle_virtual_library_items(
     headers_to_forward = _build_headers_to_forward(request)
 
     logger.debug(f"Final optimized request to Emby: URL={search_url}, Params={new_params}")
+
+    # --- Optimized DateLastMediaAdded flow (derive from Episode.DateCreated) ---
+    if date_last_media_added_rule:
+        threshold_dt = _parse_iso_dt(getattr(date_last_media_added_rule, "value", None))
+        if threshold_dt:
+            logger.info(f"Optimized DateLastMediaAdded: threshold={threshold_dt.isoformat()}")
+
+            # Scope to source libraries if configured (respect ignore list)
+            ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+            source_parent_ids = list(found_vlib.source_libraries) if found_vlib.source_libraries else None
+            if source_parent_ids and ignore_set:
+                source_parent_ids = [lid for lid in source_parent_ids if lid not in ignore_set]
+            if source_parent_ids and len(source_parent_ids) == 0:
+                source_parent_ids = None
+
+            scan_base_params = dict(new_params)
+            # Remove client pagination; scans are self-paged
+            scan_base_params.pop("StartIndex", None)
+            scan_base_params.pop("Limit", None)
+            # Remove client sort; we enforce DateCreated desc in scan
+            scan_base_params.pop("SortBy", None)
+            scan_base_params.pop("SortOrder", None)
+
+            series_ids_hit, series_latest_map = await _fetch_recent_episodes_series_ids(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                source_parent_ids=source_parent_ids,
+            )
+
+            series_items: List[Dict] = []
+            if series_ids_hit:
+                series_items = await _get_items_by_ids_chunked(
+                    session=session,
+                    search_url=search_url,
+                    headers=headers_to_forward,
+                    ids=list(series_ids_hit),
+                    fields=new_params.get("Fields", ""),
+                )
+
+            movie_video_items = await _fetch_items_recent_by_datecreated(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                include_item_types="Movie,Video",
+                source_parent_ids=source_parent_ids,
+            )
+
+            remaining_post_filters = [r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"]
+            if remaining_post_filters:
+                series_items = _apply_post_filter(series_items, remaining_post_filters, filter_match_all)
+                movie_video_items = _apply_post_filter(movie_video_items, remaining_post_filters, filter_match_all)
+
+            combined = series_items + movie_video_items
+            if is_tmdb_merge_enabled:
+                combined = await handler_merger.merge_items_by_tmdb(combined)
+
+            # Deduplicate by Id
+            seen_ids = set()
+            deduped = []
+            for item in combined:
+                iid = item.get("Id")
+                if iid and iid in seen_ids:
+                    continue
+                if iid:
+                    seen_ids.add(iid)
+                deduped.append(item)
+
+            # Sorting: if client sorts by DateCreated, use derived series latest episode date.
+            sort_by = request.query_params.get("SortBy", "DateCreated")
+            sort_order = request.query_params.get("SortOrder", "Descending")
+            reverse = sort_order.startswith("Descending")
+            primary_sort = sort_by.split(",")[0] if sort_by else "DateCreated"
+
+            if primary_sort == "DateCreated":
+                def _k(it: Dict[str, Any]):
+                    if it.get("Type") == "Series":
+                        sid = str(it.get("Id") or "")
+                        dt = series_latest_map.get(sid)
+                        return dt or _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                    return _parse_iso_dt(it.get("DateCreated")) or datetime.min.replace(tzinfo=timezone.utc)
+                deduped.sort(key=_k, reverse=reverse)
+            else:
+                sort_field_map = {
+                    "SortName": "SortName", "DateCreated": "DateCreated",
+                    "PremiereDate": "PremiereDate", "ProductionYear": "ProductionYear",
+                    "CommunityRating": "CommunityRating", "DatePlayed": "DatePlayed",
+                }
+                emby_field = sort_field_map.get(primary_sort, "SortName")
+                deduped.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+            if custom_sort_field and custom_sort_order:
+                deduped = _apply_custom_sort(deduped, custom_sort_field, custom_sort_order)
+
+            total_record_count = len(deduped)
+            start_idx = int(client_start_index)
+            limit_count = int(client_limit)
+            page_items = deduped[start_idx: start_idx + limit_count]
+            final_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
+            if page_items:
+                vlib_items_cache[found_vlib.id] = page_items
+            return Response(content=json.dumps(final_data).encode("utf-8"), status_code=200, media_type="application/json")
 
     # Standard pagination path (no TMDB merge, or has post-filter rules)
     if not is_tmdb_merge_enabled or post_filter_rules:

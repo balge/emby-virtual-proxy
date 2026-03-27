@@ -43,13 +43,6 @@ def _init_db():
             expires_at TEXT NOT NULL
         )
     """)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS vlib_total_counts (
-            cache_key TEXT PRIMARY KEY,
-            total_count INTEGER NOT NULL,
-            updated_at TEXT NOT NULL
-        )
-    """)
     conn.commit()
     conn.close()
 
@@ -216,41 +209,3 @@ class PersistentTTLCache:
 # --- Module-level cache instances ---
 vlib_items_cache = PersistentCache()
 random_recommend_cache = PersistentTTLCache(ttl_seconds=43200)  # 12 hours
-
-
-def make_vlib_total_cache_key(user_id: str, vlib_id: str) -> str:
-    return f"user:{user_id}:vlib:{vlib_id}"
-
-
-def get_vlib_total_count(cache_key: str) -> tuple[int | None, str | None]:
-    """
-    Returns (total_count, updated_at_iso) or (None, None) if missing.
-    """
-    try:
-        with _db_lock:
-            conn = _get_db()
-            row = conn.execute(
-                "SELECT total_count, updated_at FROM vlib_total_counts WHERE cache_key = ?",
-                (cache_key,)
-            ).fetchone()
-            conn.close()
-        if not row:
-            return None, None
-        return int(row[0]), str(row[1])
-    except Exception as e:
-        logger.warning(f"Failed to read vlib_total_counts for {cache_key}: {e}")
-        return None, None
-
-
-def set_vlib_total_count(cache_key: str, total_count: int):
-    try:
-        with _db_lock:
-            conn = _get_db()
-            conn.execute(
-                "INSERT OR REPLACE INTO vlib_total_counts (cache_key, total_count, updated_at) VALUES (?, ?, ?)",
-                (cache_key, int(total_count), datetime.utcnow().isoformat())
-            )
-            conn.commit()
-            conn.close()
-    except Exception as e:
-        logger.warning(f"Failed to persist vlib_total_counts for {cache_key}: {e}")

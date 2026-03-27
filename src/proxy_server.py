@@ -10,12 +10,10 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Tuple, Dict
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # 【【【 同时修改这一行，从 proxy_cache 导入两个缓存实例 】】】
 from proxy_cache import api_cache, vlib_items_cache
 import config_manager
-from vlib_total_job import refresh_vlib_totals_background
 from proxy_handlers import (
     handler_system, 
     handler_views, 
@@ -44,29 +42,7 @@ def get_cache_key(request: Request, full_path: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.aiohttp_session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()); logger.info("Global AIOHTTP ClientSession created.")
-    app.state.scheduler = AsyncIOScheduler()
-    app.state.scheduler.start()
-    # Background refresh on startup (non-blocking)
-    try:
-        cfg = config_manager.load_config()
-        asyncio.create_task(refresh_vlib_totals_background(config=cfg, session=app.state.aiohttp_session))
-    except Exception as e:
-        logger.warning(f"Failed to schedule startup vlib total refresh: {e}")
-
-    # Daily refresh
-    def _refresh_job():
-        try:
-            cfg = config_manager.load_config()
-            asyncio.create_task(refresh_vlib_totals_background(config=cfg, session=app.state.aiohttp_session))
-        except Exception as e:
-            logger.warning(f"Failed to schedule daily vlib total refresh: {e}")
-
-    app.state.scheduler.add_job(_refresh_job, "interval", days=1, id="refresh_vlib_totals", replace_existing=True)
     yield
-    try:
-        app.state.scheduler.shutdown(wait=False)
-    except Exception:
-        pass
     await app.state.aiohttp_session.close(); logger.info("Global AIOHTTP ClientSession closed.")
 
 proxy_app = FastAPI(title="Emby Virtual Proxy - Core", lifespan=lifespan)
