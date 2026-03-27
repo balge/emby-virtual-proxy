@@ -38,16 +38,14 @@ class RssHandler:
         if not server_id:
             server_id = self.config.emby_server_id or "emby"
 
-        # 3. 使用真实的 ServerId 创建不存在项目的占位符
-        missing_items_placeholders = []
-        for item_info in missing_items_info:
-            # 注意：_get_item_from_tmdb 是同步的，但内部的数据库和网络请求是阻塞的
-            # 在异步函数中直接调用它在 aiohttp 环境下是安全的
-            item = self._get_item_from_tmdb(item_info['tmdb_id'], item_info['media_type'], server_id)
-            if item:
-                missing_items_placeholders.append(item)
-
-        final_items = existing_items_data + missing_items_placeholders
+        # 3. 只返回 Emby 中实际存在的项目，不再为缺失内容生成占位符
+        # missing_items_placeholders = []
+        # for item_info in missing_items_info:
+        #     item = self._get_item_from_tmdb(item_info['tmdb_id'], item_info['media_type'], server_id)
+        #     if item:
+        #         missing_items_placeholders.append(item)
+        # final_items = existing_items_data + missing_items_placeholders
+        final_items = existing_items_data
         return {"Items": final_items, "TotalRecordCount": len(final_items)}
 
     async def _get_emby_items_by_ids_async(self, item_ids: list, request_params, user_id: str, session, real_emby_url: str, request_headers):

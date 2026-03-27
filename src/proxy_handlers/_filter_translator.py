@@ -74,11 +74,22 @@ def translate_rules(rules: List[AdvancedFilterRule]) -> Tuple[Dict[str, Any], Li
             value = target_date.strftime('%Y-%m-%d')
             operator = "greater_than"
 
-        # DateLastMediaAdded: always post-filter, but compute relative date value here
-        if rule.relative_days and field == "DateLastMediaAdded":
-            target_date = datetime.utcnow() - timedelta(days=rule.relative_days)
-            value = target_date.strftime('%Y-%m-%dT%H:%M:%S')
-            operator = "greater_than"
+        # DateLastMediaAdded: always post-filter, but normalize the value format here
+        if field == "DateLastMediaAdded":
+            if rule.relative_days:
+                target_date = datetime.utcnow() - timedelta(days=rule.relative_days)
+                value = target_date.strftime('%Y-%m-%dT%H:%M:%S')
+                operator = "greater_than"
+            elif value and operator in ("greater_than", "less_than", "equals"):
+                # 用户输入的是 YYYY-MM-DD 格式，需要补全为 ISO 格式以便字符串比较
+                if len(str(value)) == 10:  # YYYY-MM-DD
+                    if operator == "greater_than":
+                        value = f"{value}T00:00:00"
+                    elif operator == "less_than":
+                        value = f"{value}T23:59:59"
+                    elif operator == "equals":
+                        # equals 对日期没有意义，但保持兼容
+                        value = f"{value}T00:00:00"
 
         if operator == "is_not_empty":
             if field in FIELD_MAP and isinstance(FIELD_MAP[field], str) and FIELD_MAP[field].startswith("Has"):

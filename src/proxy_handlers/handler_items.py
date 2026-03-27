@@ -104,10 +104,11 @@ def _check_condition(item_value: Any, operator: str, rule_value: str, field: str
                 if operator == "greater_than": return float(item_value) > float(rule_value)
                 if operator == "less_than": return float(item_value) < float(rule_value)
             except (ValueError, TypeError):
-                # Fallback: string comparison works for ISO datetime strings
+                # Fallback: string comparison for ISO datetime strings
+                # Normalize both to comparable format (trim timezone suffix and microseconds)
                 try:
-                    iv = str(item_value)[:19]  # Trim to "YYYY-MM-DDTHH:MM:SS"
-                    rv = str(rule_value)[:19]
+                    iv = str(item_value).replace('Z', '').split('.')[0][:19]  # "YYYY-MM-DDTHH:MM:SS"
+                    rv = str(rule_value).replace('Z', '').split('.')[0][:19]
                     if operator == "greater_than": return iv > rv
                     if operator == "less_than": return iv < rv
                 except Exception:
@@ -128,7 +129,12 @@ def _get_value_for_rule(item: Dict[str, Any], field: str) -> Any:
     if field == "DateLastMediaAdded":
         item_type = item.get("Type", "")
         if item_type == "Series":
-            return _get_nested_value(item, "DateLastMediaAdded") or _get_nested_value(item, "DateCreated")
+            # 优先使用 DateLastMediaAdded，这是 Emby 维护的"最后入库媒体"时间
+            val = _get_nested_value(item, "DateLastMediaAdded")
+            if val:
+                return val
+            # 回退到 DateCreated，但这只是 Series 条目本身的创建时间
+            return _get_nested_value(item, "DateCreated")
         else:
             # Movie / Video / others: use DateCreated as "last added" time
             return _get_nested_value(item, "DateCreated")

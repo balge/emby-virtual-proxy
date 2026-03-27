@@ -95,13 +95,14 @@ async def handle_home_latest_items(
         if not server_id:
             server_id = rss_handler.config.emby_server_id or "emby"
 
-        missing_items_placeholders = []
-        for item_info in missing_items_info:
-            item = rss_handler._get_item_from_tmdb(item_info['tmdb_id'], item_info['media_type'], server_id)
-            if item:
-                missing_items_placeholders.append(item)
-
-        final_items = existing_items_data + missing_items_placeholders
+        # 只返回 Emby 中实际存在的项目，不展示占位符
+        # missing_items_placeholders = []
+        # for item_info in missing_items_info:
+        #     item = rss_handler._get_item_from_tmdb(item_info['tmdb_id'], item_info['media_type'], server_id)
+        #     if item:
+        #         missing_items_placeholders.append(item)
+        # final_items = existing_items_data + missing_items_placeholders
+        final_items = existing_items_data
 
         content = json.dumps(final_items).encode('utf-8')
         return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})
