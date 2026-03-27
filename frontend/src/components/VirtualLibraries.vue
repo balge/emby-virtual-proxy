@@ -26,8 +26,13 @@
 
         <!-- Desktop table view -->
         <div class="table-view">
-            <el-table :data="store.virtualLibraries" style="width: 100%" v-loading="store.dataLoading">
-                <el-table-column prop="name" label="虚拟库名称" min-width="160" />
+            <el-table :data="store.virtualLibraries" style="width: 100%" v-loading="store.dataLoading" :row-class-name="tableRowClassName">
+                <el-table-column prop="name" label="虚拟库名称" min-width="160">
+                    <template #default="scope">
+                        <span :class="{ 'hidden-lib-name': scope.row.hidden }">{{ scope.row.name }}</span>
+                        <el-tag v-if="scope.row.hidden" size="small" type="info" round style="margin-left: 6px;">已隐藏</el-tag>
+                    </template>
+                </el-table-column>
                 <el-table-column label="资源类型" width="120">
                     <template #default="scope">
                         {{ getResourceTypeLabel(scope.row.resource_type) }}
@@ -50,13 +55,16 @@
                          <el-tag v-else type="info" size="small" round>全部</el-tag>
                     </template>
                 </el-table-column>
-                <el-table-column label="操作" width="380" align="right">
+                <el-table-column label="操作" width="420" align="right">
                     <template #default="scope">
                         <div class="action-buttons">
                             <el-button v-if="scope.row.resource_type === 'rsshub'" size="small" type="success" @click="store.refreshRssLibrary(scope.row.id)">刷新RSS</el-button>
                             <el-button size="small" type="primary" plain @click="store.refreshLibraryCover(scope.row.id)">更新封面</el-button>
                             <el-button size="small" type="success" plain @click="store.refreshLibraryData(scope.row.id)">更新数据</el-button>
                             <el-button size="small" @click="store.openEditDialog(scope.row)">编辑</el-button>
+                            <el-button size="small" :type="scope.row.hidden ? 'warning' : 'info'" plain @click="store.toggleLibraryHidden(scope.row.id)">
+                                {{ scope.row.hidden ? '显示' : '隐藏' }}
+                            </el-button>
                             <el-popconfirm
                                 :title="`确定要删除虚拟库 '${scope.row.name}' 吗？`"
                                 width="250"
@@ -78,10 +86,13 @@
 
         <!-- Mobile card view -->
         <div class="card-view" v-loading="store.dataLoading">
-            <div v-for="row in store.virtualLibraries" :key="row.id" class="lib-card">
+            <div v-for="row in store.virtualLibraries" :key="row.id" class="lib-card" :class="{ 'lib-card-hidden': row.hidden }">
                 <div class="lib-card-header">
                     <span class="lib-card-name">{{ row.name }}</span>
-                    <el-tag size="small" round>{{ getResourceTypeLabel(row.resource_type) }}</el-tag>
+                    <div style="display: flex; gap: 4px; align-items: center;">
+                        <el-tag v-if="row.hidden" size="small" type="info" round>已隐藏</el-tag>
+                        <el-tag size="small" round>{{ getResourceTypeLabel(row.resource_type) }}</el-tag>
+                    </div>
                 </div>
                 <div class="lib-card-detail">
                     {{ getResourceNameById(row.resource_type, row.resource_id, row) }}
@@ -95,6 +106,9 @@
                     <el-button size="small" type="primary" plain @click="store.refreshLibraryCover(row.id)">封面</el-button>
                     <el-button size="small" type="success" plain @click="store.refreshLibraryData(row.id)">数据</el-button>
                     <el-button size="small" @click="store.openEditDialog(row)">编辑</el-button>
+                    <el-button size="small" :type="row.hidden ? 'warning' : 'info'" plain @click="store.toggleLibraryHidden(row.id)">
+                        {{ row.hidden ? '显示' : '隐藏' }}
+                    </el-button>
                     <el-popconfirm
                         :title="`确定要删除虚拟库 '${row.name}' 吗？`"
                         width="250"
@@ -121,6 +135,10 @@ import { WarningFilled, Refresh } from '@element-plus/icons-vue';
 
 const store = useMainStore();
 
+const tableRowClassName = ({ row }) => {
+    return row.hidden ? 'hidden-row' : '';
+};
+
 const resourceTypeMap = {
     collection: '合集',
     tag: '标签',
@@ -128,7 +146,8 @@ const resourceTypeMap = {
     studio: '工作室',
     person: '人员',
     rsshub: 'RSSHUB',
-    random: '随机推荐'
+    random: '随机推荐',
+    all: '全库'
 };
 
 const getResourceTypeLabel = (type) => resourceTypeMap[type] || '未知';
@@ -191,6 +210,18 @@ const getResourceNameById = (type, id, row) => {
 
 .lib-card:hover {
     background: var(--el-fill-color-light);
+}
+
+.lib-card-hidden {
+    opacity: 0.55;
+}
+
+.hidden-lib-name {
+    opacity: 0.5;
+}
+
+:deep(.hidden-row) {
+    opacity: 0.55;
 }
 
 .lib-card-header {

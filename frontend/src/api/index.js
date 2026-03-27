@@ -43,6 +43,7 @@ export default {
     addLibrary: (library) => apiClient.post('/libraries', library),
     updateLibrary: (id, library) => apiClient.put(`/libraries/${id}`, library),
     deleteLibrary: (id) => apiClient.delete(`/libraries/${id}`),
+    toggleLibraryHidden: (id) => apiClient.patch(`/libraries/${id}/toggle-hidden`),
     refreshRssLibrary: (id) => apiClient.post(`/libraries/${id}/refresh`),
     refreshLibraryCover: (id) => apiClient.post(`/libraries/${id}/refresh-cover`),
     refreshLibraryData: (id) => apiClient.post(`/libraries/${id}/refresh-data`),

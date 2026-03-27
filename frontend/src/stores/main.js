@@ -245,6 +245,17 @@ export const useMainStore = defineStore('main', {
         }
     },
 
+    async toggleLibraryHidden(id) {
+        try {
+            const res = await api.toggleLibraryHidden(id);
+            const hidden = res.data.hidden;
+            ElMessage.success(hidden ? '虚拟库已隐藏，将不再定时更新' : '虚拟库已恢复显示');
+            await this._reloadConfigAndAllLibs();
+        } catch (error) {
+            this._handleApiError(error, '切换隐藏状态失败');
+        }
+    },
+
     async refreshRssLibrary(id) {
         try {
             await api.refreshRssLibrary(id);

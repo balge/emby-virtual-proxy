@@ -76,6 +76,10 @@ html {
   font-weight: 500 !important;
   transition: all var(--transition-fast) !important;
 }
+.el-button+.el-button {
+  margin-left: 0 !important;
+  margin-right: 0 !important;
+}
 
 /* Tag refinements */
 .el-tag {

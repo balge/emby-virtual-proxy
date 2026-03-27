@@ -852,6 +852,17 @@ async def update_library(library_id: str, updated_library_data: VirtualLibrary):
     config_manager.save_config(config)
     return updated_lib
 
+@api_router.patch("/libraries/{library_id}/toggle-hidden", tags=["Libraries"])
+async def toggle_library_hidden(library_id: str):
+    """切换虚拟库的隐藏/显示状态"""
+    config = config_manager.load_config()
+    for lib in config.virtual_libraries:
+        if lib.id == library_id:
+            lib.hidden = not lib.hidden
+            config_manager.save_config(config)
+            return {"id": lib.id, "hidden": lib.hidden}
+    raise HTTPException(status_code=404, detail="Virtual library not found")
+
 @api_router.delete("/libraries/{library_id}", status_code=204, tags=["Libraries"])
 async def delete_library(library_id: str):
     config = config_manager.load_config()
@@ -984,7 +995,7 @@ async def refresh_all_rss_libraries():
     """定时刷新所有 RSS 虚拟库"""
     logger.info("Starting scheduled RSS library refresh...")
     config = config_manager.load_config()
-    rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub"]
+    rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub" and not lib.hidden]
     
     for vlib in rss_libraries:
         logger.info(f"Refreshing RSS library: {vlib.name} ({vlib.id})")

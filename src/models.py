@@ -20,6 +20,8 @@ class AdvancedFilter(BaseModel):
     name: str
     match_all: bool = Field(default=True)
     rules: List[AdvancedFilterRule] = Field(default_factory=list)
+    sort_field: Optional[str] = Field(default=None)  # None = emby原生排序
+    sort_order: Optional[str] = Field(default=None)   # "asc" | "desc" | None
 
 class VirtualLibrary(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
@@ -44,6 +46,7 @@ class VirtualLibrary(BaseModel):
     cover_custom_image_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义图片目录
     cover_title_zh: Optional[str] = Field(default=None) # 海报中文标题（留空用虚拟库名称）
     cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
+    hidden: bool = Field(default=False) # 隐藏的虚拟库不会定时更新
 
 class AppConfig(BaseModel):
     emby_url: str = Field(default="http://127.0.0.1:8096")

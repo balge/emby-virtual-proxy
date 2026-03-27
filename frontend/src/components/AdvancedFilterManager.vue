@@ -17,6 +17,9 @@
         <el-table-column label="匹配逻辑">
           <template #default="scope">
             匹配 {{ scope.row.match_all ? '所有' : '任意' }} 条件 (共 {{ scope.row.rules.length }} 条)
+            <el-tag v-if="scope.row.sort_field" size="small" type="info" style="margin-left: 8px;">
+              排序: {{ getSortLabel(scope.row.sort_field) }} {{ scope.row.sort_order === 'desc' ? '↓' : '↑' }}
+            </el-tag>
           </template>
         </el-table-column>
         <el-table-column label="操作" width="150" align="right">
@@ -66,6 +69,31 @@
             <el-radio :value="false">匹配任意条件 (OR)</el-radio>
           </el-radio-group>
         </el-form-item>
+
+        <el-divider>排序</el-divider>
+
+        <div class="sort-row">
+          <el-form-item label="排序字段" style="flex: 1;">
+            <el-select v-model="currentFilter.sort_field" placeholder="Emby 原生排序" clearable style="width: 100%;">
+              <el-option label="社区评分" value="CommunityRating"></el-option>
+              <el-option label="影评人评分" value="CriticRating"></el-option>
+              <el-option label="发行年份" value="ProductionYear"></el-option>
+              <el-option label="首播日期" value="PremiereDate"></el-option>
+              <el-option label="添加日期" value="DateCreated"></el-option>
+              <el-option label="最近入库/更新" value="DateLastMediaAdded"></el-option>
+              <el-option label="名称" value="SortName"></el-option>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="排序方向" style="flex: 1;">
+            <el-select v-model="currentFilter.sort_order" placeholder="Emby 原生" clearable style="width: 100%;">
+              <el-option label="倒序（从大到小/从新到旧）" value="desc"></el-option>
+              <el-option label="正序（从小到大/从旧到新）" value="asc"></el-option>
+            </el-select>
+          </el-form-item>
+        </div>
+        <div class="form-item-description" style="margin-bottom: 16px;">
+          留空则使用 Emby 原生排序。选择排序字段和方向后，筛选结果将按指定规则重新排序。
+        </div>
 
         <el-divider>规则</el-divider>
         
@@ -226,6 +254,17 @@ import { v4 as uuidv4 } from 'uuid';
 const store = useMainStore();
 const filters = computed(() => store.config.advanced_filters || []);
 
+const sortFieldLabels = {
+  CommunityRating: '社区评分',
+  CriticRating: '影评人评分',
+  ProductionYear: '发行年份',
+  PremiereDate: '首播日期',
+  DateCreated: '添加日期',
+  DateLastMediaAdded: '最近入库',
+  SortName: '名称',
+};
+const getSortLabel = (field) => sortFieldLabels[field] || field;
+
 const dialogVisible = ref(false);
 const isEditing = ref(false);
 const currentFilter = ref(null);
@@ -293,6 +332,8 @@ const openAddDialog = () => {
     name: '',
     match_all: true,
     rules: [],
+    sort_field: null,
+    sort_order: null,
   };
   dialogVisible.value = true;
 };
@@ -416,6 +457,17 @@ const deleteFilter = async (id) => {
   gap: 10px;
 }
 
+.sort-row {
+  display: flex;
+  gap: 16px;
+}
+
+.form-item-description {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  line-height: 1.5;
+}
+
 .rule-field-select {
   width: 280px;
   flex-shrink: 0;
@@ -501,6 +553,11 @@ const deleteFilter = async (id) => {
 
   .filter-card-view {
     display: block;
+  }
+
+  .sort-row {
+    flex-direction: column;
+    gap: 0;
   }
 
   .rule-field-select {

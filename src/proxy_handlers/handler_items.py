@@ -146,6 +146,33 @@ def _apply_post_filter(items: List[Dict[str, Any]], post_filter_rules: List[Dict
     return filtered_items
 
 
+def _apply_custom_sort(items: List[Dict[str, Any]], sort_field: str, sort_order: str) -> List[Dict[str, Any]]:
+    """
+    对 items 按指定字段排序。
+    sort_field: 前端传来的字段名（如 CommunityRating, PremiereDate 等）
+    sort_order: "asc" 正序 | "desc" 倒序
+    """
+    if not items or not sort_field or not sort_order:
+        return items
+
+    reverse = (sort_order == "desc")
+
+    def sort_key(item):
+        val = _get_value_for_rule(item, sort_field)
+        if val is None:
+            # None 值排到最后
+            return (1, "")
+        # 尝试数值比较
+        try:
+            return (0, float(val))
+        except (ValueError, TypeError):
+            return (0, str(val))
+
+    items.sort(key=sort_key, reverse=reverse)
+    logger.info(f"Custom sort applied: field={sort_field}, order={sort_order}, items={len(items)}")
+    return items
+
+
 def _build_headers_to_forward(request: Request) -> Dict[str, str]:
     """Build whitelisted headers dict for forwarding to Emby."""
     return {
@@ -212,12 +239,16 @@ async def _handle_source_library_scoped_request(
     # Apply advanced filter translation
     post_filter_rules = []
     filter_match_all = True
+    custom_sort_field = None
+    custom_sort_order = None
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
             filter_match_all = adv_filter.match_all
+            custom_sort_field = adv_filter.sort_field
+            custom_sort_order = adv_filter.sort_order
 
     if new_params.get("IsMovie") == "true":
         new_params["IncludeItemTypes"] = "Movie"
@@ -270,6 +301,10 @@ async def _handle_source_library_scoped_request(
     emby_field = sort_field_map.get(primary_sort, "SortName")
     reverse = sort_order.startswith("Descending")
     all_items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+    # Apply custom sort from advanced filter (overrides client sort)
+    if custom_sort_field and custom_sort_order:
+        all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
 
     # Paginate
     total_record_count = len(all_items)
@@ -643,6 +678,8 @@ async def handle_virtual_library_items(
     # --- Advanced filter translation ---
     post_filter_rules = []
     filter_match_all = True
+    custom_sort_field = None
+    custom_sort_order = None
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
@@ -650,6 +687,8 @@ async def handle_virtual_library_items(
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
             filter_match_all = adv_filter.match_all
+            custom_sort_field = adv_filter.sort_field
+            custom_sort_order = adv_filter.sort_order
             if post_filter_rules: logger.info(f"{len(post_filter_rules)} rules require proxy-side post-filtering.")
         else:
             logger.warning(f"Virtual library references advanced filter ID '{found_vlib.advanced_filter_id}', but it was not found.")
@@ -691,6 +730,10 @@ async def handle_virtual_library_items(
 
                     if is_tmdb_merge_enabled:
                         items_list = await handler_merger.merge_items_by_tmdb(items_list)
+
+                    # Apply custom sort from advanced filter
+                    if custom_sort_field and custom_sort_order:
+                        items_list = _apply_custom_sort(items_list, custom_sort_field, custom_sort_order)
 
                     data["Items"] = items_list
                     logger.info(f"Native filter/merge done. Emby total: {data.get('TotalRecordCount')}, page items: {len(items_list)}")
@@ -739,6 +782,10 @@ async def handle_virtual_library_items(
         logger.info(f"Full data fetch complete, total {len(all_items)} items.")
 
         merged_items = await handler_merger.merge_items_by_tmdb(all_items)
+
+        # Apply custom sort from advanced filter
+        if custom_sort_field and custom_sort_order:
+            merged_items = _apply_custom_sort(merged_items, custom_sort_field, custom_sort_order)
 
         total_record_count = len(merged_items)
         start_idx = int(client_start_index)

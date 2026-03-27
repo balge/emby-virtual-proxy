@@ -12,7 +12,7 @@ from pathlib import Path
 from . import handler_merger
 from . import handler_autogen
 from ._filter_translator import translate_rules
-from .handler_items import _apply_post_filter, _build_headers_to_forward, _fetch_items_for_parent_id
+from .handler_items import _apply_post_filter, _apply_custom_sort, _build_headers_to_forward, _fetch_items_for_parent_id
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +129,16 @@ async def handle_home_latest_items(
 
     post_filter_rules = []
     filter_match_all = True
+    custom_sort_field = None
+    custom_sort_order = None
     if found_vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == found_vlib.advanced_filter_id), None)
         if adv_filter:
             emby_native_params, post_filter_rules = translate_rules(adv_filter.rules)
             new_params.update(emby_native_params)
             filter_match_all = adv_filter.match_all
+            custom_sort_field = adv_filter.sort_field
+            custom_sort_order = adv_filter.sort_order
 
     is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
     if post_filter_rules or is_tmdb_merge_enabled:
@@ -211,7 +215,10 @@ async def handle_home_latest_items(
             all_items = await handler_merger.merge_items_by_tmdb(all_items)
 
         # Sort by DateCreated descending and limit
-        all_items.sort(key=lambda x: (x.get("DateCreated") or ""), reverse=True)
+        if custom_sort_field and custom_sort_order:
+            all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
+        else:
+            all_items.sort(key=lambda x: (x.get("DateCreated") or ""), reverse=True)
         all_items = all_items[:client_limit_val]
 
         content = json.dumps(all_items).encode('utf-8')
@@ -233,6 +240,10 @@ async def handle_home_latest_items(
 
         if is_tmdb_merge_enabled:
             items_list = await handler_merger.merge_items_by_tmdb(items_list)
+
+        # Apply custom sort from advanced filter
+        if custom_sort_field and custom_sort_order:
+            items_list = _apply_custom_sort(items_list, custom_sort_field, custom_sort_order)
 
         client_limit_str = params.get("Limit")
         if client_limit_str:
