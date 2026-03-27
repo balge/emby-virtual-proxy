@@ -29,7 +29,7 @@ from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import docker
-from proxy_cache import api_cache, vlib_items_cache
+from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter
 import config_manager
 from db_manager import DBManager, RSS_CACHE_DB
@@ -860,6 +860,14 @@ async def toggle_library_hidden(library_id: str):
         if lib.id == library_id:
             lib.hidden = not lib.hidden
             config_manager.save_config(config)
+            # 避免 api_cache 仍返回隐藏前的列表
+            keys_to_remove = [k for k in api_cache if library_id in str(k)]
+            for k in keys_to_remove:
+                api_cache.pop(k, None)
+            vlib_items_cache.pop(library_id, None)
+            random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
+            for k in random_keys:
+                random_recommend_cache.pop(k, None)
             return {"id": lib.id, "hidden": lib.hidden}
     raise HTTPException(status_code=404, detail="Virtual library not found")
 

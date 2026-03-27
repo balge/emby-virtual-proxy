@@ -52,12 +52,19 @@ async def handle_view_injection(
             return None
 
         original_data = await resp.json()
-        
-        all_available_libs = {item["Id"]: item for item in original_data.get("Items", [])}
+
+        ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+        emby_items = original_data.get("Items", []) or []
+        if ignore_set:
+            emby_items = [item for item in emby_items if item.get("Id") not in ignore_set]
+
+        all_available_libs = {item["Id"]: item for item in emby_items}
         
         server_id = next((item.get("ServerId") for item in all_available_libs.values() if item.get("ServerId")), "unknown")
 
         for vlib in config.virtual_libraries:
+            if vlib.hidden:
+                continue
             vlib_data = {
                 "Name": vlib.name, "ServerId": server_id, "Id": vlib.id,
                 "Type": "CollectionFolder",
@@ -130,11 +137,20 @@ async def legacy_handle_view_injection(request: Request, full_path: str, method:
                 if config.hide:
                     content_json["Items"] = [item for item in content_json["Items"] if item.get("CollectionType") not in config.hide]
 
+                ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+                if ignore_set:
+                    content_json["Items"] = [
+                        item for item in content_json["Items"] if item.get("Id") not in ignore_set
+                    ]
+
                 # 【【【 已删除 is_hidden 判断 】】】
                 sorted_virtual_libraries = sorted(config.virtual_libraries, key=lambda vlib: getattr(vlib, 'order', 0))
-                server_id = content_json["Items"][0].get("ServerId") if content_json.get("Items") else "unknown"
+                items_after = content_json["Items"] or []
+                server_id = items_after[0].get("ServerId") if items_after else "unknown"
 
                 for vlib in sorted_virtual_libraries:
+                    if vlib.hidden:
+                        continue
                     if not any(item.get("Id") == vlib.id for item in content_json["Items"]):
                         content_json["Items"].append({
                             "Name": vlib.name, "ServerId": server_id, "Id": vlib.id, 

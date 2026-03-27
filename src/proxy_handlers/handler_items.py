@@ -169,13 +169,14 @@ async def _fetch_recent_episodes_series_ids(
     Use Episode.DateCreated to derive Series that updated recently.
     Stops early once items are older than threshold (SortBy=DateCreated desc).
     Returns (series_ids, series_latest_map).
+    All source libraries are scanned concurrently (major latency win vs sequential).
     """
-    series_ids: set[str] = set()
-    series_latest: Dict[str, datetime] = {}
+    page_limit = 400  # fewer round-trips than 200; payload still small (2 fields)
 
-    async def _scan_one_parent(parent_id: Optional[str]):
+    async def _scan_one_parent(parent_id: Optional[str]) -> tuple[set[str], Dict[str, datetime]]:
+        local_ids: set[str] = set()
+        local_latest: Dict[str, datetime] = {}
         start_index = 0
-        limit = 200
         while True:
             p = dict(base_params)
             p["IncludeItemTypes"] = "Episode"
@@ -186,16 +187,16 @@ async def _fetch_recent_episodes_series_ids(
             if parent_id:
                 p["ParentId"] = parent_id
             p["StartIndex"] = str(start_index)
-            p["Limit"] = str(limit)
+            p["Limit"] = str(page_limit)
 
             async with session.get(search_url, params=p, headers=headers) as resp:
                 if resp.status != 200:
                     logger.warning(f"Episode scan failed (ParentId={parent_id}), status={resp.status}")
-                    return
+                    return local_ids, local_latest
                 data = await resp.json()
                 items = data.get("Items", []) if isinstance(data, dict) else []
                 if not items:
-                    return
+                    return local_ids, local_latest
 
                 oldest_dt: Optional[datetime] = None
                 for it in items:
@@ -210,23 +211,32 @@ async def _fetch_recent_episodes_series_ids(
                     if not sid:
                         continue
                     sid_str = str(sid)
-                    series_ids.add(sid_str)
-                    prev = series_latest.get(sid_str)
+                    local_ids.add(sid_str)
+                    prev = local_latest.get(sid_str)
                     if prev is None or created_dt > prev:
-                        series_latest[sid_str] = created_dt
+                        local_latest[sid_str] = created_dt
 
                 if oldest_dt is not None and oldest_dt < threshold_dt:
-                    return
+                    return local_ids, local_latest
                 start_index += len(items)
-                if len(items) < limit:
-                    return
+                if len(items) < page_limit:
+                    return local_ids, local_latest
 
     if source_parent_ids:
-        for pid in source_parent_ids:
-            await _scan_one_parent(pid)
+        scan_tasks = [_scan_one_parent(pid) for pid in source_parent_ids]
+        parts = await asyncio.gather(*scan_tasks)
     else:
-        await _scan_one_parent(None)
+        parts = [await _scan_one_parent(None)]
 
+    series_ids: set[str] = set()
+    series_latest: Dict[str, datetime] = {}
+    for local_ids, local_latest in parts:
+        for sid in local_ids:
+            series_ids.add(sid)
+        for sid, dt in local_latest.items():
+            prev = series_latest.get(sid)
+            if prev is None or dt > prev:
+                series_latest[sid] = dt
     return series_ids, series_latest
 
 async def _fetch_items_recent_by_datecreated(
@@ -239,12 +249,12 @@ async def _fetch_items_recent_by_datecreated(
     include_item_types: str,
     source_parent_ids: Optional[List[str]],
 ) -> List[Dict]:
-    """Fetch items recent by DateCreated; stop early once older than threshold."""
-    collected: List[Dict] = []
+    """Fetch items recent by DateCreated; stop early once older than threshold. Libraries run in parallel."""
+    page_limit = 400
 
-    async def _scan_one_parent(parent_id: Optional[str]):
+    async def _scan_one_parent(parent_id: Optional[str]) -> List[Dict]:
+        out: List[Dict] = []
         start_index = 0
-        limit = 200
         while True:
             p = dict(base_params)
             p["IncludeItemTypes"] = include_item_types
@@ -254,16 +264,16 @@ async def _fetch_items_recent_by_datecreated(
             if parent_id:
                 p["ParentId"] = parent_id
             p["StartIndex"] = str(start_index)
-            p["Limit"] = str(limit)
+            p["Limit"] = str(page_limit)
 
             async with session.get(search_url, params=p, headers=headers) as resp:
                 if resp.status != 200:
                     logger.warning(f"Recent scan failed (ParentId={parent_id}), status={resp.status}")
-                    return
+                    return out
                 data = await resp.json()
                 items = data.get("Items", []) if isinstance(data, dict) else []
                 if not items:
-                    return
+                    return out
 
                 oldest_dt: Optional[datetime] = None
                 for it in items:
@@ -273,21 +283,30 @@ async def _fetch_items_recent_by_datecreated(
                     if oldest_dt is None or created_dt < oldest_dt:
                         oldest_dt = created_dt
                     if created_dt >= threshold_dt:
-                        collected.append(it)
+                        out.append(it)
 
                 if oldest_dt is not None and oldest_dt < threshold_dt:
-                    return
+                    return out
                 start_index += len(items)
-                if len(items) < limit:
-                    return
+                if len(items) < page_limit:
+                    return out
 
     if source_parent_ids:
-        for pid in source_parent_ids:
-            await _scan_one_parent(pid)
+        lists = await asyncio.gather(*[_scan_one_parent(pid) for pid in source_parent_ids])
     else:
-        await _scan_one_parent(None)
+        lists = [await _scan_one_parent(None)]
 
-    return collected
+    seen: set[str] = set()
+    merged: List[Dict] = []
+    for lst in lists:
+        for it in lst:
+            iid = it.get("Id")
+            if iid and iid in seen:
+                continue
+            if iid:
+                seen.add(iid)
+            merged.append(it)
+    return merged
 
 async def _get_items_by_ids_chunked(
     *,
@@ -296,19 +315,31 @@ async def _get_items_by_ids_chunked(
     headers: Dict[str, str],
     ids: List[str],
     fields: str,
-    chunk_size: int = 100,
+    chunk_size: int = 120,
+    max_concurrent: int = 6,
 ) -> List[Dict]:
-    out: List[Dict] = []
-    for i in range(0, len(ids), chunk_size):
-        chunk = ids[i:i + chunk_size]
+    """Fetch by Ids in chunks; chunks run concurrently (bounded) to reduce wall time."""
+    if not ids:
+        return []
+
+    chunks = [ids[i : i + chunk_size] for i in range(0, len(ids), chunk_size)]
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _one_chunk(chunk: List[str]) -> List[Dict]:
         params: Dict[str, Any] = {"Ids": ",".join(chunk)}
         if fields:
             params["Fields"] = fields
-        async with session.get(search_url, params=params, headers=headers) as resp:
-            if resp.status != 200:
-                continue
-            data = await resp.json()
-            out.extend(data.get("Items", []) if isinstance(data, dict) else [])
+        async with sem:
+            async with session.get(search_url, params=params, headers=headers) as resp:
+                if resp.status != 200:
+                    return []
+                data = await resp.json()
+                return data.get("Items", []) if isinstance(data, dict) else []
+
+    parts = await asyncio.gather(*[_one_chunk(c) for c in chunks])
+    out: List[Dict] = []
+    for sub in parts:
+        out.extend(sub)
     return out
 
 def _sort_by_effective_last_media_added(
@@ -442,7 +473,7 @@ async def _fetch_items_for_parent_id_up_to(
 
     collected: List[Dict] = []
     start_index = 0
-    limit = 200
+    limit = 400  # larger pages = fewer round-trips per source library
     total_record_count: int | None = None
 
     fetch_params = base_params.copy()
@@ -540,7 +571,7 @@ async def _handle_source_library_scoped_request(
             scan_base_params.pop("SortBy", None)
             scan_base_params.pop("SortOrder", None)
 
-            series_ids_hit, series_latest_map = await _fetch_recent_episodes_series_ids(
+            ep_task = _fetch_recent_episodes_series_ids(
                 session=session,
                 search_url=search_url,
                 headers=headers_to_forward,
@@ -548,6 +579,16 @@ async def _handle_source_library_scoped_request(
                 threshold_dt=threshold_dt,
                 source_parent_ids=list(found_vlib.source_libraries),
             )
+            mv_task = _fetch_items_recent_by_datecreated(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                include_item_types="Movie,Video",
+                source_parent_ids=list(found_vlib.source_libraries),
+            )
+            (series_ids_hit, series_latest_map), movie_video_items = await asyncio.gather(ep_task, mv_task)
 
             series_items: List[Dict] = []
             if series_ids_hit:
@@ -558,16 +599,6 @@ async def _handle_source_library_scoped_request(
                     ids=list(series_ids_hit),
                     fields=new_params.get("Fields", ""),
                 )
-
-            movie_video_items = await _fetch_items_recent_by_datecreated(
-                session=session,
-                search_url=search_url,
-                headers=headers_to_forward,
-                base_params=scan_base_params,
-                threshold_dt=threshold_dt,
-                include_item_types="Movie,Video",
-                source_parent_ids=list(found_vlib.source_libraries),
-            )
 
             remaining_post_filters = [r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"]
             if remaining_post_filters:
@@ -997,6 +1028,12 @@ async def handle_virtual_library_items(
             except (ValueError, IndexError): pass
     if not user_id: return Response(content="UserId not found", status_code=400)
 
+    if found_vlib.hidden:
+        logger.info(f"Virtual library '{found_vlib.name}' is hidden; returning empty items.")
+        start_idx = int(params.get("StartIndex", 0))
+        empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": start_idx}
+        return Response(content=json.dumps(empty).encode("utf-8"), status_code=200, media_type="application/json")
+
     # --- Build request params ---
     new_params = {}
 
@@ -1152,7 +1189,7 @@ async def handle_virtual_library_items(
             scan_base_params.pop("SortBy", None)
             scan_base_params.pop("SortOrder", None)
 
-            series_ids_hit, series_latest_map = await _fetch_recent_episodes_series_ids(
+            ep_task = _fetch_recent_episodes_series_ids(
                 session=session,
                 search_url=search_url,
                 headers=headers_to_forward,
@@ -1160,6 +1197,16 @@ async def handle_virtual_library_items(
                 threshold_dt=threshold_dt,
                 source_parent_ids=source_parent_ids,
             )
+            mv_task = _fetch_items_recent_by_datecreated(
+                session=session,
+                search_url=search_url,
+                headers=headers_to_forward,
+                base_params=scan_base_params,
+                threshold_dt=threshold_dt,
+                include_item_types="Movie,Video",
+                source_parent_ids=source_parent_ids,
+            )
+            (series_ids_hit, series_latest_map), movie_video_items = await asyncio.gather(ep_task, mv_task)
 
             series_items: List[Dict] = []
             if series_ids_hit:
@@ -1170,16 +1217,6 @@ async def handle_virtual_library_items(
                     ids=list(series_ids_hit),
                     fields=new_params.get("Fields", ""),
                 )
-
-            movie_video_items = await _fetch_items_recent_by_datecreated(
-                session=session,
-                search_url=search_url,
-                headers=headers_to_forward,
-                base_params=scan_base_params,
-                threshold_dt=threshold_dt,
-                include_item_types="Movie,Video",
-                source_parent_ids=source_parent_ids,
-            )
 
             remaining_post_filters = [r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"]
             if remaining_post_filters:

@@ -21,8 +21,13 @@ async def handle_get_virtual_item_info(request: Request, full_path: str, config:
     # 在配置中查找这个ID对应的虚拟库
     found_vlib = next((vlib for vlib in config.virtual_libraries if vlib.id == vlib_id_from_path), None)
 
-    # 如果没找到，或者这个虚拟库没有设置 image_tag，则不处理
-    if not found_vlib or not found_vlib.image_tag:
+    if not found_vlib:
+        return None
+    if found_vlib.hidden:
+        logger.info(f"VLIB_ITEM_INFO: Virtual library '{found_vlib.name}' is hidden; 404.")
+        return Response(status_code=404, content=b"{}", media_type="application/json")
+    # 如果没找到 image_tag，则不处理
+    if not found_vlib.image_tag:
         return None
 
     logger.info(f"✅ VLIB_ITEM_INFO: Intercepting request for virtual library '{found_vlib.name}' info.")

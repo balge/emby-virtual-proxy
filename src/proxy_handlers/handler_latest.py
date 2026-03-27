@@ -47,6 +47,10 @@ async def handle_home_latest_items(
             except (ValueError, IndexError): pass
     if not user_id: return None
 
+    if found_vlib.hidden:
+        logger.info(f"HOME_LATEST: Virtual library '{found_vlib.name}' is hidden; returning empty latest.")
+        return Response(content=json.dumps([]).encode("utf-8"), status_code=200, headers={"Content-Type": "application/json"})
+
     # Random library branch: reuse cached random items for latest
     if found_vlib.resource_type == 'random':
         from proxy_cache import random_recommend_cache

@@ -7,7 +7,7 @@ from fastapi import Request, Response
 from fastapi.responses import FileResponse
 import asyncio
 
-import config_manager
+from models import AppConfig
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ PLACEHOLDER_RSSHUB_PATH = Path("/app/src/assets/images_placeholder/rsshubpost.jp
 PLACEHOLDER_EPISODE_PATH = Path("/app/src/assets/images_placeholder/placeholder.jpg")      # 缺失剧集 (tmdb_)
 
 
-async def handle_virtual_library_image(request: Request, full_path: str) -> Response | None:
+async def handle_virtual_library_image(request: Request, full_path: str, config: AppConfig) -> Response | None:
     match = IMAGE_PATH_REGEX.search(f"/{full_path}")
     if not match:
         return None
@@ -31,6 +31,13 @@ async def handle_virtual_library_image(request: Request, full_path: str) -> Resp
 
     if image_type != "Primary":
         return None
+
+    # 标准虚拟库 UUID 封面：隐藏库不再提供本地封面（避免客户端仍显示海报）
+    if len(item_id) == 36 and item_id.count("-") == 4:
+        found = next((v for v in config.virtual_libraries if v.id == item_id), None)
+        if found and found.hidden:
+            logger.info(f"IMAGE_HANDLER: Virtual library '{found.name}' is hidden; 404.")
+            return Response(status_code=404)
 
     # 检查实际的封面文件是否存在，如果存在则直接返回
     image_file = COVERS_DIR / f"{item_id}.jpg"
