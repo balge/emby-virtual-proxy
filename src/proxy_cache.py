@@ -11,7 +11,8 @@ from cachetools import TTLCache
 logger = logging.getLogger(__name__)
 
 # API response cache: short-lived, no persistence needed
-api_cache = TTLCache(maxsize=500, ttl=300)
+# Default TTL: 2 hours (helps heavy virtual library browsing)
+api_cache = TTLCache(maxsize=500, ttl=7200)
 
 # --- Persistent cache backed by SQLite ---
 

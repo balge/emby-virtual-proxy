@@ -226,6 +226,61 @@ async def _fetch_items_for_parent_id(
     return all_items
 
 
+async def _fetch_items_for_parent_id_up_to(
+    session: ClientSession,
+    method: str,
+    search_url: str,
+    base_params: Dict,
+    parent_id: str,
+    headers: Dict,
+    max_items: int,
+) -> tuple[List[Dict], int | None]:
+    """
+    Fetch items from a single parent library up to max_items.
+    Returns (items, total_record_count_from_emby_or_None).
+
+    This is a performance optimization for virtual libraries: most clients only need
+    StartIndex+Limit items to render the current page, so we can avoid full-library scans.
+    """
+    if max_items <= 0:
+        return [], None
+
+    collected: List[Dict] = []
+    start_index = 0
+    limit = 200
+    total_record_count: int | None = None
+
+    fetch_params = base_params.copy()
+    fetch_params["ParentId"] = parent_id
+    # We'll control paging here
+    fetch_params.pop("StartIndex", None)
+    fetch_params.pop("Limit", None)
+
+    while len(collected) < max_items:
+        batch_params = fetch_params.copy()
+        batch_params["StartIndex"] = str(start_index)
+        batch_params["Limit"] = str(min(limit, max_items - len(collected)))
+
+        async with session.request(method, search_url, params=batch_params, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"Source library fetch failed for ParentId={parent_id}, status={resp.status}")
+                break
+            batch_data = await resp.json()
+            if total_record_count is None:
+                trc = batch_data.get("TotalRecordCount")
+                if isinstance(trc, int):
+                    total_record_count = trc
+            batch_items = batch_data.get("Items", [])
+            if not batch_items:
+                break
+            collected.extend(batch_items)
+            start_index += len(batch_items)
+            if len(batch_items) < int(batch_params["Limit"]):
+                break
+
+    return collected, total_record_count
+
+
 async def _handle_source_library_scoped_request(
     request: Request, method: str, found_vlib: VirtualLibrary,
     new_params: Dict, user_id: str, real_emby_url: str,
@@ -263,60 +318,87 @@ async def _handle_source_library_scoped_request(
 
     is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
 
-    # Parallel fetch from all source libraries
-    tasks = [
-        _fetch_items_for_parent_id(session, method, search_url, new_params, pid, headers_to_forward)
-        for pid in found_vlib.source_libraries
-    ]
-    results = await asyncio.gather(*tasks)
-    all_items = []
-    for items in results:
-        all_items.extend(items)
+    # Performance: if client doesn't need TotalRecordCount, avoid full scans.
+    enable_total = request.query_params.get("EnableTotalRecordCount", "true").lower() != "false"
 
-    logger.info(f"Source library scoped fetch complete: {len(all_items)} total items from {len(found_vlib.source_libraries)} libraries.")
-
-    # Deduplicate by Emby Item Id (same item may appear in multiple libraries)
-    seen_ids = set()
-    deduped_items = []
-    for item in all_items:
-        item_id = item.get("Id")
-        if item_id and item_id not in seen_ids:
-            seen_ids.add(item_id)
-            deduped_items.append(item)
-        elif not item_id:
-            deduped_items.append(item)
-    all_items = deduped_items
-
-    # Apply post-filter
-    if post_filter_rules:
-        all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
-
-    # Apply TMDB merge
-    if is_tmdb_merge_enabled:
-        all_items = await handler_merger.merge_items_by_tmdb(all_items)
-
-    # Sort: respect client SortBy/SortOrder if present
-    sort_by = request.query_params.get("SortBy", "SortName")
-    sort_order = request.query_params.get("SortOrder", "Ascending")
-    sort_field_map = {
-        "SortName": "SortName", "DateCreated": "DateCreated",
-        "PremiereDate": "PremiereDate", "ProductionYear": "ProductionYear",
-        "CommunityRating": "CommunityRating", "DatePlayed": "DatePlayed",
-    }
-    primary_sort = sort_by.split(",")[0] if sort_by else "SortName"
-    emby_field = sort_field_map.get(primary_sort, "SortName")
-    reverse = sort_order.startswith("Descending")
-    all_items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
-
-    # Apply custom sort from advanced filter (overrides client sort)
-    if custom_sort_field and custom_sort_order:
-        all_items = _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
-
-    # Paginate
-    total_record_count = len(all_items)
     start_idx = int(client_start_index)
     limit_count = int(client_limit)
-    paginated_items = all_items[start_idx : start_idx + limit_count]
+
+    async def _fetch_merge_sort_paginate(per_lib_target: int) -> tuple[list[dict], int]:
+        # Parallel fetch from all source libraries (bounded)
+        tasks = [
+            _fetch_items_for_parent_id_up_to(
+                session, method, search_url, new_params, pid, headers_to_forward, per_lib_target
+            )
+            for pid in found_vlib.source_libraries
+        ]
+        results = await asyncio.gather(*tasks)
+        fetched: List[Dict] = []
+        summed_totals_local = 0
+        for items, trc in results:
+            fetched.extend(items)
+            if enable_total and isinstance(trc, int):
+                summed_totals_local += trc
+
+        logger.info(
+            f"Source library scoped fetch complete: {len(fetched)} fetched items "
+            f"from {len(found_vlib.source_libraries)} libraries (per_lib_target={per_lib_target})."
+        )
+
+        # Deduplicate by Emby Item Id (same item may appear in multiple libraries)
+        seen_ids = set()
+        deduped_items = []
+        for item in fetched:
+            item_id = item.get("Id")
+            if item_id and item_id not in seen_ids:
+                seen_ids.add(item_id)
+                deduped_items.append(item)
+            elif not item_id:
+                deduped_items.append(item)
+        merged = deduped_items
+
+        # Apply post-filter
+        if post_filter_rules:
+            merged = _apply_post_filter(merged, post_filter_rules, filter_match_all)
+
+        # Apply TMDB merge
+        if is_tmdb_merge_enabled:
+            merged = await handler_merger.merge_items_by_tmdb(merged)
+
+        # Sort: respect client SortBy/SortOrder if present
+        sort_by = request.query_params.get("SortBy", "SortName")
+        sort_order = request.query_params.get("SortOrder", "Ascending")
+        sort_field_map = {
+            "SortName": "SortName", "DateCreated": "DateCreated",
+            "PremiereDate": "PremiereDate", "ProductionYear": "ProductionYear",
+            "CommunityRating": "CommunityRating", "DatePlayed": "DatePlayed",
+        }
+        primary_sort = sort_by.split(",")[0] if sort_by else "SortName"
+        emby_field = sort_field_map.get(primary_sort, "SortName")
+        reverse = sort_order.startswith("Descending")
+        merged.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+        # Apply custom sort from advanced filter (overrides client sort)
+        if custom_sort_field and custom_sort_order:
+            merged = _apply_custom_sort(merged, custom_sort_field, custom_sort_order)
+
+        # Paginate
+        page = merged[start_idx : start_idx + limit_count]
+        total_rc = summed_totals_local if enable_total else 0
+        return page, total_rc
+
+    # Fetch enough items to assemble the requested page after merge/dedupe/sort.
+    buffer = max(50, limit_count)
+    per_lib_target = start_idx + limit_count + buffer
+    paginated_items, total_record_count = await _fetch_merge_sort_paginate(per_lib_target)
+
+    # If we under-filled the page (due to dedupe/post-filter/merge), retry once with larger target.
+    if len(paginated_items) < limit_count and per_lib_target < (start_idx + limit_count + buffer) * 4:
+        retry_target = per_lib_target * 2
+        logger.info(
+            f"Scoped result under-filled (page={len(paginated_items)}/{limit_count}), retrying with per_lib_target={retry_target}."
+        )
+        paginated_items, total_record_count = await _fetch_merge_sort_paginate(retry_target)
 
     if paginated_items:
         vlib_items_cache[found_vlib.id] = paginated_items
