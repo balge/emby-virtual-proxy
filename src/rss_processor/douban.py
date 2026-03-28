@@ -9,12 +9,13 @@ from .base_processor import BaseRssProcessor
 
 logger = logging.getLogger(__name__)
 
-# 豆瓣 API 的速率限制
+# 豆瓣页面抓取间隔：上一次 HTTP **完成** 至下一次 HTTP **开始** 至少间隔这么多秒
 DOUBAN_API_RATE_LIMIT = 2  # 秒
 
-# 进程级全局限速（避免每次刷新新建 Processor 导致限速失效）
+# 进程级全局限速（避免并发抓取豆瓣页面）
 _douban_rate_lock = threading.Lock()
-_douban_last_call_time = 0.0
+# 上一次豆瓣页面 requests 结束的时间戳（0 表示尚未抓取过）
+_douban_last_http_end_time = 0.0
 
 class DoubanProcessor(BaseRssProcessor):
     def __init__(self, vlib):
@@ -125,26 +126,30 @@ class DoubanProcessor(BaseRssProcessor):
             logger.info(f"豆瓣ID {douban_id}: 在缓存中找到 IMDb ID -> {cached['api_response']} (名称: {cached['name'] or 'N/A'})")
             return cached['api_response']
 
-        global _douban_last_call_time
-        with _douban_rate_lock:
-            since_last_call = time.time() - _douban_last_call_time
-            if since_last_call < DOUBAN_API_RATE_LIMIT:
-                sleep_time = DOUBAN_API_RATE_LIMIT - since_last_call
-                logger.info(f"豆瓣页面访问速率限制：休眠 {sleep_time:.2f} 秒。")
-                time.sleep(sleep_time)
-            _douban_last_call_time = time.time()
-
+        global _douban_last_http_end_time
         url = f"https://movie.douban.com/subject/{douban_id}/"
         headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'}
-        
+
         logger.info(f"豆瓣ID {douban_id}: 正在抓取页面 {url} 以寻找 IMDb ID。")
         try:
-            response = requests.get(url, headers=headers)
+            with _douban_rate_lock:
+                now = time.time()
+                if _douban_last_http_end_time > 0:
+                    since_end = now - _douban_last_http_end_time
+                    if since_end < DOUBAN_API_RATE_LIMIT:
+                        sleep_time = DOUBAN_API_RATE_LIMIT - since_end
+                        logger.info(f"豆瓣页面访问速率限制：距上次抓取结束已过 {since_end:.2f}s，再休眠 {sleep_time:.2f} 秒。")
+                        time.sleep(sleep_time)
+                try:
+                    response = requests.get(url, headers=headers, timeout=30)
+                finally:
+                    # 无论成功失败，都推进“上次请求结束”时间，避免失败重试连打豆瓣
+                    _douban_last_http_end_time = time.time()
             response.raise_for_status()
         except requests.RequestException as e:
             logger.error(f"抓取豆瓣页面失败 (ID: {douban_id}): {e}")
             return None
-        
+
         soup = BeautifulSoup(response.text, 'html.parser')
         
         title_tag = soup.find('span', property='v:itemreviewed')
