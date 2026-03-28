@@ -32,13 +32,11 @@ import docker
 from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter
 from emby_webhook import (
-    WebhookDebouncer,
     parse_request_payload,
     extract_event_raw,
     classify_event,
     extract_item_dict,
     extract_item_id,
-    group_suffix_from_item,
     extract_library_hints,
 )
 import config_manager
@@ -52,8 +50,6 @@ from proxy_handlers._filter_translator import translate_rules
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 # 【【【 添加/确认结束 】】】
-
-_emby_webhook_debouncer = WebhookDebouncer()
 
 # ============================================
 # 认证配置 - 通过环境变量读取
@@ -173,9 +169,9 @@ async def logout(request: Request):
 @public_router.post("/webhook/emby", tags=["Webhook"])
 async def emby_webhook_receive(request: Request):
     """
-    Emby Premiere Webhook 回调。请在 Emby 中为「新媒体入库 / 删除」配置指向：
-    POST http(s)://<管理面板>/api/webhook/emby
-    若设置了密钥，请在请求头追加：X-Webhook-Secret: <与系统设置一致>
+    Emby Premiere Webhook 回调。POST 至：
+    http(s)://<管理面板>/api/webhook/emby
+    若设置了密钥，任选其一：请求头 X-Webhook-Secret、Authorization: Bearer、或查询参数 ?token=
     """
     config = config_manager.load_config()
     wc = config.webhook
@@ -183,10 +179,13 @@ async def emby_webhook_receive(request: Request):
         return {"ok": True, "ignored": True, "reason": "webhook_disabled"}
 
     if wc.secret:
-        incoming = request.headers.get("X-Webhook-Secret") or ""
+        incoming = (request.headers.get("X-Webhook-Secret") or "").strip()
         auth = request.headers.get("Authorization", "")
         if auth.startswith("Bearer "):
             incoming = incoming or auth[7:].strip()
+        q_token = request.query_params.get("token")
+        if q_token:
+            incoming = incoming or q_token.strip()
         if incoming != wc.secret:
             raise HTTPException(status_code=403, detail="Invalid webhook secret")
 
@@ -601,10 +600,6 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
     if kind is None:
         logger.debug(f"Webhook: 忽略事件类型 '{event_raw}'")
         return
-    if kind == "add" and not wc.on_item_added:
-        return
-    if kind == "remove" and not wc.on_item_removed:
-        return
 
     item = extract_item_dict(payload)
     item_id = extract_item_id(payload, item)
@@ -622,20 +617,8 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
         logger.warning(f"Webhook: 无法解析真实媒体库 ID（event={event_raw}, item_id={item_id}）")
         return
 
-    group_suffix = group_suffix_from_item(item, payload, wc.group_by_series, wc.group_by_album)
-    debounce_key = f"{real_lib_id}:{group_suffix}"
-
-    async def _run():
-        await _refresh_virtual_libs_for_real_library(real_lib_id)
-
-    debounce_s = float(wc.debounce_seconds or 0.0)
-    logger.info(
-        f"Webhook: 已调度刷新 real_lib={real_lib_id}（事件={event_raw}, debounce={debounce_s}s, key={debounce_key}）"
-    )
-    if debounce_s <= 0:
-        await _run()
-    else:
-        await _emby_webhook_debouncer.schedule(debounce_key, debounce_s, _run)
+    logger.info(f"Webhook: 事件 kind={kind} event={event_raw} → 刷新真实库 {real_lib_id}")
+    asyncio.create_task(_refresh_virtual_libs_for_real_library(real_lib_id))
 
 
 # --- API ---

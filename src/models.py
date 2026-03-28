@@ -51,15 +51,11 @@ class VirtualLibrary(BaseModel):
 
 class WebhookSettings(BaseModel):
     """Emby Webhook：媒体变更后刷新「关联真实库」的虚拟库（全库型虚拟库不走 Webhook，仅定时）。"""
+    model_config = ConfigDict(extra="ignore")
+
     enabled: bool = False
-    # 非空则必须在请求头携带 X-Webhook-Secret: <secret>（或与之一致的 Bearer）
+    # 非空则须匹配：请求头 X-Webhook-Secret / Authorization Bearer / 查询参数 token
     secret: Optional[str] = Field(default=None)
-    debounce_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
-    # 防抖分组：同一剧集 / 同一张专辑在窗口内多次事件只触发一次刷新
-    group_by_series: bool = Field(default=True)
-    group_by_album: bool = Field(default=True)
-    on_item_added: bool = Field(default=True)
-    on_item_removed: bool = Field(default=True)
 
 
 class AppConfig(BaseModel):
