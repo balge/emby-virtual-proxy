@@ -49,6 +49,19 @@ class VirtualLibrary(BaseModel):
     cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
     hidden: bool = Field(default=False) # True: 不参与 RSS 定时任务，且在 8999 代理上对 Items/Latest/视图隐藏
 
+class WebhookSettings(BaseModel):
+    """Emby Webhook：媒体变更后刷新「关联真实库」的虚拟库（全库型虚拟库不走 Webhook，仅定时）。"""
+    enabled: bool = False
+    # 非空则必须在请求头携带 X-Webhook-Secret: <secret>（或与之一致的 Bearer）
+    secret: Optional[str] = Field(default=None)
+    debounce_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
+    # 防抖分组：同一剧集 / 同一张专辑在窗口内多次事件只触发一次刷新
+    group_by_series: bool = Field(default=True)
+    group_by_album: bool = Field(default=True)
+    on_item_added: bool = Field(default=True)
+    on_item_removed: bool = Field(default=True)
+
+
 class AppConfig(BaseModel):
     emby_url: str = Field(default="http://127.0.0.1:8096")
     emby_api_key: Optional[str] = Field(default="")
@@ -88,6 +101,9 @@ class AppConfig(BaseModel):
 
     # 新增：RSS 定时刷新间隔（小时），0为禁用
     rss_refresh_interval: Optional[int] = Field(default=0)
+
+    # Emby Webhook（管理 API /api/webhook/emby，需加入 Emby Premiere Webhook 目标 URL）
+    webhook: WebhookSettings = Field(default_factory=WebhookSettings)
 
     # 新增：全局强制 TMDB ID 合并
     force_merge_by_tmdb_id: bool = Field(default=False)

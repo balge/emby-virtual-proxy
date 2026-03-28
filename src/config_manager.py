@@ -32,6 +32,8 @@ def load_config() -> AppConfig:
                 data['tmdb_api_key'] = ""
             if 'tmdb_proxy' not in data:
                 data['tmdb_proxy'] = ""
+            if 'webhook' not in data or not isinstance(data.get('webhook'), dict):
+                data['webhook'] = {}
             return AppConfig.model_validate(data)
             
     except (json.JSONDecodeError, Exception) as e:

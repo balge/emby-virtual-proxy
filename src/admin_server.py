@@ -17,7 +17,7 @@ import hashlib
 import hmac
 import time
 import secrets
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
 import importlib
 # 导入封面生成模块
@@ -31,6 +31,16 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import docker
 from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter
+from emby_webhook import (
+    WebhookDebouncer,
+    parse_request_payload,
+    extract_event_raw,
+    classify_event,
+    extract_item_dict,
+    extract_item_id,
+    group_suffix_from_item,
+    extract_library_hints,
+)
 import config_manager
 from db_manager import DBManager, RSS_CACHE_DB
 
@@ -42,6 +52,8 @@ from proxy_handlers._filter_translator import translate_rules
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 # 【【【 添加/确认结束 】】】
+
+_emby_webhook_debouncer = WebhookDebouncer()
 
 # ============================================
 # 认证配置 - 通过环境变量读取
@@ -86,7 +98,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse as StarletteJSONResponse
 
 # 不需要认证的路径白名单
-AUTH_PUBLIC_PATHS = {"/api/login", "/api/auth-status", "/api/logout"}
+AUTH_PUBLIC_PATHS = {"/api/login", "/api/auth-status", "/api/logout", "/api/webhook/emby"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
@@ -156,6 +168,39 @@ async def logout(request: Request):
         token = auth_header[7:]
         _valid_tokens.pop(token, None)
     return {"message": "已登出"}
+
+
+@public_router.post("/webhook/emby", tags=["Webhook"])
+async def emby_webhook_receive(request: Request):
+    """
+    Emby Premiere Webhook 回调。请在 Emby 中为「新媒体入库 / 删除」配置指向：
+    POST http(s)://<管理面板>/api/webhook/emby
+    若设置了密钥，请在请求头追加：X-Webhook-Secret: <与系统设置一致>
+    """
+    config = config_manager.load_config()
+    wc = config.webhook
+    if not wc.enabled:
+        return {"ok": True, "ignored": True, "reason": "webhook_disabled"}
+
+    if wc.secret:
+        incoming = request.headers.get("X-Webhook-Secret") or ""
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            incoming = incoming or auth[7:].strip()
+        if incoming != wc.secret:
+            raise HTTPException(status_code=403, detail="Invalid webhook secret")
+
+    try:
+        body = await request.json()
+    except Exception:
+        try:
+            form = await request.form()
+            body = {k: form.get(k) for k in form.keys()}
+        except Exception:
+            body = {}
+    payload = parse_request_payload(body)
+    asyncio.create_task(_handle_emby_webhook_payload(payload))
+    return {"ok": True, "accepted": True}
 
 # --- 高级筛选器 API ---
 @api_router.get("/advanced-filters", response_model=List[AdvancedFilter], tags=["Advanced Filters"])
@@ -431,6 +476,168 @@ async def get_real_libraries_hybrid_mode() -> List:
     return list(all_real_libs.values())
 
 
+async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> Optional[dict]:
+    """GET Emby JSON，失败返回 None（不抛 HTTPException）。"""
+    config = config_manager.load_config()
+    if not config.emby_url or not config.emby_api_key:
+        return None
+    headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
+    url = f"{config.emby_url.rstrip('/')}/emby{endpoint}"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, params=params or {}, timeout=20) as resp:
+                if resp.status != 200:
+                    return None
+                return await resp.json()
+    except Exception as e:
+        logger.warning(f"Emby GET {endpoint} failed: {e}")
+        return None
+
+
+async def _resolve_collection_folder_id_for_item(item_id: str) -> Optional[str]:
+    """自任意 Item 沿 ParentId 向上找到 CollectionFolder（与源库 ID 一致）。"""
+    current = item_id
+    for _ in range(40):
+        data = await _admin_emby_get_json(f"/Items/{current}", {"Fields": "ParentId,Type,CollectionType,Name"})
+        if not data or not isinstance(data, dict):
+            return None
+        if data.get("Type") == "CollectionFolder":
+            return data.get("Id")
+        pid = data.get("ParentId")
+        if not pid:
+            return None
+        current = pid
+    return None
+
+
+async def _real_library_id_from_name(name: str) -> Optional[str]:
+    if not name:
+        return None
+    try:
+        libs = await get_real_libraries_hybrid_mode()
+    except Exception:
+        return None
+    name_l = name.strip().lower()
+    for lib in libs:
+        if (lib.get("Name") or "").strip().lower() == name_l:
+            return lib.get("Id")
+    return None
+
+
+async def _enrich_item_from_emby(item_id: str, base: dict) -> dict:
+    data = await _admin_emby_get_json(
+        f"/Items/{item_id}",
+        {"Fields": "ParentId,Type,SeriesId,AlbumId,Name,CollectionType"},
+    )
+    if not isinstance(data, dict):
+        return base
+    out = {**base}
+    for k in ("ParentId", "Type", "SeriesId", "AlbumId", "Name", "CollectionType"):
+        if data.get(k) is not None and out.get(k) is None:
+            out[k] = data[k]
+    return out
+
+
+def _virtual_libs_linked_to_real_library(real_lib_id: str, config: AppConfig) -> List[VirtualLibrary]:
+    """源库列表包含该真实库、且非全库、未隐藏、非 RSSHub 的虚拟库。"""
+    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    if real_lib_id in ignore_set:
+        return []
+    out: List[VirtualLibrary] = []
+    for v in config.virtual_libraries:
+        if v.hidden:
+            continue
+        if v.resource_type in ("rsshub",):
+            continue
+        if v.resource_type == "all":
+            continue
+        src = [x for x in (v.source_libraries or []) if x not in ignore_set]
+        if real_lib_id in src:
+            out.append(v)
+    return out
+
+
+async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
+    """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
+    library_id = vlib.id
+    keys_to_remove = [k for k in api_cache if library_id in str(k)]
+    for k in keys_to_remove:
+        api_cache.pop(k, None)
+    vlib_items_cache.pop(library_id, None)
+    random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
+    for k in random_keys:
+        random_recommend_cache.pop(k, None)
+
+    if vlib.resource_type == "rsshub":
+        await refresh_rss_library_internal(vlib)
+    await _regenerate_cover_for_vlib(vlib)
+
+
+async def _refresh_virtual_libs_for_real_library(real_lib_id: str) -> None:
+    config = config_manager.load_config()
+    wc = config.webhook
+    if not wc.enabled:
+        return
+    linked = _virtual_libs_linked_to_real_library(real_lib_id, config)
+    if not linked:
+        logger.info(f"Webhook: 真实库 {real_lib_id} 无关联虚拟库（或均为全库/RSS/已隐藏），跳过刷新。")
+        return
+    for v in linked:
+        try:
+            logger.info(f"Webhook: 开始刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {real_lib_id}")
+            await refresh_virtual_library_data_and_cover(v)
+        except Exception as e:
+            logger.error(f"Webhook: 刷新虚拟库 '{v.name}' 失败: {e}", exc_info=True)
+
+
+async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
+    config = config_manager.load_config()
+    wc = config.webhook
+    if not wc.enabled:
+        return
+
+    event_raw = extract_event_raw(payload)
+    kind = classify_event(event_raw)
+    if kind is None:
+        logger.debug(f"Webhook: 忽略事件类型 '{event_raw}'")
+        return
+    if kind == "add" and not wc.on_item_added:
+        return
+    if kind == "remove" and not wc.on_item_removed:
+        return
+
+    item = extract_item_dict(payload)
+    item_id = extract_item_id(payload, item)
+    if item_id:
+        item = await _enrich_item_from_emby(item_id, item)
+
+    lib_id_hint, lib_name_hint = extract_library_hints(payload, item)
+    real_lib_id: Optional[str] = lib_id_hint
+    if not real_lib_id and lib_name_hint:
+        real_lib_id = await _real_library_id_from_name(lib_name_hint)
+    if not real_lib_id and item_id:
+        real_lib_id = await _resolve_collection_folder_id_for_item(item_id)
+
+    if not real_lib_id:
+        logger.warning(f"Webhook: 无法解析真实媒体库 ID（event={event_raw}, item_id={item_id}）")
+        return
+
+    group_suffix = group_suffix_from_item(item, payload, wc.group_by_series, wc.group_by_album)
+    debounce_key = f"{real_lib_id}:{group_suffix}"
+
+    async def _run():
+        await _refresh_virtual_libs_for_real_library(real_lib_id)
+
+    debounce_s = float(wc.debounce_seconds or 0.0)
+    logger.info(
+        f"Webhook: 已调度刷新 real_lib={real_lib_id}（事件={event_raw}, debounce={debounce_s}s, key={debounce_key}）"
+    )
+    if debounce_s <= 0:
+        await _run()
+    else:
+        await _emby_webhook_debouncer.schedule(debounce_key, debounce_s, _run)
+
+
 # --- API ---
 @api_router.get("/config", response_model=AppConfig, response_model_by_alias=True, tags=["Configuration"])
 async def get_config():
@@ -569,27 +776,7 @@ async def refresh_library_data(library_id: str):
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
-    async def _refresh_data_and_cover():
-        # 1. Clear relevant caches
-        from proxy_cache import random_recommend_cache, vlib_items_cache, api_cache
-        # Clear api_cache entries related to this library
-        keys_to_remove = [k for k in api_cache if library_id in str(k)]
-        for k in keys_to_remove:
-            api_cache.pop(k, None)
-        vlib_items_cache.pop(library_id, None)
-        # Clear random cache for all users for this vlib
-        random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
-        for k in random_keys:
-            random_recommend_cache.pop(k, None)
-
-        # 2. Type-specific data refresh
-        if vlib.resource_type == "rsshub":
-            await refresh_rss_library_internal(vlib)
-
-        # 3. Regenerate cover
-        await _regenerate_cover_for_vlib(vlib)
-
-    asyncio.create_task(_refresh_data_and_cover())
+    asyncio.create_task(refresh_virtual_library_data_and_cover(vlib))
     return {"message": f"Data and cover refresh started for '{vlib.name}'."}
 
 

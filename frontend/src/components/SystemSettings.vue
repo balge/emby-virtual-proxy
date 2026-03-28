@@ -204,6 +204,73 @@
 
       <el-divider />
 
+      <div class="form-section">
+        <div class="card-title" style="margin-bottom: 12px;">Emby Webhook（库变更后刷新虚拟库）</div>
+        <div class="form-row">
+          <el-form-item label="启用 Webhook 联动" class="form-item-flex">
+            <el-switch v-model="store.config.webhook.enabled" />
+            <div class="form-item-description">
+              在 Emby Premiere 中将 Webhook 指向下方 URL。当<strong>真实媒体库</strong>有新增或删除时，
+              自动对「源库范围」包含该库的虚拟库执行与「刷新数据」相同的流程（清缓存、RSS 库则拉源、再生成封面）。
+              <strong>全库型</strong>虚拟库（类型为 all）不会由 Webhook 触发，仍仅依赖定时或手动；
+              RSSHub / 已隐藏虚拟库亦不关联。
+              建议在 Emby 通知中开启<strong>按剧集、按专辑分组</strong>，与本页防抖配合以减少刷新次数。
+            </div>
+          </el-form-item>
+        </div>
+        <template v-if="store.config.webhook && store.config.webhook.enabled">
+          <div class="form-row two-col">
+            <el-form-item label="回调 URL（复制到 Emby）" class="form-item-flex">
+              <el-input :model-value="webhookCallbackUrl" readonly />
+            </el-form-item>
+            <el-form-item label="密钥（可选）" class="form-item-flex">
+              <el-input
+                v-model="store.config.webhook.secret"
+                type="password"
+                show-password
+                placeholder="留空不校验；若填写，请求须带请求头 X-Webhook-Secret"
+              />
+            </el-form-item>
+          </div>
+          <div class="form-row two-col">
+            <el-form-item label="防抖间隔（秒）" class="form-item-flex">
+              <el-input-number v-model="store.config.webhook.debounce_seconds" :min="0" :max="600" :step="5" style="width: 100%;" />
+              <div class="form-item-description">
+                同一剧集或专辑在间隔内多次通知只触发一次；0 表示每次都立即刷新。
+              </div>
+            </el-form-item>
+          </div>
+          <div class="switch-grid">
+            <div class="switch-item">
+              <div class="switch-row">
+                <span class="switch-label">防抖按剧集分组</span>
+                <el-switch v-model="store.config.webhook.group_by_series" />
+              </div>
+            </div>
+            <div class="switch-item">
+              <div class="switch-row">
+                <span class="switch-label">防抖按专辑分组</span>
+                <el-switch v-model="store.config.webhook.group_by_album" />
+              </div>
+            </div>
+            <div class="switch-item">
+              <div class="switch-row">
+                <span class="switch-label">处理入库类事件</span>
+                <el-switch v-model="store.config.webhook.on_item_added" />
+              </div>
+            </div>
+            <div class="switch-item">
+              <div class="switch-row">
+                <span class="switch-label">处理删除类事件</span>
+                <el-switch v-model="store.config.webhook.on_item_removed" />
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <el-divider />
+
       <div class="form-section danger-zone">
         <el-form-item label="危险区域">
           <el-popconfirm
@@ -235,6 +302,11 @@ const store = useMainStore();
 
 const realLibraries = computed(() => {
   return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
+});
+
+const webhookCallbackUrl = computed(() => {
+  if (typeof window === 'undefined') return '';
+  return `${window.location.origin}/api/webhook/emby`;
 });
 
 const collectionTypes = ref([

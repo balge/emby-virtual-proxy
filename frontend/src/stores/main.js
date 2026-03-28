@@ -13,7 +13,12 @@ export const useMainStore = defineStore('main', {
         ignore_libraries: [],
         display_order: [], 
         advanced_filters: [],
-        library: [] // 确保 config 对象中有 library 数组
+        library: [], // 确保 config 对象中有 library 数组
+        webhook: {
+            enabled: false, secret: null, debounce_seconds: 90,
+            group_by_series: true, group_by_album: true,
+            on_item_added: true, on_item_removed: true,
+        },
     },
     originalConfigForComparison: null,
     // 【核心修复】: 删除独立的 virtualLibraries 状态，它应该始终是 config 的一部分
@@ -78,6 +83,13 @@ export const useMainStore = defineStore('main', {
         this.config = configRes.data;
         if (!this.config.advanced_filters) this.config.advanced_filters = [];
         if (!this.config.library) this.config.library = []; // 确保 library 数组存在
+        if (!this.config.webhook) {
+            this.config.webhook = {
+                enabled: false, secret: null, debounce_seconds: 90,
+                group_by_series: true, group_by_album: true,
+                on_item_added: true, on_item_removed: true,
+            };
+        }
 
         this.originalConfigForComparison = JSON.parse(JSON.stringify(configRes.data));
         this.classifications = classificationsRes.data;
