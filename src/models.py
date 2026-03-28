@@ -50,7 +50,7 @@ class VirtualLibrary(BaseModel):
     hidden: bool = Field(default=False) # True: 不参与 RSS 定时任务，且在 8999 代理上对 Items/Latest/视图隐藏
 
 class WebhookSettings(BaseModel):
-    """Emby Webhook：媒体变更后刷新「关联真实库」的虚拟库（全库型虚拟库不走 Webhook，仅定时）。"""
+    """Emby Webhook：仅对 resource_type=all 且源库范围命中变更库的虚拟库触发刷新。"""
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False

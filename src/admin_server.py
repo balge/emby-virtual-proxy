@@ -538,7 +538,10 @@ async def _enrich_item_from_emby(item_id: str, base: dict) -> dict:
 
 
 def _virtual_libs_linked_to_real_library(real_lib_id: str, config: AppConfig) -> List[VirtualLibrary]:
-    """源库列表包含该真实库、且非全库、未隐藏、非 RSSHub 的虚拟库。"""
+    """
+    仅当虚拟库为「全部媒体库」(resource_type=all) 且配置了源库范围、且 source_libraries 包含该真实库时，
+    才由 Webhook 触发刷新。其它资源详情类型（合集/标签/流派/人物等）及 random、rsshub 均不走 Webhook。
+    """
     ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
     if real_lib_id in ignore_set:
         return []
@@ -546,13 +549,17 @@ def _virtual_libs_linked_to_real_library(real_lib_id: str, config: AppConfig) ->
     for v in config.virtual_libraries:
         if v.hidden:
             continue
-        if v.resource_type in ("rsshub",):
+        if v.resource_type in ("rsshub", "random"):
             continue
-        if v.resource_type == "all":
+        if v.resource_type != "all":
             continue
-        src = [x for x in (v.source_libraries or []) if x not in ignore_set]
-        if real_lib_id in src:
-            out.append(v)
+        raw_src = v.source_libraries or []
+        if not raw_src:
+            continue  # 未配置源库限定 → 不走 Webhook
+        src = [x for x in raw_src if x not in ignore_set]
+        if not src or real_lib_id not in src:
+            continue
+        out.append(v)
     return out
 
 
@@ -579,7 +586,9 @@ async def _refresh_virtual_libs_for_real_library(real_lib_id: str) -> None:
         return
     linked = _virtual_libs_linked_to_real_library(real_lib_id, config)
     if not linked:
-        logger.info(f"Webhook: 真实库 {real_lib_id} 无关联虚拟库（或均为全库/RSS/已隐藏），跳过刷新。")
+        logger.info(
+            f"Webhook: 真实库 {real_lib_id} 无关联虚拟库（仅 resource_type=all 且源库命中才刷新；其余类型/未配置源库跳过）。"
+        )
         return
     for v in linked:
         try:

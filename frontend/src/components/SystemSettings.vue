@@ -210,9 +210,8 @@
           <el-form-item label="启用 Webhook 联动" class="form-item-flex">
             <el-switch v-model="store.config.webhook.enabled" />
             <div class="form-item-description">
-              在 Emby Premiere 中将 Webhook 指向下方 URL（POST）。当 Emby 发送<strong>可识别的入库/删除</strong>类通知时，
-              立即对「源库范围」包含该真实库的虚拟库执行与「刷新数据」相同流程。
-              <strong>全库型</strong>（类型 all）虚拟库不通过 Webhook 更新；RSSHub / 已隐藏不关联。
+              在 Emby Premiere 中将 Webhook 指向下方 URL（POST）。先解析<strong>受影响的真实媒体库 ID</strong>。
+              <strong>仅当虚拟库为「全部媒体库」（all）且做了源库限定、且源库列表包含该 ID 时</strong>才会 Webhook 刷新；其余一律不刷（含未选源库的 all、合集/标签等、random、RSSHub、已隐藏）。
               若填写密钥，可用请求头 <code>X-Webhook-Secret</code>、<code>Authorization: Bearer</code>，或 URL 查询参数 <code>?token=</code>。
             </div>
           </el-form-item>
