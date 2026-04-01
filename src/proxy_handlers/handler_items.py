@@ -1076,7 +1076,7 @@ async def handle_virtual_library_items(
     session: ClientSession,
     config: AppConfig
 ) -> Response | None:
-    if "/Items/Prefixes" in full_path or "/Items/Counts" in full_path or "/Items/Latest" in full_path:
+    if "/Items/Prefixes" in full_path or "/Items/Counts" in full_path or "/Items/Latest" in full_path or "/Images/" in full_path:
         return None
 
     params = request.query_params
@@ -1085,6 +1085,10 @@ async def handle_virtual_library_items(
     parent_id_from_param = params.get("ParentId")
     if parent_id_from_param:
         found_vlib = next((vlib for vlib in config.virtual_libraries if vlib.id == parent_id_from_param), None)
+        if found_vlib:
+            logger.info(f"ParentId {parent_id_from_param} matched virtual library '{found_vlib.name}'")
+        else:
+            logger.debug(f"ParentId {parent_id_from_param} is not a virtual library id; passthrough request.")
 
     if not found_vlib and method == "GET" and 'Items' in full_path:
         path_parts = full_path.split('/')

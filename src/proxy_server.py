@@ -35,6 +35,9 @@ logger.info(f"Proxy logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
 
 def get_cache_key(request: Request, full_path: str) -> str:
     if request.method != "GET": return None
+    # Skip non-JSON/static-like routes from API cache keying to avoid noisy MISS logs.
+    if "/Images/" in full_path or full_path.endswith(".jpg") or full_path.endswith(".png") or full_path.endswith(".webp"):
+        return None
     params = dict(request.query_params); params.pop("X-Emby-Token", None); params.pop("api_key", None)
     sorted_params = tuple(sorted(params.items())); user_id_from_path = "public"
     if "/Users/" in full_path:
