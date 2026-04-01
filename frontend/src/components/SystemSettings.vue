@@ -60,10 +60,11 @@
             </div>
           </el-form-item>
 
-          <el-form-item label="RSS 虚拟库定时刷新间隔（小时）" class="form-item-flex">
-            <el-input-number v-model="store.config.rss_refresh_interval" :min="0" />
+          <el-form-item label="虚拟库缓存刷新间隔（小时）" class="form-item-flex">
+            <el-input-number v-model="store.config.cache_refresh_interval" :min="0" />
             <div class="form-item-description">
-              设置 RSS 虚拟库自动刷新的时间间隔，单位为小时。设置为 0 表示禁用定时刷新。
+              统一刷新间隔：用于 RSS 虚拟库定时刷新，也作为所有虚拟库缓存 TTL 默认值（含 random 推荐缓存与分页缓存）。
+              单个虚拟库可在编辑弹窗覆盖。设为 0 表示不按时间触发（仅在手动/Webhook 刷新时失效）。
             </div>
           </el-form-item>
         </div>

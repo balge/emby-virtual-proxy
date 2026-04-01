@@ -14,8 +14,74 @@ from typing import List, Any, Dict, Optional
 from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
-from proxy_cache import vlib_items_cache, random_recommend_cache
+from proxy_cache import (
+    vlib_items_cache,
+    random_recommend_cache,
+    get_vlib_page_cache,
+    set_vlib_page_cache,
+)
 logger = logging.getLogger(__name__)
+
+
+def _build_vlib_page_context_key(request: Request, user_id: str) -> str:
+    """Build a pagination-insensitive context key for virtual library page cache."""
+    exclude = {"StartIndex", "Limit", "X-Emby-Token", "api_key"}
+    pairs = []
+    for k, v in request.query_params.items():
+        if k in exclude:
+            continue
+        pairs.append((k, v))
+    pairs.sort()
+    return f"user:{user_id}:q:{tuple(pairs)}"
+
+
+def _resolve_cache_ttl_seconds(vlib: VirtualLibrary, config: AppConfig) -> Optional[int]:
+    """
+    Resolve cache TTL:
+    - vlib.cache_refresh_interval (hours) overrides global
+    - fallback: config.cache_refresh_interval
+    - <=0 means no TTL (only invalidation-based)
+    """
+    hours = vlib.cache_refresh_interval
+    if hours is None:
+        hours = config.cache_refresh_interval
+    if hours is None:
+        return None
+    try:
+        h = int(hours)
+    except Exception:
+        return None
+    if h <= 0:
+        return None
+    return h * 3600
+
+
+def _cache_current_and_next_page(
+    *,
+    vlib_id: str,
+    context_key: str,
+    start_idx: int,
+    limit_count: int,
+    total_record_count: int,
+    page_items: List[Dict[str, Any]],
+    full_items_if_available: Optional[List[Dict[str, Any]]] = None,
+    ttl_seconds: Optional[int] = None,
+):
+    """Cache current page permanently; prefill next page if we already have enough items."""
+    if limit_count <= 0:
+        return
+    current_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
+    set_vlib_page_cache(vlib_id, context_key, start_idx, limit_count, current_data, ttl_seconds=ttl_seconds)
+
+    # prefetch next page only when we can derive it from already computed full list
+    if not full_items_if_available:
+        return
+    next_start = start_idx + limit_count
+    if next_start >= len(full_items_if_available):
+        return
+    next_items = full_items_if_available[next_start : next_start + limit_count]
+    next_data = {"Items": next_items, "TotalRecordCount": total_record_count, "StartIndex": next_start}
+    set_vlib_page_cache(vlib_id, context_key, next_start, limit_count, next_data, ttl_seconds=ttl_seconds)
 
 # Country code to possible name variants for ProductionLocations matching
 COUNTRY_CODE_MAP = {
@@ -677,7 +743,7 @@ async def _handle_source_library_scoped_request(
     start_idx = int(client_start_index)
     limit_count = int(client_limit)
 
-    async def _fetch_merge_sort_paginate(per_lib_target: int) -> tuple[list[dict], int]:
+    async def _fetch_merge_sort_paginate(per_lib_target: int) -> tuple[list[dict], int, list[dict]]:
         # Parallel fetch from all source libraries (bounded)
         tasks = [
             _fetch_items_for_parent_id_up_to(
@@ -738,12 +804,12 @@ async def _handle_source_library_scoped_request(
         # Paginate
         page = merged[start_idx : start_idx + limit_count]
         total_rc = summed_totals_local if enable_total else 0
-        return page, total_rc
+        return page, total_rc, merged
 
     # Fetch enough items to assemble the requested page after merge/dedupe/sort.
     buffer = max(50, limit_count)
     per_lib_target = start_idx + limit_count + buffer
-    paginated_items, total_record_count = await _fetch_merge_sort_paginate(per_lib_target)
+    paginated_items, total_record_count, merged_items = await _fetch_merge_sort_paginate(per_lib_target)
 
     # If we under-filled the page (due to dedupe/post-filter/merge), retry once with larger target.
     if len(paginated_items) < limit_count and per_lib_target < (start_idx + limit_count + buffer) * 4:
@@ -751,7 +817,7 @@ async def _handle_source_library_scoped_request(
         logger.info(
             f"Scoped result under-filled (page={len(paginated_items)}/{limit_count}), retrying with per_lib_target={retry_target}."
         )
-        paginated_items, total_record_count = await _fetch_merge_sort_paginate(retry_target)
+        paginated_items, total_record_count, merged_items = await _fetch_merge_sort_paginate(retry_target)
 
     if paginated_items:
         vlib_items_cache[found_vlib.id] = paginated_items
@@ -761,6 +827,22 @@ async def _handle_source_library_scoped_request(
         "TotalRecordCount": total_record_count,
         "StartIndex": start_idx
     }
+    if method == "GET":
+        try:
+            ctx = _build_vlib_page_context_key(request, user_id)
+            _cache_current_and_next_page(
+                vlib_id=found_vlib.id,
+                context_key=ctx,
+                start_idx=start_idx,
+                limit_count=limit_count,
+                total_record_count=total_record_count,
+                page_items=paginated_items,
+                # _fetch_merge_sort_paginate already over-fetches with buffer, enough for one-page prefetch.
+                full_items_if_available=merged_items,
+                ttl_seconds=page_ttl_seconds,
+            )
+        except Exception:
+            pass
     logger.info(f"Source library scoped result: total={total_record_count}, page={len(paginated_items)}")
 
     content = json.dumps(final_data).encode('utf-8')
@@ -841,7 +923,7 @@ async def _handle_random_library(
     - Uses user's play history for weighted genre-based recommendations
     - Falls back to pure random if no play history
     - Auto-fills to 30 items (15+15) from random pool if preference-based selection is insufficient
-    - Cached per user+vlib for 12 hours
+    - Cached per user+vlib for configured TTL
     """
     cache_key = f"random:{user_id}:{found_vlib.id}"
     cached = random_recommend_cache.get(cache_key)
@@ -966,8 +1048,12 @@ async def _handle_random_library(
 
         logger.info(f"Random library '{found_vlib.name}': selected {len(selected_movies)} movies + {len(selected_series)} series for user {user_id}")
 
-        # Cache the result
-        random_recommend_cache[cache_key] = all_items
+        # Cache the result with per-library/global TTL
+        random_ttl = _resolve_cache_ttl_seconds(found_vlib, config)
+        if random_ttl:
+            random_recommend_cache.set_with_ttl(cache_key, all_items, random_ttl)
+        else:
+            random_recommend_cache[cache_key] = all_items
 
         if all_items:
             vlib_items_cache[found_vlib.id] = all_items
@@ -1033,6 +1119,22 @@ async def handle_virtual_library_items(
         start_idx = int(params.get("StartIndex", 0))
         empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": start_idx}
         return Response(content=json.dumps(empty).encode("utf-8"), status_code=200, media_type="application/json")
+
+    # Permanent page cache for vlib page 1/2 and on-demand pages.
+    page_start = int(params.get("StartIndex", 0))
+    page_limit = int(params.get("Limit", 50))
+    page_ctx_key = _build_vlib_page_context_key(request, user_id)
+    page_ttl_seconds = _resolve_cache_ttl_seconds(found_vlib, config)
+    if method == "GET" and found_vlib.resource_type not in ("rsshub", "random") and page_limit > 0:
+        cached = get_vlib_page_cache(found_vlib.id, page_ctx_key, page_start, page_limit)
+        if cached:
+            logger.info(
+                f"Vlib page cache HIT: vlib={found_vlib.id}, start={page_start}, limit={page_limit}"
+            )
+            return Response(content=json.dumps(cached).encode("utf-8"), status_code=200, media_type="application/json")
+        logger.info(
+            f"Vlib page cache MISS: vlib={found_vlib.id}, start={page_start}, limit={page_limit}"
+        )
 
     # --- Build request params ---
     new_params = {}
@@ -1117,10 +1219,30 @@ async def handle_virtual_library_items(
     if effective_source_libs and found_vlib.resource_type != "rsshub":
         # Temporarily set source_libraries on the vlib for the scoped handler
         found_vlib_copy = found_vlib.model_copy(update={"source_libraries": effective_source_libs})
-        return await _handle_source_library_scoped_request(
+        resp = await _handle_source_library_scoped_request(
             request, method, found_vlib_copy, new_params, user_id,
             real_emby_url, session, config, client_start_index, client_limit
         )
+        # scoped handler already computes merged pagination; cache this page
+        if method == "GET" and page_limit > 0 and resp.status_code == 200:
+            try:
+                data = json.loads(resp.body or b"{}")
+                if isinstance(data, dict) and "Items" in data and "StartIndex" in data:
+                    set_vlib_page_cache(
+                        found_vlib.id,
+                        page_ctx_key,
+                        int(data.get("StartIndex", 0)),
+                        page_limit,
+                        data,
+                        ttl_seconds=page_ttl_seconds,
+                    )
+                    logger.info(
+                        f"Vlib page cache STORE(scoped): vlib={found_vlib.id}, start={int(data.get('StartIndex', 0))}, "
+                        f"limit={page_limit}, ttl_s={page_ttl_seconds}"
+                    )
+            except Exception:
+                pass
+        return resp
 
     # --- Advanced filter translation ---
     post_filter_rules = []
@@ -1275,6 +1397,17 @@ async def handle_virtual_library_items(
             limit_count = int(client_limit)
             page_items = deduped[start_idx: start_idx + limit_count]
             final_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
+            if method == "GET":
+                _cache_current_and_next_page(
+                    vlib_id=found_vlib.id,
+                    context_key=page_ctx_key,
+                    start_idx=start_idx,
+                    limit_count=limit_count,
+                    total_record_count=total_record_count,
+                    page_items=page_items,
+                    full_items_if_available=deduped,
+                    ttl_seconds=page_ttl_seconds,
+                )
             if page_items:
                 vlib_items_cache[found_vlib.id] = page_items
             return Response(content=json.dumps(final_data).encode("utf-8"), status_code=200, media_type="application/json")
@@ -1309,6 +1442,21 @@ async def handle_virtual_library_items(
 
                     data["Items"] = items_list
                     logger.info(f"Native filter/merge done. Emby total: {data.get('TotalRecordCount')}, page items: {len(items_list)}")
+                    if method == "GET":
+                        try:
+                            start_idx = int(data.get("StartIndex", client_start_index))
+                            total_record_count = int(data.get("TotalRecordCount", len(items_list)))
+                            _cache_current_and_next_page(
+                                vlib_id=found_vlib.id,
+                                context_key=page_ctx_key,
+                                start_idx=start_idx,
+                                limit_count=page_limit,
+                                total_record_count=total_record_count,
+                                page_items=items_list,
+                                ttl_seconds=page_ttl_seconds,
+                            )
+                        except Exception:
+                            pass
 
                     if items_list:
                         vlib_items_cache[found_vlib.id] = items_list

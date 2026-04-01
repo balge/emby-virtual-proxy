@@ -32,7 +32,7 @@ class VirtualLibrary(BaseModel):
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签
     rsshub_url: Optional[str] = None # <-- 【新增】RSSHUB链接
     rss_type: Optional[Literal["douban", "bangumi"]] = None # <-- 【新增】RSS类型
-    rss_refresh_interval: Optional[int] = Field(default=None) # <-- 【新增】RSS库单独刷新间隔（小时）；未配置则使用全局 rss_refresh_interval
+    cache_refresh_interval: Optional[int] = Field(default=None) # 统一刷新间隔（小时）；留空走全局
     fallback_tmdb_id: Optional[str] = None # <-- 【新增】RSS库的兜底TMDB ID
     fallback_tmdb_type: Optional[Literal["Movie", "TV"]] = None # <-- 【新增】RSS库的兜底TMDB类型
     enable_retention: bool = Field(default=False) # <-- 【新增】是否开启数据保留功能
@@ -95,8 +95,8 @@ class AppConfig(BaseModel):
     # 新增：TMDB HTTP 代理
     tmdb_proxy: Optional[str] = Field(default="")
 
-    # 新增：RSS 定时刷新间隔（小时），0为禁用
-    rss_refresh_interval: Optional[int] = Field(default=0)
+    # 统一刷新间隔（小时）；用于 RSS 定时调度，也作为 random/分页缓存默认 TTL
+    cache_refresh_interval: Optional[int] = Field(default=12)
 
     # Emby Webhook（管理 API /api/webhook/emby，需加入 Emby Premiere Webhook 目标 URL）
     webhook: WebhookSettings = Field(default_factory=WebhookSettings)

@@ -9,6 +9,7 @@ export const useMainStore = defineStore('main', {
     config: { 
         emby_url: '', 
         emby_api_key: '', 
+        cache_refresh_interval: 12,
         hide: [], 
         ignore_libraries: [],
         display_order: [], 
@@ -79,6 +80,9 @@ export const useMainStore = defineStore('main', {
         this.config = configRes.data;
         if (!this.config.advanced_filters) this.config.advanced_filters = [];
         if (!this.config.library) this.config.library = []; // 确保 library 数组存在
+        if (this.config.cache_refresh_interval === undefined || this.config.cache_refresh_interval === null) {
+            this.config.cache_refresh_interval = 12;
+        }
         if (!this.config.webhook) {
             this.config.webhook = { enabled: false, secret: null };
         }
@@ -340,7 +344,7 @@ export const useMainStore = defineStore('main', {
             image_tag: null,
             fallback_tmdb_id: null,
             fallback_tmdb_type: null,
-            rss_refresh_interval: null,
+            cache_refresh_interval: null,
             source_libraries: []
         };
         this.dialogVisible = true;

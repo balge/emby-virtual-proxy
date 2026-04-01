@@ -35,16 +35,16 @@
         </el-select>
       </el-form-item>
 
-      <el-form-item label="刷新间隔(小时)" v-if="store.currentLibrary.resource_type === 'rsshub'">
+      <el-form-item label="刷新间隔(小时)">
         <el-input-number
-          v-model="store.currentLibrary.rss_refresh_interval"
-          :min="1"
+          v-model="store.currentLibrary.cache_refresh_interval"
+          :min="0"
           :step="1"
           :controls-position="'right'"
           placeholder="留空使用全局配置"
           style="width: 220px;"
         />
-        <el-tooltip content="仅当前 RSSHUB 虚拟库生效。留空时将使用系统设置中的全局 RSS 刷新间隔。" placement="top">
+        <el-tooltip content="统一刷新间隔。RSS 定时调度和虚拟库缓存 TTL 都使用它。留空时使用系统设置中的全局值；0 表示仅在刷新事件时失效（RSS 定时不触发）。" placement="top">
           <el-icon style="margin-left: 8px; color: #aaa;"><InfoFilled /></el-icon>
         </el-tooltip>
       </el-form-item>

@@ -154,7 +154,7 @@ const getResourceTypeLabel = (type) => resourceTypeMap[type] || '未知';
 
 const getResourceNameById = (type, id, row) => {
     if (type === 'rsshub') {
-        const custom = Number(row.rss_refresh_interval);
+        const custom = Number(row.cache_refresh_interval);
         const refreshText = Number.isFinite(custom) && custom > 0 ? `${custom}h` : '跟随全局';
         return `${row.rsshub_url}（刷新: ${refreshText}）`;
     }

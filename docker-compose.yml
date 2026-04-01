@@ -14,6 +14,8 @@ services:
     environment:
       - PROXY_CONTAINER_NAME=emby-proxy
       - PROXY_CORE_URL=http://localhost:8999
+      # 日志级别：debug / info / warning / error（默认 info）
+      - LOG_LEVEL=info
       # 管理面板登录认证（留空或不设置则不启用认证）
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=admin123

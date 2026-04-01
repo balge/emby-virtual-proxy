@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 import aiohttp
 # 【【【 修改这一行 】】】
@@ -26,8 +27,11 @@ from proxy_handlers import (
     handler_virtual_items
 )
 
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+_LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "info").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
+logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+logger.info(f"Proxy logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
 
 def get_cache_key(request: Request, full_path: str) -> str:
     if request.method != "GET": return None

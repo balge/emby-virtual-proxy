@@ -162,6 +162,14 @@ class PersistentTTLCache:
         self._mem[key] = {"data": value, "expires_at": expires_at}
         self._persist(key, value, expires_at)
 
+    def set_with_ttl(self, key, value, ttl_seconds: int):
+        ttl = int(ttl_seconds) if ttl_seconds is not None else self._ttl
+        if ttl <= 0:
+            ttl = self._ttl
+        expires_at = (datetime.utcnow() + timedelta(seconds=ttl)).isoformat()
+        self._mem[key] = {"data": value, "expires_at": expires_at}
+        self._persist(key, value, expires_at)
+
     def __getitem__(self, key):
         val = self.get(key)
         if val is None:
@@ -209,3 +217,94 @@ class PersistentTTLCache:
 # --- Module-level cache instances ---
 vlib_items_cache = PersistentCache()
 random_recommend_cache = PersistentTTLCache(ttl_seconds=43200)  # 12 hours
+
+# Virtual-library paged response cache (in-memory, invalidated by refresh/webhook operations).
+_vlib_page_cache: dict[tuple[str, str, int, int], dict] = {}
+_vlib_page_cache_lock = threading.Lock()
+_vlib_page_access_seq = 0
+# Per (vlib, context, limit): keep page1/page2 pinned + up to this many extra pages (LRU)
+VLIB_PAGE_CACHE_EXTRA_PAGES = 4
+
+
+def get_vlib_page_cache(vlib_id: str, context_key: str, start_index: int, limit: int):
+    key = (vlib_id, context_key, int(start_index), int(limit))
+    with _vlib_page_cache_lock:
+        entry = _vlib_page_cache.get(key)
+        if entry is None:
+            return None
+        # Backward compatible with old shape: raw dict payload
+        if "data" not in entry:
+            return entry
+        expires_at = entry.get("expires_at")
+        if expires_at and datetime.utcnow().isoformat() > expires_at:
+            _vlib_page_cache.pop(key, None)
+            return None
+        global _vlib_page_access_seq
+        _vlib_page_access_seq += 1
+        entry["last_access"] = _vlib_page_access_seq
+        return entry.get("data")
+
+
+def _prune_vlib_page_group(vlib_id: str, context_key: str, limit: int):
+    """
+    Fine-grained policy:
+    - Always keep page1(start=0) and page2(start=limit)
+    - Remaining pages keep most-recent N (LRU)
+    """
+    group_keys = [
+        k for k in _vlib_page_cache
+        if k[0] == vlib_id and k[1] == context_key and k[3] == int(limit)
+    ]
+    if not group_keys:
+        return
+
+    pinned_starts = {0, int(limit)}
+    pinned = []
+    candidates = []
+    for k in group_keys:
+        entry = _vlib_page_cache.get(k) or {}
+        start = k[2]
+        if start in pinned_starts:
+            pinned.append(k)
+            continue
+        if "data" in entry:
+            candidates.append((entry.get("last_access", 0), k))
+        else:
+            # old shape, treat as high-priority once
+            candidates.append((10**18, k))
+
+    # Keep most recently accessed extra pages
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    keep_extra = {k for _, k in candidates[:VLIB_PAGE_CACHE_EXTRA_PAGES]}
+    keep = set(pinned) | keep_extra
+    for k in group_keys:
+        if k not in keep:
+            _vlib_page_cache.pop(k, None)
+
+
+def set_vlib_page_cache(vlib_id: str, context_key: str, start_index: int, limit: int, data: dict, ttl_seconds: int | None = None):
+    key = (vlib_id, context_key, int(start_index), int(limit))
+    with _vlib_page_cache_lock:
+        global _vlib_page_access_seq
+        _vlib_page_access_seq += 1
+        expires_at = None
+        if ttl_seconds and ttl_seconds > 0:
+            expires_at = (datetime.utcnow() + timedelta(seconds=int(ttl_seconds))).isoformat()
+        _vlib_page_cache[key] = {
+            "data": data,
+            "last_access": _vlib_page_access_seq,
+            "expires_at": expires_at,
+        }
+        logger.debug(
+            f"VLIB_PAGE_CACHE SET vlib={vlib_id} start={start_index} limit={limit} "
+            f"ttl={ttl_seconds if ttl_seconds is not None else 'none'}"
+        )
+        _prune_vlib_page_group(vlib_id, context_key, int(limit))
+
+
+def clear_vlib_page_cache(vlib_id: str):
+    with _vlib_page_cache_lock:
+        keys = [k for k in _vlib_page_cache if k[0] == vlib_id]
+        for k in keys:
+            _vlib_page_cache.pop(k, None)
+        logger.info(f"VLIB_PAGE_CACHE CLEAR vlib={vlib_id} removed_pages={len(keys)}")

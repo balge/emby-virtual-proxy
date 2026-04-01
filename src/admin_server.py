@@ -29,7 +29,7 @@ from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 import docker
-from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache
+from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache, clear_vlib_page_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter
 from emby_webhook import (
     parse_request_payload,
@@ -48,7 +48,10 @@ from proxy_handlers._filter_translator import translate_rules
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+_LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "info").upper()
+_LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
+logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger.info(f"Admin logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
 # 【【【 添加/确认结束 】】】
 
 # ============================================
@@ -198,6 +201,8 @@ async def emby_webhook_receive(request: Request):
         except Exception:
             body = {}
     payload = parse_request_payload(body)
+    logger.debug(f"Webhook RAW body: {body}")
+    logger.debug(f"Webhook PARSED payload: {payload}")
     asyncio.create_task(_handle_emby_webhook_payload(payload))
     return {"ok": True, "accepted": True}
 
@@ -566,6 +571,10 @@ def _virtual_libs_linked_to_real_library(real_lib_id: str, config: AppConfig) ->
 async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
     library_id = vlib.id
+    logger.info(
+        f"VLIB_REFRESH START vlib={library_id} name='{vlib.name}' "
+        f"type={vlib.resource_type} interval_h={vlib.cache_refresh_interval}"
+    )
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
@@ -573,10 +582,16 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
     for k in random_keys:
         random_recommend_cache.pop(k, None)
+    clear_vlib_page_cache(library_id)
+    logger.info(
+        f"VLIB_REFRESH CACHE_CLEARED vlib={library_id} "
+        f"api_cache={len(keys_to_remove)} random_cache={len(random_keys)} vlib_items=1 page_cache=cleared"
+    )
 
     if vlib.resource_type == "rsshub":
         await refresh_rss_library_internal(vlib)
     await _regenerate_cover_for_vlib(vlib)
+    logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
 
 
 async def _refresh_virtual_libs_for_real_library(real_lib_id: str) -> None:
@@ -590,6 +605,9 @@ async def _refresh_virtual_libs_for_real_library(real_lib_id: str) -> None:
             f"Webhook: 真实库 {real_lib_id} 无关联虚拟库（仅 resource_type=all 且源库命中才刷新；其余类型/未配置源库跳过）。"
         )
         return
+    logger.info(
+        f"Webhook: real_lib={real_lib_id} matched_vlibs={len(linked)} vlib_ids={[v.id for v in linked]}"
+    )
     for v in linked:
         try:
             logger.info(f"Webhook: 开始刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {real_lib_id}")
@@ -693,6 +711,11 @@ async def restart_proxy_container():
 async def refresh_rss_library_internal(vlib: VirtualLibrary):
     """内部刷新逻辑，供手动和定时任务调用"""
     try:
+        logger.info(
+            f"RSS_REFRESH START vlib={vlib.id} name='{vlib.name}' "
+            f"type={vlib.rss_type} interval_h={vlib.cache_refresh_interval}"
+        )
+        clear_vlib_page_cache(vlib.id)
         if vlib.rss_type == "douban":
             from rss_processor.douban import DoubanProcessor
             processor = DoubanProcessor(vlib)
@@ -703,6 +726,7 @@ async def refresh_rss_library_internal(vlib: VirtualLibrary):
             processor.process()
         else:
             logger.warning(f"Unknown RSS type: {vlib.rss_type} for library {vlib.id}")
+        logger.info(f"RSS_REFRESH DONE vlib={vlib.id} name='{vlib.name}'")
     except Exception as e:
         logger.error(f"Error refreshing RSS library {vlib.id}: {e}", exc_info=True)
 
@@ -1047,6 +1071,7 @@ async def toggle_library_hidden(library_id: str):
             random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
             for k in random_keys:
                 random_recommend_cache.pop(k, None)
+            clear_vlib_page_cache(library_id)
             return {"id": lib.id, "hidden": lib.hidden}
     raise HTTPException(status_code=404, detail="Virtual library not found")
 
@@ -1089,6 +1114,7 @@ async def delete_library(library_id: str):
     
     if library_id in config.display_order:
         config.display_order.remove(library_id)
+    clear_vlib_page_cache(library_id)
         
     config_manager.save_config(config)
     return Response(status_code=204)
@@ -1170,10 +1196,10 @@ def update_rss_refresh_job(config: AppConfig):
             scheduler.remove_job(job.id)
 
     def _effective_hours(vlib: VirtualLibrary) -> int:
-        # vlib override wins; otherwise fall back to global
-        if vlib.rss_refresh_interval is not None:
-            return int(vlib.rss_refresh_interval)
-        return int(config.rss_refresh_interval or 0)
+        # Unified interval: vlib.cache_refresh_interval override, fallback to global cache_refresh_interval.
+        if vlib.cache_refresh_interval is not None:
+            return int(vlib.cache_refresh_interval)
+        return int(config.cache_refresh_interval or 0)
 
     # Schedule per-library refresh jobs
     rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub" and not lib.hidden]

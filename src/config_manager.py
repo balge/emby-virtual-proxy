@@ -32,6 +32,14 @@ def load_config() -> AppConfig:
                 data['tmdb_api_key'] = ""
             if 'tmdb_proxy' not in data:
                 data['tmdb_proxy'] = ""
+            # Backward compatibility: migrate old rss_refresh_interval -> cache_refresh_interval
+            if 'cache_refresh_interval' not in data and 'rss_refresh_interval' in data:
+                data['cache_refresh_interval'] = data.get('rss_refresh_interval')
+            libs = data.get('library') if isinstance(data.get('library'), list) else data.get('virtual_libraries')
+            if isinstance(libs, list):
+                for lib in libs:
+                    if isinstance(lib, dict) and 'cache_refresh_interval' not in lib and 'rss_refresh_interval' in lib:
+                        lib['cache_refresh_interval'] = lib.get('rss_refresh_interval')
             if 'webhook' not in data or not isinstance(data.get('webhook'), dict):
                 data['webhook'] = {}
             return AppConfig.model_validate(data)
