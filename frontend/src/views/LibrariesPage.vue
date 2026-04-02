@@ -60,7 +60,7 @@
                 class="w-full rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 focus:outline-none disabled:opacity-50" />
             </td>
             <td class="px-3 py-3 text-center">
-              <BaseButton size="xs" :disabled="!row.cover_enabled" @click="store.refreshRealLibraryCover(row.id)">刷新封面</BaseButton>
+              <BaseButton size="xs" :disabled="!row.cover_enabled" @click="store.refreshRealLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
             </td>
           </tr>
         </tbody>
@@ -86,7 +86,7 @@
           <input v-model="row.cover_title_en" placeholder="英文标题（可选）"
             class="w-full rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:outline-none" />
         </div>
-        <BaseButton size="sm" :disabled="!row.cover_enabled" @click="store.refreshRealLibraryCover(row.id)">刷新封面</BaseButton>
+        <BaseButton size="sm" :disabled="!row.cover_enabled" @click="store.refreshRealLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
       </div>
     </div>
   </div>
@@ -94,7 +94,7 @@
 
 <script setup>
 import { computed, onMounted } from 'vue'
-import { BuildingLibraryIcon } from '@heroicons/vue/24/outline'
+import { BuildingLibraryIcon, ArrowPathIcon } from '@heroicons/vue/24/outline'
 import { useMainStore } from '@/stores/main'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
