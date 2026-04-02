@@ -30,7 +30,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import docker
-from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache, clear_vlib_page_cache
+from proxy_cache import api_cache, vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
     parse_request_payload,
@@ -44,6 +44,7 @@ from db_manager import DBManager, RSS_CACHE_DB
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
 from proxy_handlers._filter_translator import translate_rules
+from proxy_handlers.handler_items import _apply_custom_sort
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
@@ -267,7 +268,8 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     params = {
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
-        "Fields": "ImageTags,ProviderIds,Genres,DateCreated",
+        # DateLastMediaAdded: needed when advanced filter custom-sorts by「最近入库」(same semantics as handler_items._get_value_for_rule)
+        "Fields": "ImageTags,ProviderIds,Genres,DateCreated,DateLastMediaAdded",
         "Limit": "200",
         "SortBy": "DateCreated",
         "SortOrder": "Descending",
@@ -326,6 +328,15 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
         if iid and iid not in seen:
             seen.add(iid)
             deduped.append(item)
+
+    # Match virtual library browse order: advanced filter custom sort (e.g. DateLastMediaAdded).
+    # Without this, cover generation always used DateCreated order from the fetch, ignoring sort_field/sort_order.
+    if vlib.advanced_filter_id and deduped:
+        adv_filter = next((f for f in config.advanced_filters if f.id == vlib.advanced_filter_id), None)
+        if adv_filter and adv_filter.sort_field and adv_filter.sort_order:
+            deduped = _apply_custom_sort(
+                list(deduped), adv_filter.sort_field, adv_filter.sort_order
+            )
 
     if deduped:
         vlib_items_cache[vlib.id] = deduped
@@ -697,14 +708,27 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
-    vlib_items_cache.pop(library_id, None)
-    random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
-    for k in random_keys:
-        random_recommend_cache.pop(k, None)
+    removed_items = clear_vlib_items_cache(library_id)
     clear_vlib_page_cache(library_id)
+
+    # Admin 与 Proxy 为不同进程，必须通知 proxy 进程清内存缓存。
+    # 否则你会看到“刷新后仍返回旧数据”的概率性现象。
+    try:
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
+        token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
+        headers = {"X-Internal-Token": token} if token else {}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.warning(f"PROXY_INVALIDATE vlib={library_id} HTTP {resp.status}: {text[:300]}")
+    except Exception as e:
+        logger.warning(f"PROXY_INVALIDATE vlib={library_id} failed: {e}")
+
     logger.info(
         f"VLIB_REFRESH CACHE_CLEARED vlib={library_id} "
-        f"api_cache={len(keys_to_remove)} random_cache={len(random_keys)} vlib_items=1 page_cache=cleared"
+        f"api_cache={len(keys_to_remove)} vlib_items={removed_items} page_cache=cleared"
     )
 
     if vlib.resource_type == "rsshub":
@@ -1222,10 +1246,7 @@ async def toggle_library_hidden(library_id: str):
             keys_to_remove = [k for k in api_cache if library_id in str(k)]
             for k in keys_to_remove:
                 api_cache.pop(k, None)
-            vlib_items_cache.pop(library_id, None)
-            random_keys = [k for k in random_recommend_cache if k.endswith(f":{library_id}")]
-            for k in random_keys:
-                random_recommend_cache.pop(k, None)
+            clear_vlib_items_cache(library_id)
             clear_vlib_page_cache(library_id)
             return {"id": lib.id, "hidden": lib.hidden}
     raise HTTPException(status_code=404, detail="Virtual library not found")
@@ -1269,6 +1290,7 @@ async def delete_library(library_id: str):
     
     if library_id in config.display_order:
         config.display_order.remove(library_id)
+    clear_vlib_items_cache(library_id)
     clear_vlib_page_cache(library_id)
         
     config_manager.save_config(config)

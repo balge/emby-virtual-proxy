@@ -13,7 +13,7 @@
     </div>
 
     <!-- Quick stats -->
-    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
       <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
         <p class="text-2xl font-bold text-primary-600">{{ store.virtualLibraries.length }}</p>
         <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">虚拟媒体库</p>
@@ -25,12 +25,6 @@
       <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
         <p class="text-2xl font-bold text-amber-600">{{ (store.config.advanced_filters || []).length }}</p>
         <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">高级筛选器</p>
-      </div>
-      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
-        <p class="text-2xl font-bold" :class="store.config.enable_cache ? 'text-emerald-600' : 'text-gray-400'">
-          {{ store.config.enable_cache ? 'ON' : 'OFF' }}
-        </p>
-        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">内存缓存</p>
       </div>
     </div>
 

@@ -12,8 +12,8 @@ from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Tuple, Dict
 
-# 【【【 同时修改这一行，从 proxy_cache 导入两个缓存实例 】】】
-from proxy_cache import api_cache, vlib_items_cache
+# 【【【 同时修改这一行，从 proxy_cache 导入缓存与失效函数 】】】
+from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache
 import config_manager
 from proxy_handlers import (
     handler_system, 
@@ -76,6 +76,31 @@ async def get_cached_items_for_admin(library_id: str):
     
     logger.info(f"Admin成功获取到库 {library_id} 的 {len(cached_items)} 条缓存项目。")
     return JSONResponse(content={"Items": cached_items})
+
+
+def _allow_internal_cache_invalidate(request: Request) -> bool:
+    token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
+    if token:
+        return request.headers.get("x-internal-token", "").strip() == token
+
+    # Default: only allow from localhost (typical admin->proxy within the same container)
+    client_host = request.client.host if request.client else ""
+    return client_host in ("127.0.0.1", "::1")
+
+
+@proxy_app.post("/api/internal/invalidate-vlib-cache/{library_id}")
+async def internal_invalidate_vlib_cache(request: Request, library_id: str):
+    """
+    Internal endpoint: drop proxy-process in-memory caches for one virtual library.
+    Needed because admin/proxy are separate processes with separate RAM.
+    """
+    if not _allow_internal_cache_invalidate(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    items_stats = clear_vlib_items_cache(library_id)
+    clear_vlib_page_cache(library_id)
+    return JSONResponse(content={"vlib_id": library_id, "items": items_stats})
+
 # --- 【【【 核心修复：重写 WebSocket 代理 】】】 ---
 @proxy_app.websocket("/{full_path:path}")
 async def websocket_proxy(client_ws: WebSocket, full_path: str):
@@ -128,18 +153,6 @@ async def websocket_proxy(client_ws: WebSocket, full_path: str):
 async def reverse_proxy(request: Request, full_path: str):
     config = config_manager.load_config()
     real_emby_url = config.emby_url.rstrip('/')
-    
-    cache_key = None
-    if config.enable_cache:
-        cache_key = get_cache_key(request, full_path)
-        if cache_key and cache_key in api_cache:
-            cached_response_data = api_cache.get(cache_key)
-            if cached_response_data:
-                content, status, headers = cached_response_data
-                logger.info(f"✅ Cache HIT for key: {cache_key}")
-                return Response(content=content, status_code=status, headers=headers)
-        if cache_key:
-            logger.info(f"❌ Cache MISS for key: {cache_key}")
 
     proxy_address = f"{request.url.scheme}://{request.url.netloc}"
     session = request.app.state.aiohttp_session
@@ -154,21 +167,5 @@ async def reverse_proxy(request: Request, full_path: str):
     if not response: response = await handler_items.handle_virtual_library_items(request, full_path, request.method, real_emby_url, session, config)
     if not response: response = await handler_views.handle_view_injection(request, full_path, request.method, real_emby_url, session, config)
     if not response: response = await handler_default.forward_request(request, full_path, request.method, real_emby_url, session)
-
-    if config.enable_cache and cache_key and response and response.status_code == 200 and not isinstance(response, StreamingResponse):
-        content_type = response.headers.get("Content-Type", "")
-        if "application/json" in content_type:
-            # For aiohttp responses, we need to read the body before caching
-            if hasattr(response, 'body'):
-                response_body = response.body
-            else: # For regular FastAPI responses
-                response_body = await response.body()
-
-            response_to_cache: Tuple[bytes, int, Dict] = (response_body, response.status_code, dict(response.headers))
-            api_cache[cache_key] = response_to_cache
-            logger.info(f"📝 Cache SET for key: {cache_key}")
-            
-            # Since body is already read, return a new Response object
-            return Response(content=response_body, status_code=response.status_code, headers=response.headers)
 
     return response

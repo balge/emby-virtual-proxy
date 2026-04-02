@@ -34,7 +34,6 @@
       <section class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-5">
         <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4">功能开关</h2>
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          <SwitchCard label="启用内存缓存" desc="缓存 Emby API 响应以提高性能。" v-model="store.config.enable_cache" />
           <SwitchCard label="显示缺失剧集" desc="从 TMDB 查询并显示本地缺失的剧集。" v-model="store.config.show_missing_episodes" />
           <SwitchCard label="全局强制 TMDB 合并" desc="无视虚拟库独立设置，强制合并。" v-model="store.config.force_merge_by_tmdb_id" />
         </div>

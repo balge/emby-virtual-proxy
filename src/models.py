@@ -96,9 +96,6 @@ class AppConfig(BaseModel):
     # 明确定义 advanced_filters，不使用任何复杂的配置
     advanced_filters: List[AdvancedFilter] = Field(default_factory=list)
 
-    # 新增：缓存开关
-    enable_cache: bool = Field(default=True)
-    
     # 新增：自动生成封面的默认样式
     default_cover_style: str = Field(default='style_multi_1')
 
@@ -128,6 +125,8 @@ class AppConfig(BaseModel):
     class Config:
         # 允许从别名填充模型
         populate_by_name = True
+        # 兼容旧配置文件：旧版可能包含 enable_cache 等字段
+        extra = "ignore"
 
     @property
     def disabled_library_ids(self) -> set:

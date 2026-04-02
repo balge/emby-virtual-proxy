@@ -16,7 +16,6 @@ from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
 from proxy_cache import (
     vlib_items_cache,
-    random_recommend_cache,
     get_vlib_page_cache,
     set_vlib_page_cache,
 )
@@ -67,21 +66,12 @@ def _cache_current_and_next_page(
     full_items_if_available: Optional[List[Dict[str, Any]]] = None,
     ttl_seconds: Optional[int] = None,
 ):
-    """Cache current page permanently; prefill next page if we already have enough items."""
+    """Cache current page only (缓和模式：不预缓存下一页)."""
     if limit_count <= 0:
         return
     current_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
     set_vlib_page_cache(vlib_id, context_key, start_idx, limit_count, current_data, ttl_seconds=ttl_seconds)
-
-    # prefetch next page only when we can derive it from already computed full list
-    if not full_items_if_available:
-        return
-    next_start = start_idx + limit_count
-    if next_start >= len(full_items_if_available):
-        return
-    next_items = full_items_if_available[next_start : next_start + limit_count]
-    next_data = {"Items": next_items, "TotalRecordCount": total_record_count, "StartIndex": next_start}
-    set_vlib_page_cache(vlib_id, context_key, next_start, limit_count, next_data, ttl_seconds=ttl_seconds)
+    # Explicitly ignore full_items_if_available to avoid pre-caching next pages.
 
 # Country code to possible name variants for ProductionLocations matching
 COUNTRY_CODE_MAP = {
@@ -915,7 +905,8 @@ async def _handle_random_library(
     request: Request, method: str, found_vlib: VirtualLibrary,
     new_params: Dict, user_id: str, real_emby_url: str,
     session: ClientSession, config: AppConfig,
-    client_start_index: str, client_limit: str
+    client_start_index: str, client_limit: str,
+    page_ctx_key: str, page_ttl_seconds: Optional[int]
 ) -> Response:
     """
     Handle 'random' type virtual library.
@@ -926,7 +917,17 @@ async def _handle_random_library(
     - Cached per user+vlib for configured TTL
     """
     cache_key = f"random:{user_id}:{found_vlib.id}"
-    cached = random_recommend_cache.get(cache_key)
+    start_idx = int(client_start_index)
+    limit_count = int(client_limit)
+    if method == "GET" and limit_count > 0:
+        cached_page = get_vlib_page_cache(found_vlib.id, page_ctx_key, start_idx, limit_count)
+        if cached_page:
+            logger.info(
+                f"Random page cache HIT: vlib={found_vlib.id}, user={user_id}, start={start_idx}, limit={limit_count}"
+            )
+            return Response(content=json.dumps(cached_page).encode("utf-8"), status_code=200, media_type="application/json")
+
+    cached = vlib_items_cache.get(cache_key)
     if cached:
         logger.info(f"Random library '{found_vlib.name}': serving cached result for user {user_id}")
         all_items = cached
@@ -1048,23 +1049,28 @@ async def _handle_random_library(
 
         logger.info(f"Random library '{found_vlib.name}': selected {len(selected_movies)} movies + {len(selected_series)} series for user {user_id}")
 
-        # Cache the result with per-library/global TTL
-        random_ttl = _resolve_cache_ttl_seconds(found_vlib, config)
-        if random_ttl:
-            random_recommend_cache.set_with_ttl(cache_key, all_items, random_ttl)
-        else:
-            random_recommend_cache[cache_key] = all_items
-
+        # Cache in unified vlib_items_cache (random scoped by user+vlib key).
         if all_items:
+            vlib_items_cache[cache_key] = all_items
+            # Keep a generic key for non-user-specific usages (e.g. cover material fallback).
             vlib_items_cache[found_vlib.id] = all_items
 
     # Paginate
     total = len(all_items)
-    start_idx = int(client_start_index)
-    limit_count = int(client_limit)
     paginated = all_items[start_idx : start_idx + limit_count]
 
     final_data = {"Items": paginated, "TotalRecordCount": total, "StartIndex": start_idx}
+    if method == "GET" and limit_count > 0:
+        _cache_current_and_next_page(
+            vlib_id=found_vlib.id,
+            context_key=page_ctx_key,
+            start_idx=start_idx,
+            limit_count=limit_count,
+            total_record_count=total,
+            page_items=paginated,
+            full_items_if_available=all_items,
+            ttl_seconds=page_ttl_seconds,
+        )
     return Response(content=json.dumps(final_data).encode('utf-8'), status_code=200, media_type="application/json")
 
 
@@ -1198,7 +1204,8 @@ async def handle_virtual_library_items(
     if found_vlib.resource_type == "random":
         return await _handle_random_library(
             request, method, found_vlib, new_params, user_id,
-            real_emby_url, session, config, client_start_index, client_limit
+            real_emby_url, session, config, client_start_index, client_limit,
+            page_ctx_key, page_ttl_seconds
         )
 
     # --- Source library scoping: if configured, use multi-library merge branch ---
