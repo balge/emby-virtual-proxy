@@ -64,8 +64,8 @@ class WebhookSettings(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     enabled: bool = False
-    # 非空则须匹配：请求头 X-Webhook-Secret / Authorization Bearer / 查询参数 token
     secret: Optional[str] = Field(default=None)
+    delay_seconds: int = Field(default=0)  # 延迟合并窗口（秒），默认0立即刷新
 
 
 class AppConfig(BaseModel):

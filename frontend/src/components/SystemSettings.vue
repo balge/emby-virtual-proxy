@@ -212,6 +212,14 @@
               />
             </el-form-item>
           </div>
+          <div class="form-row two-col">
+            <el-form-item label="延迟刷新（秒）" class="form-item-flex">
+              <el-input-number v-model="store.config.webhook.delay_seconds" :min="0" :max="3600" :step="30" />
+              <div class="form-item-description">
+                收到 Webhook 后延迟指定秒数再刷新，期间相同媒体库的多次通知会合并为一次刷新。设为 0 表示立即刷新。
+              </div>
+            </el-form-item>
+          </div>
         </template>
       </div>
 

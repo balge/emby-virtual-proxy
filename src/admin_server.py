@@ -89,6 +89,10 @@ def _cleanup_expired_tokens():
 
 scheduler = AsyncIOScheduler()
 
+# Webhook 延迟合并：收集待刷新的真实库 ID，延迟窗口到期后统一刷新
+_webhook_pending_lib_ids: set = set()
+_webhook_pending_task: Optional[asyncio.Task] = None
+
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
 
 # 认证中间件：在请求到达路由之前统一拦截
@@ -708,6 +712,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
 
 
 async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
+    global _webhook_pending_task
     config = config_manager.load_config()
     wc = config.webhook
     if not wc.enabled:
@@ -741,8 +746,34 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
         logger.info(f"Webhook: event={event_raw} path='{item_path}' 未匹配到任何真实库")
         return
 
-    logger.info(f"Webhook: event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}")
+    # 合并到待处理集合
+    _webhook_pending_lib_ids.update(matched_lib_ids)
+    delay = max(wc.delay_seconds, 0)
+    logger.info(
+        f"Webhook: event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}"
+        f"（待处理共 {len(_webhook_pending_lib_ids)} 个，{delay}s 后刷新）"
+    )
 
+    # 只在没有待执行任务时启动定时器，避免不断重置导致饥饿
+    if _webhook_pending_task is None or _webhook_pending_task.done():
+        _webhook_pending_task = asyncio.create_task(_webhook_delayed_flush(delay))
+
+
+async def _webhook_delayed_flush(delay_seconds: int):
+    """延迟后统一刷新所有待处理的真实库关联的虚拟库。"""
+    global _webhook_pending_task
+    if delay_seconds > 0:
+        await asyncio.sleep(delay_seconds)
+
+    # 取出并清空待处理集合
+    lib_ids = list(_webhook_pending_lib_ids)
+    _webhook_pending_lib_ids.clear()
+    _webhook_pending_task = None
+
+    if not lib_ids:
+        return
+
+    config = config_manager.load_config()
     ignore_set = config.disabled_library_ids
     refreshed = set()
     for v in config.virtual_libraries:
@@ -750,13 +781,16 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
             continue
         src = v.source_libraries or []
         if not src:
-            continue  # 未配置源库 → 不走 Webhook
+            continue
         src_filtered = [x for x in src if x not in ignore_set]
-        if any(lid in src_filtered for lid in matched_lib_ids):
+        if any(lid in src_filtered for lid in lib_ids):
             if v.id not in refreshed:
                 refreshed.add(v.id)
-                logger.info(f"Webhook: 刷新虚拟库 '{v.name}' ({v.id})")
+                logger.info(f"Webhook flush: 刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {lib_ids}")
                 asyncio.create_task(refresh_virtual_library_data_and_cover(v))
+
+    if not refreshed:
+        logger.info(f"Webhook flush: 真实库 {lib_ids} 无关联虚拟库需要刷新")
 
 
 # --- API ---

@@ -16,7 +16,7 @@ export const useMainStore = defineStore('main', {
         advanced_filters: [],
         library: [], // 确保 config 对象中有 library 数组
         real_libraries: [], // 真实库配置
-        webhook: { enabled: false, secret: null },
+        webhook: { enabled: false, secret: null, delay_seconds: 0 },
     },
     originalConfigForComparison: null,
     // 【核心修复】: 删除独立的 virtualLibraries 状态，它应该始终是 config 的一部分
@@ -86,7 +86,7 @@ export const useMainStore = defineStore('main', {
             this.config.cache_refresh_interval = 12;
         }
         if (!this.config.webhook) {
-            this.config.webhook = { enabled: false, secret: null };
+            this.config.webhook = { enabled: false, secret: null, delay_seconds: 0 };
         }
 
         this.originalConfigForComparison = JSON.parse(JSON.stringify(configRes.data));
