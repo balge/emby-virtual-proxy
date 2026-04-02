@@ -112,6 +112,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 白名单路径不拦截
         if request.url.path in AUTH_PUBLIC_PATHS:
             return await call_next(request)
+        # 图片代理等前缀匹配的公开路径
+        if request.url.path.startswith("/api/emby/image-proxy/"):
+            return await call_next(request)
         # 验证 token
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):

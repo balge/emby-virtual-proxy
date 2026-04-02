@@ -34,7 +34,7 @@
         <thead>
           <tr class="border-b border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
             <th class="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">名称</th>
-            <th class="text-center px-4 py-3 font-medium text-gray-500 dark:text-gray-400 w-36">封面</th>
+            <th class="text-center px-4 py-3 font-medium text-gray-500 dark:text-gray-400 w-44">封面</th>
             <th class="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400 w-20">类型</th>
             <th class="text-left px-4 py-3 font-medium text-gray-500 dark:text-gray-400">详情</th>
             <th class="text-right px-4 py-3 font-medium text-gray-500 dark:text-gray-400">操作</th>
@@ -49,20 +49,19 @@
               </div>
             </td>
             <td class="px-4 py-3 text-center">
-              <img v-if="row.image_tag" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" class="h-14 rounded-md mx-auto object-cover" />
+              <div v-if="row.image_tag" class="w-36 mx-auto aspect-video rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-700">
+                <img :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" class="w-full h-full object-cover" />
+              </div>
               <span v-else class="text-gray-300 dark:text-gray-600">—</span>
             </td>
             <td class="px-4 py-3">
               <BaseTag :variant="typeTagVariant(row.resource_type)">{{ getTypeLabel(row.resource_type) }}</BaseTag>
             </td>
-            <!-- Detail column: shows as much info as possible -->
             <td class="px-4 py-3">
               <div class="space-y-1">
-                <!-- Resource detail -->
                 <p class="text-xs text-gray-600 dark:text-gray-400 truncate max-w-xs" :title="getResourceDetail(row)">
                   {{ getResourceDetail(row) }}
                 </p>
-                <!-- Tags row -->
                 <div class="flex flex-wrap gap-1">
                   <BaseTag v-if="row.merge_by_tmdb_id" variant="success">TMDB合并</BaseTag>
                   <BaseTag v-if="row.source_libraries?.length" variant="warning" :title="getSourceLibNames(row)">
@@ -72,23 +71,22 @@
                   <BaseTag v-if="row.advanced_filter_id" variant="info">{{ getFilterName(row.advanced_filter_id) }}</BaseTag>
                   <BaseTag v-if="getRefreshText(row)" variant="default">{{ getRefreshText(row) }}</BaseTag>
                 </div>
-                <!-- RSS URL -->
-                <p v-if="row.resource_type === 'rsshub' && row.rsshub_url" class="text-[11px] text-gray-400 dark:text-gray-500 truncate max-w-xs font-mono" :title="row.rsshub_url">
+                <p v-if="row.resource_type === 'rsshub' && row.rsshub_url" class="text-[11px] text-gray-400 dark:text-gray-500 break-all font-mono leading-relaxed">
                   {{ row.rsshub_url }}
                 </p>
               </div>
             </td>
             <td class="px-4 py-3">
               <div class="flex justify-end gap-1 flex-wrap">
-                <BaseButton v-if="row.resource_type === 'rsshub'" size="xs" variant="success-outline" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
-                <BaseButton size="xs" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
-                <BaseButton v-if="row.resource_type !== 'rsshub'" size="xs" variant="success-outline" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
-                <BaseButton size="xs" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
-                <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" @click="store.toggleLibraryHidden(row.id)">
-                  <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /> <EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
+                <BaseButton v-if="row.resource_type === 'rsshub'" size="xs" variant="success-outline" title="刷新 RSS" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
+                <BaseButton size="xs" title="刷新封面" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
+                <BaseButton v-if="row.resource_type !== 'rsshub'" size="xs" variant="success-outline" title="刷新数据和封面" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
+                <BaseButton size="xs" title="编辑虚拟库" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
+                <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" :title="row.hidden ? '显示虚拟库' : '隐藏虚拟库'" @click="store.toggleLibraryHidden(row.id)">
+                  <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /><EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
                 </BaseButton>
                 <ConfirmPopover :message="`确定删除虚拟库「${row.name}」？`" confirm-text="删除" @confirm="store.deleteLibrary(row.id)">
-                  <template #trigger><BaseButton size="xs" variant="danger-outline"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton></template>
+                  <template #trigger><BaseButton size="xs" variant="danger-outline" title="删除虚拟库"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton></template>
                 </ConfirmPopover>
               </div>
             </td>
@@ -100,39 +98,42 @@
     <!-- Mobile cards -->
     <div class="md:hidden space-y-3">
       <div v-for="row in store.virtualLibraries" :key="row.id"
-        class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4"
+        class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden"
         :class="{ 'opacity-50': row.hidden }">
-        <div class="flex gap-3 mb-3">
-          <img v-if="row.image_tag" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" class="w-24 h-auto rounded-lg object-cover shrink-0" />
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5 mb-1">
-              <span class="font-medium text-gray-900 dark:text-gray-100 text-sm truncate">{{ row.name }}</span>
-              <BaseTag v-if="row.hidden" variant="default">隐藏</BaseTag>
-            </div>
-            <BaseTag :variant="typeTagVariant(row.resource_type)" class="mb-1">{{ getTypeLabel(row.resource_type) }}</BaseTag>
-            <p class="text-xs text-gray-500 dark:text-gray-400 truncate mt-1" :title="getResourceDetail(row)">{{ getResourceDetail(row) }}</p>
-            <div class="flex flex-wrap gap-1 mt-1.5">
-              <BaseTag v-if="row.merge_by_tmdb_id" variant="success">TMDB合并</BaseTag>
-              <BaseTag v-if="row.source_libraries?.length" variant="warning">源库: {{ getSourceLibSummary(row) }}</BaseTag>
-              <BaseTag v-if="row.advanced_filter_id" variant="info">{{ getFilterName(row.advanced_filter_id) }}</BaseTag>
-              <BaseTag v-if="getRefreshText(row)" variant="default">{{ getRefreshText(row) }}</BaseTag>
-            </div>
-            <p v-if="row.resource_type === 'rsshub' && row.rsshub_url" class="text-[11px] text-gray-400 dark:text-gray-500 truncate mt-1 font-mono" :title="row.rsshub_url">
-              {{ row.rsshub_url }}
-            </p>
-          </div>
+        <!-- 16:9 cover banner -->
+        <div v-if="row.image_tag" class="w-full aspect-video bg-gray-100 dark:bg-gray-700">
+          <img :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" class="w-full h-full object-cover" />
         </div>
-        <div class="flex flex-wrap gap-1.5">
-          <BaseButton v-if="row.resource_type === 'rsshub'" size="xs" variant="success-outline" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
-          <BaseButton size="xs" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
-          <BaseButton v-if="row.resource_type !== 'rsshub'" size="xs" variant="success-outline" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
-          <BaseButton size="xs" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
-          <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" @click="store.toggleLibraryHidden(row.id)">
-            <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /> <EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
-          </BaseButton>
-          <ConfirmPopover :message="`确定删除「${row.name}」？`" confirm-text="删除" @confirm="store.deleteLibrary(row.id)">
-            <template #trigger><BaseButton size="xs" variant="danger-outline"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton></template>
-          </ConfirmPopover>
+        <!-- Content -->
+        <div class="p-4">
+          <div class="flex items-center gap-1.5 mb-1.5">
+            <span class="font-semibold text-gray-900 dark:text-gray-100 text-sm truncate">{{ row.name }}</span>
+            <BaseTag v-if="row.hidden" variant="default">隐藏</BaseTag>
+            <BaseTag :variant="typeTagVariant(row.resource_type)">{{ getTypeLabel(row.resource_type) }}</BaseTag>
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 truncate mb-1.5" :title="getResourceDetail(row)">{{ getResourceDetail(row) }}</p>
+          <div class="flex flex-wrap gap-1 mb-2">
+            <BaseTag v-if="row.merge_by_tmdb_id" variant="success">TMDB合并</BaseTag>
+            <BaseTag v-if="row.source_libraries?.length" variant="warning" :title="getSourceLibNames(row)">源库: {{ getSourceLibSummary(row) }}</BaseTag>
+            <BaseTag v-if="row.advanced_filter_id" variant="info">{{ getFilterName(row.advanced_filter_id) }}</BaseTag>
+            <BaseTag v-if="getRefreshText(row)" variant="default">{{ getRefreshText(row) }}</BaseTag>
+          </div>
+          <p v-if="row.resource_type === 'rsshub' && row.rsshub_url" class="text-[11px] text-gray-400 dark:text-gray-500 break-all mb-2.5 font-mono leading-relaxed">
+            {{ row.rsshub_url }}
+          </p>
+          <!-- Action buttons -->
+          <div class="flex flex-wrap gap-1.5">
+            <BaseButton v-if="row.resource_type === 'rsshub'" size="xs" variant="success-outline" title="刷新 RSS" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
+            <BaseButton size="xs" title="刷新封面" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
+            <BaseButton v-if="row.resource_type !== 'rsshub'" size="xs" variant="success-outline" title="刷新数据和封面" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
+            <BaseButton size="xs" title="编辑虚拟库" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
+            <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" :title="row.hidden ? '显示虚拟库' : '隐藏虚拟库'" @click="store.toggleLibraryHidden(row.id)">
+              <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /><EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
+            </BaseButton>
+            <ConfirmPopover :message="`确定删除「${row.name}」？`" confirm-text="删除" @confirm="store.deleteLibrary(row.id)">
+              <template #trigger><BaseButton size="xs" variant="danger-outline" title="删除虚拟库"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton></template>
+            </ConfirmPopover>
+          </div>
         </div>
       </div>
     </div>
@@ -145,7 +146,7 @@
 <script setup>
 import { onMounted } from 'vue'
 import {
-  RectangleStackIcon, ArrowPathIcon, PhotoIcon, CircleStackIcon,
+  RectangleStackIcon, ArrowPathIcon, CircleStackIcon,
   PencilSquareIcon, EyeIcon, EyeSlashIcon, TrashIcon, RssIcon,
 } from '@heroicons/vue/24/outline'
 import { useMainStore } from '@/stores/main'
@@ -161,7 +162,6 @@ const typeMap = { collection: '合集', tag: '标签', genre: '类型', studio: 
 const getTypeLabel = (t) => typeMap[t] || '未知'
 const typeTagVariant = (t) => ({ rsshub: 'warning', random: 'info', all: 'primary' }[t] || 'default')
 
-// Build a map from real library id -> name for quick lookup
 const getRealLibName = (id) => {
   const lib = store.allLibrariesForSorting.find(l => l.id === id)
   return lib?.name || id?.slice(0, 8) || '?'
@@ -173,9 +173,7 @@ const getSourceLibSummary = (row) => {
   return `${getRealLibName(libs[0])}, ${getRealLibName(libs[1])} 等${libs.length}个`
 }
 
-const getSourceLibNames = (row) => {
-  return (row.source_libraries || []).map(getRealLibName).join(', ')
-}
+const getSourceLibNames = (row) => (row.source_libraries || []).map(getRealLibName).join(', ')
 
 const getFilterName = (filterId) => {
   const f = (store.config.advanced_filters || []).find(f => f.id === filterId)
@@ -184,8 +182,7 @@ const getFilterName = (filterId) => {
 
 const getRefreshText = (row) => {
   const h = Number(row.cache_refresh_interval)
-  if (Number.isFinite(h) && h > 0) return `${h}h刷新`
-  return ''
+  return Number.isFinite(h) && h > 0 ? `${h}h刷新` : ''
 }
 
 const getResourceDetail = (row) => {
@@ -203,7 +200,6 @@ const getResourceDetail = (row) => {
     const name = store.personNameCache[row.resource_id]
     return name && name !== '...' ? name : `ID: ${row.resource_id || '—'}`
   }
-  // collection / tag / genre / studio
   const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
   const list = store.classifications[keyMap[type]] || []
   const found = list.find(r => r.id === row.resource_id)
