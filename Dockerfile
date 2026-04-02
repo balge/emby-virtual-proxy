@@ -1,5 +1,5 @@
 # --- STAGE 1: Build Frontend (这一阶段不变) ---
-FROM node:18-alpine AS frontend-builder
+FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package.json .
 # 使用 npm 淘宝镜像/阿里云镜像（本地构建加速，CI 中可通过 ARG 跳过）
