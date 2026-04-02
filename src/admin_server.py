@@ -1341,6 +1341,26 @@ async def refresh_all_real_library_covers_api():
     return {"ok": True, "message": "All real library cover refresh started."}
 
 
+@api_router.get("/emby/image-proxy/{item_id}", tags=["Emby Helper"])
+async def proxy_emby_image(item_id: str):
+    """代理 Emby 项目封面图片，避免前端跨域问题。"""
+    config = config_manager.load_config()
+    if not config.emby_url or not config.emby_api_key:
+        raise HTTPException(status_code=400, detail="Emby URL or API key not configured")
+    url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
+    headers = {"X-Emby-Token": config.emby_api_key}
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=15) as resp:
+                if resp.status != 200:
+                    raise HTTPException(status_code=resp.status, detail="Failed to fetch image from Emby")
+                content = await resp.read()
+                content_type = resp.headers.get("Content-Type", "image/jpeg")
+                return Response(content=content, media_type=content_type)
+    except aiohttp.ClientError as e:
+        raise HTTPException(status_code=502, detail=f"Emby connection error: {e}")
+
+
 @api_router.get("/emby/classifications", tags=["Emby Helper"])
 async def get_emby_classifications():
     def format_items(items_list: List) -> List:

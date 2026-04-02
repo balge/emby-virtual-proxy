@@ -37,7 +37,7 @@
             <th class="text-center px-3 py-3 font-medium text-gray-500 dark:text-gray-400 w-16">启用</th>
             <th class="text-center px-3 py-3 font-medium text-gray-500 dark:text-gray-400 w-36">封面</th>
             <th class="text-left px-3 py-3 font-medium text-gray-500 dark:text-gray-400">库名称</th>
-            <th class="text-center px-3 py-3 font-medium text-gray-500 dark:text-gray-400 w-20">生成</th>
+            <th class="text-center px-3 py-3 font-medium text-gray-500 dark:text-gray-400 w-20">生成封面</th>
             <th class="text-left px-3 py-3 font-medium text-gray-500 dark:text-gray-400">中文标题</th>
             <th class="text-left px-3 py-3 font-medium text-gray-500 dark:text-gray-400">英文标题</th>
             <th class="text-center px-3 py-3 font-medium text-gray-500 dark:text-gray-400 w-24">操作</th>
@@ -105,8 +105,7 @@ const libs = computed(() => store.config.real_libraries || [])
 
 const getCoverUrl = (row) => {
   if (row.image_tag) return `/covers/${row.id}.jpg?t=${row.image_tag}`
-  const embyUrl = (store.config.emby_url || '').replace(/\/+$/, '')
-  return embyUrl ? `${embyUrl}/emby/Items/${row.id}/Images/Primary` : ''
+  return `/api/emby/image-proxy/${row.id}`
 }
 
 onMounted(() => { if (!store.dataStatus) store.fetchAllInitialData() })
