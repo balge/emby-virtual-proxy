@@ -2,9 +2,7 @@
   <aside class="hidden lg:flex lg:flex-col lg:w-60 lg:fixed lg:inset-y-0 bg-white dark:bg-gray-900 border-r border-gray-200 dark:border-gray-800 z-30">
     <!-- Logo -->
     <div class="flex items-center gap-2 px-5 h-16 border-b border-gray-200 dark:border-gray-800 shrink-0">
-      <div class="w-8 h-8 rounded-lg bg-primary-600 flex items-center justify-center">
-        <span class="text-white font-bold text-sm">EP</span>
-      </div>
+      <img src="/favicon.png" alt="Logo" class="w-8 h-8 rounded-lg" />
       <span class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Emby Proxy</span>
     </div>
 

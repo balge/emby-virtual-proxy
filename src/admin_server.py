@@ -1531,9 +1531,13 @@ from fastapi.responses import FileResponse
 admin_app.mount("/assets", StaticFiles(directory=str(static_dir / "assets")), name="static-assets")
 
 # favicon 等根目录静态文件
-@admin_app.get("/favicon.svg")
+@admin_app.get("/favicon.png")
 async def favicon():
-    return FileResponse(str(static_dir / "favicon.svg"))
+    return FileResponse(str(static_dir / "favicon.png"))
+
+@admin_app.get("/logo.png")
+async def logo():
+    return FileResponse(str(static_dir / "logo.png"))
 
 # Catch-all：所有非 API、非静态资源的请求都返回 index.html，交给前端路由处理
 @admin_app.get("/{full_path:path}")

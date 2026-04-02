@@ -2,9 +2,7 @@
   <!-- Top bar -->
   <div class="lg:hidden fixed top-0 inset-x-0 h-14 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800 z-30 flex items-center justify-between px-4">
     <div class="flex items-center gap-2">
-      <div class="w-7 h-7 rounded-md bg-primary-600 flex items-center justify-center">
-        <span class="text-white font-bold text-xs">EP</span>
-      </div>
+      <img src="/favicon.png" alt="Logo" class="w-7 h-7 rounded-md" />
       <span class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Emby Proxy</span>
     </div>
     <div class="flex items-center gap-2">
