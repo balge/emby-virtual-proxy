@@ -168,6 +168,7 @@ import {
 import { useMainStore } from '@/stores/main'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseTag from '@/components/ui/BaseTag.vue'
+import BaseTooltip from '@/components/ui/BaseTooltip.vue'
 import ConfirmPopover from '@/components/ui/ConfirmPopover.vue'
 import LibraryEditDialog from '@/components/LibraryEditDialog.vue'
 import DisplayOrderManager from '@/components/DisplayOrderManager.vue'
