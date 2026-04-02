@@ -32,7 +32,7 @@
             <el-switch v-model="row.enabled" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="封面" width="280" align="center" class-name="cover-col">
+        <el-table-column label="封面" width="200" align="center" class-name="cover-col">
           <template #default="{ row }">
             <img v-if="row.image_tag" class="cover-thumb" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
             <span v-else class="cover-empty">—</span>
@@ -98,6 +98,13 @@
 <script setup>
 import { useMainStore } from '@/stores/main';
 const store = useMainStore();
+
+const getCoverUrl = (row) => {
+  if (row.image_tag) return `/covers/${row.id}.jpg?t=${row.image_tag}`;
+  const embyUrl = (store.config.emby_url || '').replace(/\/+$/, '');
+  if (embyUrl) return `${embyUrl}/emby/Items/${row.id}/Images/Primary`;
+  return '';
+};
 </script>
 
 <style scoped>
@@ -140,9 +147,8 @@ const store = useMainStore();
 }
 .lib-card-top { display: flex; gap: 12px; align-items: flex-start; }
 .cover-thumb-card {
-  width: 56px;
-  height: 56px;
-  object-fit: cover;
+  width: 120px;
+  height: auto;
   border-radius: 6px;
   border: 1px solid var(--el-border-color-lighter);
   flex-shrink: 0;

@@ -33,7 +33,7 @@
                         <el-tag v-if="scope.row.hidden" size="small" type="info" round style="margin-left: 6px;">已隐藏</el-tag>
                     </template>
                 </el-table-column>
-                <el-table-column label="封面" width="280" align="center" class-name="cover-col">
+                <el-table-column label="封面" width="200" align="center" class-name="cover-col">
                     <template #default="scope">
                         <img v-if="scope.row.image_tag" class="cover-thumb" :src="`/covers/${scope.row.id}.jpg?t=${scope.row.image_tag}`" alt="封面" />
                         <span v-else class="cover-empty">—</span>
@@ -258,9 +258,8 @@ const getResourceNameById = (type, id, row) => {
     margin-bottom: 10px;
 }
 .cover-thumb-card {
-    width: 56px;
-    height: 56px;
-    object-fit: cover;
+    width: 120px;
+    height: auto;
     border-radius: 6px;
     border: 1px solid var(--el-border-color-lighter);
     flex-shrink: 0;
