@@ -33,7 +33,7 @@
                         <el-tag v-if="scope.row.hidden" size="small" type="info" round style="margin-left: 6px;">已隐藏</el-tag>
                     </template>
                 </el-table-column>
-                <el-table-column label="封面" width="80" align="center" class-name="cover-col">
+                <el-table-column label="封面" width="280" align="center" class-name="cover-col">
                     <template #default="scope">
                         <img v-if="scope.row.image_tag" class="cover-thumb" :src="`/covers/${scope.row.id}.jpg?t=${scope.row.image_tag}`" alt="封面" />
                         <span v-else class="cover-empty">—</span>
@@ -55,7 +55,7 @@
                          <el-tag v-else type="info" size="small" round>未开启</el-tag>
                     </template>
                 </el-table-column>
-                <el-table-column label="源库限定" width="100" align="center">
+                <el-table-column label="源库限定" width="60" align="center">
                     <template #default="scope">
                          <el-tag v-if="scope.row.source_libraries && scope.row.source_libraries.length" type="warning" size="small" round>{{ scope.row.source_libraries.length }}个库</el-tag>
                          <el-tag v-else type="info" size="small" round>全部</el-tag>

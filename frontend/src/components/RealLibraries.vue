@@ -32,7 +32,7 @@
             <el-switch v-model="row.enabled" size="small" />
           </template>
         </el-table-column>
-        <el-table-column label="封面" width="80" align="center" class-name="cover-col">
+        <el-table-column label="封面" width="280" align="center" class-name="cover-col">
           <template #default="{ row }">
             <img v-if="row.image_tag" class="cover-thumb" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
             <span v-else class="cover-empty">—</span>
