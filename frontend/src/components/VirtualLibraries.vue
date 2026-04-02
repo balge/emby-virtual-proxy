@@ -243,9 +243,8 @@ const getResourceNameById = (type, id, row) => {
 
 /* Cover thumbnail */
 .cover-thumb {
-    width: 48px;
-    height: 48px;
-    object-fit: cover;
+    max-width: 100%;
+    height: auto;
     border-radius: 6px;
     border: 1px solid var(--el-border-color-lighter);
 }
