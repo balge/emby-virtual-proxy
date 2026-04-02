@@ -179,28 +179,6 @@
             在这里选择或输入的类型将被默认隐藏。您可以在"调整主页布局"中覆盖此设置。
           </div>
         </el-form-item>
-
-        <el-form-item label="忽略媒体库">
-          <el-select
-            v-model="store.config.ignore_libraries"
-            multiple
-            filterable
-            collapse-tags
-            collapse-tags-tooltip
-            placeholder="选择要忽略的真实媒体库"
-            style="width: 100%;"
-          >
-            <el-option
-              v-for="lib in realLibraries"
-              :key="lib.id"
-              :label="lib.name"
-              :value="lib.id"
-            />
-          </el-select>
-          <div class="form-item-description">
-            被忽略的媒体库不会出现在虚拟库的「全库」查询范围和「源库范围」选择列表中。
-          </div>
-        </el-form-item>
       </div>
 
       <el-divider />
@@ -267,10 +245,6 @@ import { ref, computed } from 'vue';
 import { useMainStore } from '@/stores/main';
 
 const store = useMainStore();
-
-const realLibraries = computed(() => {
-  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
-});
 
 const webhookCallbackUrl = computed(() => {
   if (typeof window === 'undefined') return '';

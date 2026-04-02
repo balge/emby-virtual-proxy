@@ -173,7 +173,7 @@ async def handle_home_latest_items(
     target_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
 
     # --- Source library scoping for latest items ---
-    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    ignore_set = config.disabled_library_ids
 
     effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
     if effective_source_libs and ignore_set:

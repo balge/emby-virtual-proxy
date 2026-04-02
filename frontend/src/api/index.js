@@ -61,6 +61,12 @@ export default {
     getAdvancedFilters: () => apiClient.get('/advanced-filters'),
     saveAdvancedFilters: (filters) => apiClient.post('/advanced-filters', filters),
 
+    // Real Libraries
+    syncRealLibraries: () => apiClient.get('/real-libraries/sync'),
+    saveRealLibraries: (libraries) => apiClient.post('/real-libraries', libraries),
+    refreshRealLibraryCover: (id) => apiClient.post(`/real-libraries/${id}/refresh-cover`),
+    refreshAllRealLibraryCovers: () => apiClient.post('/real-libraries/refresh-all-covers'),
+
     // Cover Generator
     generateCover: (libraryId, titleZh, titleEn, styleName, tempImagePaths) => apiClient.post('/generate-cover', {
         library_id: libraryId,

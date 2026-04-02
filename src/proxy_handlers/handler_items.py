@@ -936,7 +936,7 @@ async def _handle_random_library(
         search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
 
         # 1. Source libraries are required for random type; filter out ignored
-        ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+        ignore_set = config.disabled_library_ids
         source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
         if source_libs and ignore_set:
             source_libs = [lid for lid in source_libs if lid not in ignore_set]
@@ -1202,9 +1202,9 @@ async def handle_virtual_library_items(
         )
 
     # --- Source library scoping: if configured, use multi-library merge branch ---
-    # Also handles ignore_libraries: filter out ignored libs from source_libraries,
-    # and for "all" type, auto-scope to all real libs minus ignored ones.
-    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    # Also handles disabled libraries: filter out disabled libs from source_libraries,
+    # and for "all" type, auto-scope to all real libs minus disabled ones.
+    ignore_set = config.disabled_library_ids
 
     effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
     if effective_source_libs and ignore_set:
@@ -1299,8 +1299,8 @@ async def handle_virtual_library_items(
         if threshold_dt:
             logger.info(f"Optimized DateLastMediaAdded: threshold={threshold_dt.isoformat()}")
 
-            # Scope to source libraries if configured (respect ignore list)
-            ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+            # Scope to source libraries if configured (respect disabled list)
+            ignore_set = config.disabled_library_ids
             source_parent_ids = list(found_vlib.source_libraries) if found_vlib.source_libraries else None
             if source_parent_ids and ignore_set:
                 source_parent_ids = [lid for lid in source_parent_ids if lid not in ignore_set]

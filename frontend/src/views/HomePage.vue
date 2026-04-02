@@ -43,6 +43,9 @@
         <el-tab-pane label="高级筛选器" name="filters">
           <AdvancedFilterManager />
         </el-tab-pane>
+        <el-tab-pane label="媒体库管理" name="real-libraries">
+          <RealLibraries />
+        </el-tab-pane>
       </el-tabs>
     </el-main>
   </el-container>
@@ -61,6 +64,7 @@ import api from '@/api';
 import SystemSettings from '@/components/SystemSettings.vue';
 import VirtualLibraries from '@/components/VirtualLibraries.vue';
 import AdvancedFilterManager from '@/components/AdvancedFilterManager.vue';
+import RealLibraries from '@/components/RealLibraries.vue';
 import LibraryEditDialog from '@/components/LibraryEditDialog.vue';
 import DisplayOrderManager from '@/components/DisplayOrderManager.vue';
 

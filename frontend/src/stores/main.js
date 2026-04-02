@@ -15,6 +15,7 @@ export const useMainStore = defineStore('main', {
         display_order: [], 
         advanced_filters: [],
         library: [], // 确保 config 对象中有 library 数组
+        real_libraries: [], // 真实库配置
         webhook: { enabled: false, secret: null },
     },
     originalConfigForComparison: null,
@@ -80,6 +81,7 @@ export const useMainStore = defineStore('main', {
         this.config = configRes.data;
         if (!this.config.advanced_filters) this.config.advanced_filters = [];
         if (!this.config.library) this.config.library = []; // 确保 library 数组存在
+        if (!this.config.real_libraries) this.config.real_libraries = [];
         if (this.config.cache_refresh_interval === undefined || this.config.cache_refresh_interval === null) {
             this.config.cache_refresh_interval = 12;
         }
@@ -373,6 +375,50 @@ export const useMainStore = defineStore('main', {
         } catch (error) {
             console.error(`解析人员ID ${personId} 失败:`, error);
             this.personNameCache[personId] = '未知';
+        }
+    },
+
+    // --- Real Libraries ---
+    async syncRealLibraries() {
+        try {
+            const res = await api.syncRealLibraries();
+            this.config.real_libraries = res.data;
+            ElMessage.success('已从 Emby 同步真实库列表');
+        } catch (error) {
+            this._handleApiError(error, '同步真实库失败');
+        }
+    },
+    async saveRealLibraries() {
+        this.saving = true;
+        try {
+            await api.saveRealLibraries(this.config.real_libraries);
+            ElMessage.success('真实库配置已保存');
+        } catch (error) {
+            this._handleApiError(error, '保存真实库配置失败');
+        } finally {
+            this.saving = false;
+        }
+    },
+    async refreshRealLibraryCover(id) {
+        try {
+            const res = await api.refreshRealLibraryCover(id);
+            if (res.data.ok) {
+                ElMessage.success('封面刷新成功');
+                const rl = (this.config.real_libraries || []).find(r => r.id === id);
+                if (rl) rl.image_tag = res.data.image_tag;
+            } else {
+                ElMessage.warning('封面生成失败');
+            }
+        } catch (error) {
+            this._handleApiError(error, '刷新真实库封面失败');
+        }
+    },
+    async refreshAllRealLibraryCovers() {
+        try {
+            await api.refreshAllRealLibraryCovers();
+            ElMessage.success('全部真实库封面刷新已启动，将在后台处理。');
+        } catch (error) {
+            this._handleApiError(error, '刷新全部封面失败');
         }
     },
   },

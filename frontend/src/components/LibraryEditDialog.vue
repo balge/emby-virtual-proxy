@@ -232,8 +232,13 @@ const store = useMainStore();
 const resourceLoading = ref(false);
 
 const realLibrariesList = computed(() => {
-  const ignored = new Set(store.config.ignore_libraries || []);
-  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real' && !ignored.has(lib.id));
+  const realLibConfigs = store.config.real_libraries || [];
+  if (realLibConfigs.length === 0) {
+    // 尚未同步真实库配置，显示所有真实库
+    return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real');
+  }
+  const enabledIds = new Set(realLibConfigs.filter(rl => rl.enabled).map(rl => rl.id));
+  return (store.allLibrariesForSorting || []).filter(lib => lib.type === 'real' && enabledIds.has(lib.id));
 });
 const availableResources = ref([]);
 const currentQuery = ref('');

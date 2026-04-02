@@ -33,6 +33,12 @@
                         <el-tag v-if="scope.row.hidden" size="small" type="info" round style="margin-left: 6px;">已隐藏</el-tag>
                     </template>
                 </el-table-column>
+                <el-table-column label="封面" width="80" align="center" class-name="cover-col">
+                    <template #default="scope">
+                        <img v-if="scope.row.image_tag" class="cover-thumb" :src="`/covers/${scope.row.id}.jpg?t=${scope.row.image_tag}`" alt="封面" />
+                        <span v-else class="cover-empty">—</span>
+                    </template>
+                </el-table-column>
                 <el-table-column label="资源类型" width="120">
                     <template #default="scope">
                         {{ getResourceTypeLabel(scope.row.resource_type) }}
@@ -87,15 +93,20 @@
         <!-- Mobile card view -->
         <div class="card-view" v-loading="store.dataLoading">
             <div v-for="row in store.virtualLibraries" :key="row.id" class="lib-card" :class="{ 'lib-card-hidden': row.hidden }">
-                <div class="lib-card-header">
-                    <span class="lib-card-name">{{ row.name }}</span>
-                    <div style="display: flex; gap: 4px; align-items: center;">
-                        <el-tag v-if="row.hidden" size="small" type="info" round>已隐藏</el-tag>
-                        <el-tag size="small" round>{{ getResourceTypeLabel(row.resource_type) }}</el-tag>
+                <div class="lib-card-top">
+                    <img v-if="row.image_tag" class="cover-thumb-card" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
+                    <div class="lib-card-info">
+                        <div class="lib-card-header">
+                            <span class="lib-card-name">{{ row.name }}</span>
+                            <div style="display: flex; gap: 4px; align-items: center;">
+                                <el-tag v-if="row.hidden" size="small" type="info" round>已隐藏</el-tag>
+                                <el-tag size="small" round>{{ getResourceTypeLabel(row.resource_type) }}</el-tag>
+                            </div>
+                        </div>
+                        <div class="lib-card-detail">
+                            {{ getResourceNameById(row.resource_type, row.resource_id, row) }}
+                        </div>
                     </div>
-                </div>
-                <div class="lib-card-detail">
-                    {{ getResourceNameById(row.resource_type, row.resource_id, row) }}
                 </div>
                 <div class="lib-card-tags">
                     <el-tag v-if="row.merge_by_tmdb_id" type="success" size="small" round>TMDB合并</el-tag>
@@ -228,6 +239,36 @@ const getResourceNameById = (type, id, row) => {
 
 .hidden-lib-name {
     opacity: 0.5;
+}
+
+/* Cover thumbnail */
+.cover-thumb {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--el-border-color-lighter);
+}
+.cover-empty {
+    color: var(--el-text-color-placeholder);
+    font-size: 18px;
+}
+.lib-card-top {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+.cover-thumb-card {
+    width: 56px;
+    height: 56px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--el-border-color-lighter);
+    flex-shrink: 0;
+}
+.lib-card-info {
+    flex: 1;
+    min-width: 0;
 }
 
 :deep(.hidden-row) {

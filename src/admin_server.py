@@ -27,10 +27,11 @@ from PIL import Image
 from io import BytesIO
 from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import docker
 from proxy_cache import api_cache, vlib_items_cache, random_recommend_cache, clear_vlib_page_cache
-from models import AppConfig, VirtualLibrary, AdvancedFilter
+from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
     parse_request_payload,
     extract_event_raw,
@@ -259,10 +260,10 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     params = {
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
-        "Fields": "ImageTags,ProviderIds,Genres",
+        "Fields": "ImageTags,ProviderIds,Genres,DateCreated",
         "Limit": "200",
-        "SortBy": "Random",
-        "SortOrder": "Ascending",
+        "SortBy": "DateCreated",
+        "SortOrder": "Descending",
     }
 
     # Apply resource type filter
@@ -285,7 +286,7 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
             params.update(emby_native_params)
 
     # Determine source libraries
-    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    ignore_set = config.disabled_library_ids
     source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
 
     all_items = []
@@ -342,7 +343,7 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
     if not items_with_images:
         raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
 
-    selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
+    selected_items = items_with_images[:9]
 
     async def download_image(session, item, index):
         image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
@@ -496,6 +497,170 @@ async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> 
         return None
 
 
+async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path, config: AppConfig):
+    """从真实库中获取最新入库的媒体封面图片（按 DateCreated 降序）。"""
+    if not config.emby_url or not config.emby_api_key:
+        logger.warning("Cannot fetch images: Emby URL or API key not configured.")
+        return
+
+    headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
+    users = await _fetch_from_emby("/Users")
+    if not users:
+        return
+    user_id = users[0].get("Id")
+
+    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+    params = {
+        "ParentId": real_lib_id,
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie,Series,Video",
+        "Fields": "ImageTags,DateCreated",
+        "Limit": "9",
+        "SortBy": "DateCreated",
+        "SortOrder": "Descending",
+    }
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
+                if resp.status != 200:
+                    logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: {resp.status}")
+                    return
+                data = await resp.json()
+                items = data.get("Items", [])
+    except Exception as e:
+        logger.error(f"Failed to fetch latest items for real lib {real_lib_id}: {e}")
+        return
+
+    items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
+    if not items_with_images:
+        logger.warning(f"No items with cover images in real lib {real_lib_id}")
+        return
+
+    async def download_image(sess, item, index):
+        image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
+        try:
+            async with sess.get(image_url, headers=headers, timeout=20) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    image_path = temp_dir / f"{index}.jpg"
+                    with open(image_path, "wb") as f:
+                        f.write(content)
+                    return True
+        except Exception:
+            return False
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [download_image(session, item, i + 1) for i, item in enumerate(items_with_images)]
+        await asyncio.gather(*tasks)
+
+
+async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppConfig):
+    """通过 Emby API 上传图片到指定 Item，使直连 Emby 也能看到自定义封面。"""
+    if not config.emby_url or not config.emby_api_key:
+        logger.warning("Cannot upload image to Emby: URL or API key not configured.")
+        return
+    url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
+    headers = {
+        'X-Emby-Token': config.emby_api_key,
+        'Content-Type': 'image/jpeg',
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=image_bytes, headers=headers, timeout=30) as resp:
+                if resp.status in (200, 204):
+                    logger.info(f"Uploaded cover to Emby for item {item_id}")
+                else:
+                    text = await resp.text()
+                    logger.warning(f"Emby image upload failed for {item_id}: {resp.status} {text}")
+    except Exception as e:
+        logger.error(f"Failed to upload image to Emby for {item_id}: {e}")
+
+
+async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig) -> Optional[str]:
+    """为真实库生成封面，复用虚拟库封面生成逻辑。"""
+    title_zh = rl.cover_title_zh or rl.name
+    title_en = rl.cover_title_en or ""
+    style_name = config.default_cover_style
+
+    FONT_DIR = "/app/src/assets/fonts/"
+    OUTPUT_DIR = "/app/config/images/"
+    Path(OUTPUT_DIR).mkdir(exist_ok=True)
+    image_gen_dir = Path(OUTPUT_DIR) / f"temp_{str(uuid.uuid4())}"
+    image_gen_dir.mkdir()
+
+    try:
+        if config.custom_image_path:
+            await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
+        else:
+            await _fetch_latest_images_for_real_library(rl.id, image_gen_dir, config)
+
+        zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
+        en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
+
+        style_module = importlib.import_module(f"cover_generator.{style_name}")
+        create_function = getattr(style_module, f"create_{style_name}")
+
+        kwargs = {
+            "title": (title_zh, title_en),
+            "font_path": (zh_font_path, en_font_path),
+            "font_size": (1, 1.2),
+        }
+        if style_name == 'style_multi_1':
+            kwargs['library_dir'] = str(image_gen_dir)
+        elif style_name in ['style_single_1', 'style_single_2']:
+            main_image_path = image_gen_dir / "1.jpg"
+            if not main_image_path.is_file():
+                logger.warning(f"Real lib cover: no main image for {rl.name}")
+                return None
+            kwargs['image_path'] = str(main_image_path)
+        else:
+            logger.warning(f"Unknown cover style: {style_name}")
+            return None
+
+        res = create_function(**kwargs)
+        if not res:
+            return None
+
+        image_data = base64.b64decode(res)
+        img = Image.open(BytesIO(image_data))
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+
+        output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
+        img.save(output_path, "JPEG", quality=90)
+        image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
+        logger.info(f"Real lib cover saved: {output_path}, tag={image_tag}")
+
+        # 上传封面到 Emby，使直连 Emby 时也能看到自定义封面
+        await _upload_image_to_emby(rl.id, image_data, config)
+
+        return image_tag
+    except Exception as e:
+        logger.error(f"Failed to generate cover for real lib '{rl.name}': {e}", exc_info=True)
+        return None
+    finally:
+        shutil.rmtree(image_gen_dir, ignore_errors=True)
+
+
+async def refresh_all_real_library_covers():
+    """定时任务：刷新所有启用且开启封面生成的真实库封面。"""
+    config = config_manager.load_config()
+    for rl in config.real_libraries:
+        if not rl.enabled or not rl.cover_enabled:
+            continue
+        logger.info(f"Cron: refreshing cover for real lib '{rl.name}' ({rl.id})")
+        tag = await _generate_real_library_cover(rl, config)
+        if tag:
+            # 更新 config 中的 image_tag
+            current_config = config_manager.load_config()
+            for r in current_config.real_libraries:
+                if r.id == rl.id:
+                    r.image_tag = tag
+                    break
+            config_manager.save_config(current_config)
+
+
 async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
     library_id = vlib.id
@@ -559,7 +724,7 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
 
     logger.info(f"Webhook: event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}")
 
-    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    ignore_set = config.disabled_library_ids
     refreshed = set()
     for v in config.virtual_libraries:
         if v.hidden or v.resource_type in ("rsshub", "random") or v.resource_type != "all":
@@ -586,6 +751,7 @@ async def update_config(config: AppConfig):
     config_manager.save_config(config)
     # 更新定时任务
     update_rss_refresh_job(config)
+    update_real_library_cover_cron(config)
     return config
 
 # 将 /cache/clear 路径改为 /proxy/restart，功能也彻底改变
@@ -1052,6 +1218,71 @@ async def delete_library(library_id: str):
     config_manager.save_config(config)
     return Response(status_code=204)
 
+# --- Real Library Management ---
+
+@api_router.get("/real-libraries/sync", tags=["Real Libraries"])
+async def sync_real_libraries():
+    """从 Emby 同步真实库列表，合并到配置中（保留已有配置，新增默认启用）。"""
+    emby_libs = await get_real_libraries_hybrid_mode()
+    config = config_manager.load_config()
+
+    existing_map = {rl.id: rl for rl in config.real_libraries}
+    synced: List[RealLibraryConfig] = []
+
+    for lib in emby_libs:
+        lib_id = lib.get("Id")
+        lib_name = lib.get("Name", "")
+        if lib_id in existing_map:
+            rl = existing_map[lib_id]
+            rl.name = lib_name  # 同步最新名称
+            synced.append(rl)
+        else:
+            synced.append(RealLibraryConfig(id=lib_id, name=lib_name, enabled=True))
+
+    config.real_libraries = synced
+    config_manager.save_config(config)
+    logger.info(f"Synced {len(synced)} real libraries from Emby.")
+    return [rl.model_dump() for rl in synced]
+
+
+@api_router.post("/real-libraries", tags=["Real Libraries"])
+async def save_real_libraries(libraries: List[RealLibraryConfig]):
+    """保存真实库配置列表。"""
+    config = config_manager.load_config()
+    config.real_libraries = libraries
+    config_manager.save_config(config)
+    update_real_library_cover_cron(config)
+    return {"ok": True}
+
+
+@api_router.post("/real-libraries/{library_id}/refresh-cover", tags=["Real Libraries"])
+async def refresh_real_library_cover(library_id: str):
+    """手动刷新单个真实库封面。"""
+    config = config_manager.load_config()
+    rl = next((r for r in config.real_libraries if r.id == library_id), None)
+    if not rl:
+        raise HTTPException(status_code=404, detail="Real library config not found")
+
+    logger.info(f"Manual refresh cover for real lib '{rl.name}' ({rl.id})")
+    tag = await _generate_real_library_cover(rl, config)
+    if tag:
+        current_config = config_manager.load_config()
+        for r in current_config.real_libraries:
+            if r.id == library_id:
+                r.image_tag = tag
+                break
+        config_manager.save_config(current_config)
+        return {"ok": True, "image_tag": tag}
+    return {"ok": False, "detail": "Cover generation failed"}
+
+
+@api_router.post("/real-libraries/refresh-all-covers", tags=["Real Libraries"])
+async def refresh_all_real_library_covers_api():
+    """手动刷新所有启用的真实库封面。"""
+    asyncio.create_task(refresh_all_real_library_covers())
+    return {"ok": True, "message": "All real library cover refresh started."}
+
+
 @api_router.get("/emby/classifications", tags=["Emby Helper"])
 async def get_emby_classifications():
     def format_items(items_list: List) -> List:
@@ -1151,6 +1382,34 @@ def update_rss_refresh_job(config: AppConfig):
         )
         logger.info(f"RSS refresh job scheduled: {vlib.name} ({vlib.id}) every {hours} hours.")
 
+
+def update_real_library_cover_cron(config: AppConfig):
+    """管理真实库封面刷新的 cron 定时任务。"""
+    job_id = "real_lib_cover_cron"
+    # 先移除旧任务
+    try:
+        scheduler.remove_job(job_id)
+    except Exception:
+        pass
+
+    cron_expr = (config.real_library_cover_cron or "").strip()
+    if not cron_expr:
+        logger.info("Real library cover cron: disabled (no cron expression).")
+        return
+
+    try:
+        trigger = CronTrigger.from_crontab(cron_expr)
+        scheduler.add_job(
+            refresh_all_real_library_covers,
+            trigger,
+            id=job_id,
+            replace_existing=True,
+        )
+        logger.info(f"Real library cover cron scheduled: '{cron_expr}'")
+    except Exception as e:
+        logger.error(f"Invalid cron expression '{cron_expr}': {e}")
+
+
 async def refresh_rss_library_by_id(library_id: str):
     """Refresh RSS library by ID (reloads config each run)."""
     config = config_manager.load_config()
@@ -1178,6 +1437,7 @@ async def startup_event():
     # 初始化定时任务
     config = config_manager.load_config()
     update_rss_refresh_job(config)
+    update_real_library_cover_cron(config)
 
 @admin_app.on_event("shutdown")
 async def shutdown_event():

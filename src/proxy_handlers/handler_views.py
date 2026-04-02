@@ -53,7 +53,7 @@ async def handle_view_injection(
 
         original_data = await resp.json()
 
-        ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+        ignore_set = config.disabled_library_ids
         emby_items = original_data.get("Items", []) or []
         if ignore_set:
             emby_items = [item for item in emby_items if item.get("Id") not in ignore_set]
@@ -137,7 +137,7 @@ async def legacy_handle_view_injection(request: Request, full_path: str, method:
                 if config.hide:
                     content_json["Items"] = [item for item in content_json["Items"] if item.get("CollectionType") not in config.hide]
 
-                ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+                ignore_set = config.disabled_library_ids
                 if ignore_set:
                     content_json["Items"] = [
                         item for item in content_json["Items"] if item.get("Id") not in ignore_set

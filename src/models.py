@@ -49,6 +49,16 @@ class VirtualLibrary(BaseModel):
     cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
     hidden: bool = Field(default=False) # True: 不参与 RSS 定时任务，且在 8999 代理上对 Items/Latest/视图隐藏
 
+class RealLibraryConfig(BaseModel):
+    """真实媒体库配置：启用/禁用、封面标题"""
+    id: str  # Emby 真实库 ID
+    name: str  # 从 Emby 同步的库名称
+    enabled: bool = Field(default=True)  # True=启用（可被源库选择），False=忽略
+    cover_enabled: bool = Field(default=True)  # True=参与封面生成，False=跳过
+    cover_title_zh: Optional[str] = Field(default=None)  # 封面中文标题
+    cover_title_en: Optional[str] = Field(default=None)  # 封面英文标题
+    image_tag: Optional[str] = Field(default=None)  # 封面 image tag
+
 class WebhookSettings(BaseModel):
     """Emby Webhook：仅对 resource_type=all 且源库范围命中变更库的虚拟库触发刷新。"""
     model_config = ConfigDict(extra="ignore")
@@ -64,8 +74,14 @@ class AppConfig(BaseModel):
     emby_server_id: Optional[str] = Field(default=None) # 新增：用于TMDB缓存占位符的备用服务器ID
     log_level: Literal["debug", "info", "warn", "error"] = Field(default="info")
     display_order: List[str] = Field(default_factory=list)
-    # Global ignore libraries list
+    # Global ignore libraries list (deprecated, migrated to real_libraries.enabled)
     ignore_libraries: List[str] = Field(default_factory=list)
+
+    # 真实媒体库配置
+    real_libraries: List[RealLibraryConfig] = Field(default_factory=list)
+
+    # 真实库封面刷新 cron 表达式，如 "0 3 * * *"
+    real_library_cover_cron: Optional[str] = Field(default=None)
 
     # Global hide collection types
     hide: List[str] = Field(default_factory=list)
@@ -112,3 +128,8 @@ class AppConfig(BaseModel):
     class Config:
         # 允许从别名填充模型
         populate_by_name = True
+
+    @property
+    def disabled_library_ids(self) -> set:
+        """获取被禁用的真实库 ID 集合。"""
+        return {rl.id for rl in self.real_libraries if not rl.enabled}
