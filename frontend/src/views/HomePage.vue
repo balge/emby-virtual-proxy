@@ -1,227 +1,77 @@
 <template>
-  <el-container class="main-container">
-    <el-header class="main-header">
-      <div class="title-area">
-        <h1 class="title">Emby Virtual Proxy 配置面板</h1>
-      </div>
+  <div>
+    <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100 mb-1">欢迎回来</h1>
+    <p class="text-sm text-gray-500 dark:text-gray-400 mb-8">Emby Virtual Proxy 配置面板</p>
 
-      <div class="controls-area">
-        <el-switch
-          v-model="isDarkMode"
-          class="theme-switch"
-          inline-prompt
-          :active-icon="Moon"
-          :inactive-icon="Sunny"
-          @change="toggleDark"
-        />
-        
-        <div class="status-area" v-if="store.dataStatus">
-          <el-tag :type="store.dataStatus.type === 'error' ? 'danger' : 'success'" effect="plain" round>
-            {{ store.dataStatus.text }}
-          </el-tag>
+    <!-- Status -->
+    <div v-if="store.dataLoading" class="flex items-center gap-2 text-sm text-gray-500 mb-6">
+      <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+      </svg>
+      正在加载数据...
+    </div>
+
+    <!-- Quick stats -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+        <p class="text-2xl font-bold text-primary-600">{{ store.virtualLibraries.length }}</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">虚拟媒体库</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+        <p class="text-2xl font-bold text-emerald-600">{{ (store.config.real_libraries || []).length }}</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">真实媒体库</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+        <p class="text-2xl font-bold text-amber-600">{{ (store.config.advanced_filters || []).length }}</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">高级筛选器</p>
+      </div>
+      <div class="bg-white dark:bg-gray-800 rounded-xl p-4 shadow-sm border border-gray-200 dark:border-gray-700">
+        <p class="text-2xl font-bold" :class="store.config.enable_cache ? 'text-emerald-600' : 'text-gray-400'">
+          {{ store.config.enable_cache ? 'ON' : 'OFF' }}
+        </p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">内存缓存</p>
+      </div>
+    </div>
+
+    <!-- Quick links -->
+    <h2 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-3">快捷操作</h2>
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+      <router-link
+        v-for="link in quickLinks"
+        :key="link.to"
+        :to="link.to"
+        class="flex items-center gap-3 p-4 bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 hover:border-primary-300 dark:hover:border-primary-700 transition-colors group"
+      >
+        <div class="w-10 h-10 rounded-lg flex items-center justify-center shrink-0" :class="link.iconBg">
+          <component :is="link.icon" class="w-5 h-5" :class="link.iconColor" />
         </div>
-
-        <el-button
-          v-if="authEnabled"
-          text
-          @click="handleLogout"
-          class="logout-btn"
-        >
-          退出登录
-        </el-button>
-      </div>
-    </el-header>
-
-    <el-main class="main-content">
-      <el-tabs v-model="activeTab" class="main-tabs">
-        <el-tab-pane label="核心设置" name="core">
-          <div class="settings-grid">
-            <SystemSettings />
-            <VirtualLibraries />
-          </div>
-        </el-tab-pane>
-        <el-tab-pane label="高级筛选器" name="filters">
-          <AdvancedFilterManager />
-        </el-tab-pane>
-        <el-tab-pane label="媒体库管理" name="real-libraries">
-          <RealLibraries />
-        </el-tab-pane>
-      </el-tabs>
-    </el-main>
-  </el-container>
-
-  <LibraryEditDialog />
-  <DisplayOrderManager />
+        <div>
+          <p class="text-sm font-medium text-gray-900 dark:text-gray-100 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">{{ link.label }}</p>
+          <p class="text-xs text-gray-500 dark:text-gray-400">{{ link.desc }}</p>
+        </div>
+      </router-link>
+    </div>
+  </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
-import { useRouter } from 'vue-router';
-import { useMainStore } from '@/stores/main';
-import { Sunny, Moon } from '@element-plus/icons-vue';
-import { resetAuthCache } from '@/router';
-import api from '@/api';
-import SystemSettings from '@/components/SystemSettings.vue';
-import VirtualLibraries from '@/components/VirtualLibraries.vue';
-import AdvancedFilterManager from '@/components/AdvancedFilterManager.vue';
-import RealLibraries from '@/components/RealLibraries.vue';
-import LibraryEditDialog from '@/components/LibraryEditDialog.vue';
-import DisplayOrderManager from '@/components/DisplayOrderManager.vue';
+import { onMounted } from 'vue'
+import { useMainStore } from '@/stores/main'
+import {
+  Cog6ToothIcon, RectangleStackIcon, FunnelIcon, BuildingLibraryIcon,
+} from '@heroicons/vue/24/outline'
 
-const store = useMainStore();
-const router = useRouter();
-const isDarkMode = ref(false);
-const activeTab = ref('core');
-const authEnabled = ref(false);
+const store = useMainStore()
 
-const toggleDark = (value) => {
-  const html = document.documentElement;
-  if (value) {
-    html.classList.add('dark');
-    localStorage.setItem('theme', 'dark');
-  } else {
-    html.classList.remove('dark');
-    localStorage.setItem('theme', 'light');
-  }
-  isDarkMode.value = value;
-};
+const quickLinks = [
+  { to: '/settings', label: '核心设置', desc: 'Emby 连接、缓存、Webhook', icon: Cog6ToothIcon, iconBg: 'bg-blue-100 dark:bg-blue-900/30', iconColor: 'text-blue-600 dark:text-blue-400' },
+  { to: '/virtual', label: '虚拟媒体库', desc: '创建和管理虚拟库', icon: RectangleStackIcon, iconBg: 'bg-emerald-100 dark:bg-emerald-900/30', iconColor: 'text-emerald-600 dark:text-emerald-400' },
+  { to: '/filters', label: '高级筛选器', desc: '配置筛选规则', icon: FunnelIcon, iconBg: 'bg-amber-100 dark:bg-amber-900/30', iconColor: 'text-amber-600 dark:text-amber-400' },
+  { to: '/libraries', label: '媒体库管理', desc: '真实库同步与封面', icon: BuildingLibraryIcon, iconBg: 'bg-purple-100 dark:bg-purple-900/30', iconColor: 'text-purple-600 dark:text-purple-400' },
+]
 
-const handleLogout = async () => {
-  try { await api.logout(); } catch { /* ignore */ }
-  localStorage.removeItem('auth_token');
-  resetAuthCache();
-  router.push({ name: 'Login' });
-};
-
-onMounted(async () => {
-  // 初始化主题
-  const savedTheme = localStorage.getItem('theme');
-  const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-  if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
-    toggleDark(true);
-  }
-
-  // 检查认证状态
-  try {
-    const res = await api.getAuthStatus();
-    authEnabled.value = res.data.auth_enabled;
-  } catch { /* ignore */ }
-
-  // 加载数据
-  store.fetchAllInitialData();
-});
+onMounted(() => {
+  if (!store.dataStatus) store.fetchAllInitialData()
+})
 </script>
-
-<style scoped>
-.main-container {
-  max-width: 1400px;
-  margin: 0 auto;
-  padding: 24px 32px;
-  min-height: 100vh;
-}
-
-.main-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: 24px;
-  padding: 16px 24px;
-  background: var(--app-header-bg);
-  backdrop-filter: blur(12px);
-  border-radius: var(--card-border-radius);
-  box-shadow: var(--app-header-shadow);
-  height: auto;
-  position: sticky;
-  top: 12px;
-  z-index: 100;
-}
-
-.title-area {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-}
-
-.title {
-  font-size: 1.35rem;
-  font-weight: 700;
-  margin: 0;
-  color: var(--el-text-color-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  letter-spacing: -0.01em;
-}
-
-.controls-area {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  flex-shrink: 0;
-}
-
-.status-area .el-tag {
-  font-size: 13px;
-}
-
-.logout-btn {
-  color: var(--el-text-color-secondary);
-  font-size: 13px;
-}
-
-.settings-grid {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 24px;
-}
-
-.main-content {
-  padding: 0;
-}
-
-/* Theme switch */
-.theme-switch {
-  --el-switch-on-color: #2c2c2c;
-  --el-switch-off-color: #dcdfe6;
-  --el-switch-border-color: var(--el-border-color);
-}
-.theme-switch .el-switch__core .el-icon {
-  color: #303133;
-}
-.dark .theme-switch .el-switch__core .el-icon {
-  color: #999;
-}
-.theme-switch .is-active .el-icon {
-  color: #fff;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .main-container {
-    padding: 12px;
-  }
-  .main-header {
-    flex-direction: column;
-    gap: 12px;
-    align-items: flex-start;
-    padding: 14px 16px;
-    position: static;
-  }
-  .title {
-    font-size: 1.1rem;
-  }
-  .controls-area {
-    width: 100%;
-    justify-content: space-between;
-  }
-  .settings-grid {
-    gap: 16px;
-  }
-}
-
-@media (min-width: 769px) and (max-width: 1024px) {
-  .main-container {
-    padding: 20px 24px;
-  }
-}
-</style>

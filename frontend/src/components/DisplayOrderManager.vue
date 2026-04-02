@@ -1,49 +1,29 @@
 <template>
-  <el-dialog
-    v-model="store.layoutManagerVisible"
-    title="调整主页布局"
-    width="800px"
-    @close="onDialogClose"
-  >
-    <div class="layout-manager-container">
-      <!-- 已显示区域 -->
-      <div class="sortable-list-container">
-        <h3 class="list-title">已显示 (按顺序)</h3>
-        <div class="list-wrapper">
-          <draggable
-            v-model="displayedLibs"
-            group="libs"
-            item-key="id"
-            class="sortable-list"
-          >
+  <BaseDialog :open="store.layoutManagerVisible" title="调整主页布局" size="xl" @close="store.layoutManagerVisible = false">
+    <div class="flex flex-col md:flex-row gap-4 min-h-[350px]">
+      <!-- Displayed -->
+      <div class="flex-1 flex flex-col min-w-0">
+        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">已显示（按顺序）</h3>
+        <div class="flex-1 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-3 overflow-y-auto">
+          <draggable v-model="displayedLibs" group="libs" item-key="id" class="space-y-2 min-h-[200px]">
             <template #item="{ element }">
-              <div class="sortable-item">
-                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light" round>
-                  {{ element.type === 'real' ? '真实库' : '虚拟库' }}
-                </el-tag>
-                <span class="lib-name">{{ element.name }}</span>
+              <div class="flex items-center gap-2 px-3 py-2.5 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 cursor-grab active:cursor-grabbing shadow-sm hover:shadow transition-shadow">
+                <BaseTag :variant="element.type === 'real' ? 'primary' : 'success'">{{ element.type === 'real' ? '真实' : '虚拟' }}</BaseTag>
+                <span class="text-sm text-gray-700 dark:text-gray-300 truncate">{{ element.name }}</span>
               </div>
             </template>
           </draggable>
         </div>
       </div>
-
-      <!-- 未显示区域 -->
-      <div class="sortable-list-container">
-        <h3 class="list-title">未显示</h3>
-         <div class="list-wrapper">
-          <draggable
-            v-model="hiddenLibs"
-            group="libs"
-            item-key="id"
-            class="sortable-list"
-          >
+      <!-- Hidden -->
+      <div class="flex-1 flex flex-col min-w-0">
+        <h3 class="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2">未显示</h3>
+        <div class="flex-1 rounded-xl border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-3 overflow-y-auto">
+          <draggable v-model="hiddenLibs" group="libs" item-key="id" class="space-y-2 min-h-[200px]">
             <template #item="{ element }">
-              <div class="sortable-item">
-                <el-tag :type="element.type === 'real' ? 'primary' : 'success'" size="small" effect="light" round>
-                  {{ element.type === 'real' ? '真实库' : '虚拟库' }}
-                </el-tag>
-                <span class="lib-name">{{ element.name }}</span>
+              <div class="flex items-center gap-2 px-3 py-2.5 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 cursor-grab active:cursor-grabbing shadow-sm hover:shadow transition-shadow">
+                <BaseTag :variant="element.type === 'real' ? 'primary' : 'success'">{{ element.type === 'real' ? '真实' : '虚拟' }}</BaseTag>
+                <span class="text-sm text-gray-700 dark:text-gray-300 truncate">{{ element.name }}</span>
               </div>
             </template>
           </draggable>
@@ -52,132 +32,35 @@
     </div>
 
     <template #footer>
-      <div class="dialog-footer">
-        <el-button @click="onDialogClose">取消</el-button>
-        <el-button type="primary" @click="saveLayout" :loading="store.saving">
-          保存布局
-        </el-button>
-      </div>
+      <BaseButton @click="store.layoutManagerVisible = false">取消</BaseButton>
+      <BaseButton variant="primary" :loading="store.saving" @click="saveLayout">保存布局</BaseButton>
     </template>
-  </el-dialog>
+  </BaseDialog>
 </template>
 
 <script setup>
-import { ref, watch, onMounted } from 'vue';
-import draggable from 'vuedraggable';
-import { useMainStore } from '@/stores/main';
+import { ref, watch } from 'vue'
+import draggable from 'vuedraggable'
+import { useMainStore } from '@/stores/main'
+import BaseDialog from '@/components/ui/BaseDialog.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
+import BaseTag from '@/components/ui/BaseTag.vue'
 
-const store = useMainStore();
+const store = useMainStore()
+const displayedLibs = ref([])
+const hiddenLibs = ref([])
 
-const displayedLibs = ref([]);
-const hiddenLibs = ref([]);
-
-const syncLists = () => {
-  if (store.layoutManagerVisible) {
-    const allLibsMap = new Map(store.allLibrariesForSorting.map(lib => [lib.id, lib]));
-    const displayedIds = new Set(store.config.display_order || []);
-    
-    const newDisplayed = [];
-    (store.config.display_order || []).forEach(id => {
-      if (allLibsMap.has(id)) {
-        newDisplayed.push(allLibsMap.get(id));
-      }
-    });
-    displayedLibs.value = newDisplayed;
-
-    hiddenLibs.value = store.allLibrariesForSorting.filter(lib => !displayedIds.has(lib.id));
+watch(() => store.layoutManagerVisible, (val) => {
+  if (val) {
+    const allMap = new Map(store.allLibrariesForSorting.map(l => [l.id, l]))
+    const displayedIds = new Set(store.config.display_order || [])
+    displayedLibs.value = (store.config.display_order || []).map(id => allMap.get(id)).filter(Boolean)
+    hiddenLibs.value = store.allLibrariesForSorting.filter(l => !displayedIds.has(l.id))
   }
-};
-
-watch(() => store.layoutManagerVisible, (newValue) => {
-  if (newValue) {
-    syncLists();
-  }
-}, { immediate: true });
-
-const onDialogClose = () => {
-  store.layoutManagerVisible = false;
-};
+}, { immediate: true })
 
 const saveLayout = async () => {
-  const orderedIds = displayedLibs.value.map(lib => lib.id);
-  await store.saveDisplayOrder(orderedIds);
-  onDialogClose();
-};
-
-onMounted(() => {
-    if (typeof draggable === 'undefined') {
-        console.error("vuedraggable is not installed or imported correctly. Please run 'npm install vuedraggable@next'");
-    }
-});
+  await store.saveDisplayOrder(displayedLibs.value.map(l => l.id))
+  store.layoutManagerVisible = false
+}
 </script>
-
-<style scoped>
-.layout-manager-container {
-  display: flex;
-  gap: 20px;
-  min-height: 400px;
-}
-.sortable-list-container {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-.list-title {
-  margin-top: 0;
-  margin-bottom: 10px;
-  font-weight: 600;
-  font-size: 15px;
-  color: var(--el-text-color-primary);
-}
-.list-wrapper {
-  flex-grow: 1;
-  border: 1px solid var(--el-border-color-lighter);
-  border-radius: 10px;
-  padding: 12px;
-  background-color: var(--el-fill-color-lighter);
-  overflow-y: auto;
-}
-.sortable-list {
-  min-height: 350px;
-}
-.sortable-item {
-  padding: 10px 14px;
-  margin-bottom: 8px;
-  background-color: var(--el-bg-color);
-  border-radius: 8px;
-  cursor: grab;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  border: 1px solid var(--el-border-color-lighter);
-  transition: box-shadow var(--transition-fast), transform var(--transition-fast);
-}
-.sortable-item:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-}
-.sortable-item:active {
-  transform: scale(1.01);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
-}
-.sortable-item:last-child {
-  margin-bottom: 0;
-}
-.lib-name {
-  color: var(--el-text-color-regular);
-  font-size: 14px;
-}
-
-/* Responsive */
-@media (max-width: 768px) {
-  .layout-manager-container {
-    flex-direction: column;
-    min-height: auto;
-  }
-
-  .sortable-list {
-    min-height: 150px;
-  }
-}
-</style>

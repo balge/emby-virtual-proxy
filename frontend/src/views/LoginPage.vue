@@ -1,150 +1,72 @@
 <template>
-  <div class="login-wrapper">
-    <div class="login-card">
-      <div class="login-header">
-        <h1 class="login-title">Emby Virtual Proxy</h1>
-        <p class="login-subtitle">请登录以继续</p>
-      </div>
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-position="top"
-        @submit.prevent="handleLogin"
-      >
-        <el-form-item label="用户名" prop="username">
-          <el-input
+  <div class="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 px-4">
+    <div class="w-full max-w-sm">
+      <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8">
+        <div class="text-center mb-8">
+          <div class="w-12 h-12 rounded-xl bg-primary-600 flex items-center justify-center mx-auto mb-3">
+            <span class="text-white font-bold text-lg">EP</span>
+          </div>
+          <h1 class="text-xl font-bold text-gray-900 dark:text-gray-100">Emby Virtual Proxy</h1>
+          <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">请登录以继续</p>
+        </div>
+
+        <form @submit.prevent="handleLogin" class="space-y-4">
+          <BaseInput
             v-model="form.username"
+            label="用户名"
             placeholder="请输入用户名"
-            :prefix-icon="User"
-            size="large"
-            @keyup.enter="handleLogin"
+            required
+            @enter="handleLogin"
           />
-        </el-form-item>
-        <el-form-item label="密码" prop="password">
-          <el-input
+          <BaseInput
             v-model="form.password"
+            label="密码"
             type="password"
             placeholder="请输入密码"
-            show-password
-            :prefix-icon="Lock"
-            size="large"
-            @keyup.enter="handleLogin"
+            required
+            @enter="handleLogin"
           />
-        </el-form-item>
-        <el-form-item>
-          <el-button
-            type="primary"
-            size="large"
-            class="login-btn"
+          <BaseButton
+            variant="primary"
+            size="lg"
+            html-type="submit"
             :loading="loading"
-            @click="handleLogin"
+            class="w-full"
           >
             登 录
-          </el-button>
-        </el-form-item>
-      </el-form>
-      <p v-if="errorMsg" class="login-error">{{ errorMsg }}</p>
+          </BaseButton>
+        </form>
+
+        <p v-if="errorMsg" class="mt-4 text-center text-sm text-red-500">{{ errorMsg }}</p>
+      </div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue';
-import { useRouter } from 'vue-router';
-import { User, Lock } from '@element-plus/icons-vue';
-import api from '@/api';
+import { ref, reactive } from 'vue'
+import { useRouter } from 'vue-router'
+import api from '@/api'
+import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseButton from '@/components/ui/BaseButton.vue'
 
-const router = useRouter();
-
-const formRef = ref(null);
-const loading = ref(false);
-const errorMsg = ref('');
-
-const form = reactive({
-  username: '',
-  password: '',
-});
-
-const rules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
-  password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
-};
+const router = useRouter()
+const loading = ref(false)
+const errorMsg = ref('')
+const form = reactive({ username: '', password: '' })
 
 const handleLogin = async () => {
-  if (!formRef.value) return;
-  await formRef.value.validate(async (valid) => {
-    if (!valid) return;
-    loading.value = true;
-    errorMsg.value = '';
-    try {
-      const res = await api.login(form.username, form.password);
-      const token = res.data.token;
-      if (token) {
-        localStorage.setItem('auth_token', token);
-      }
-      router.push({ name: 'Home' });
-    } catch (err) {
-      errorMsg.value = err.response?.data?.detail || '登录失败，请检查网络';
-    } finally {
-      loading.value = false;
-    }
-  });
-};
-</script>
-
-<style scoped>
-.login-wrapper {
-  min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--app-bg);
-  padding: 20px;
-}
-
-.login-card {
-  width: 100%;
-  max-width: 400px;
-  padding: 40px 32px;
-  background: var(--el-bg-color);
-  border-radius: 16px;
-  box-shadow: var(--card-shadow);
-}
-
-.login-header {
-  text-align: center;
-  margin-bottom: 32px;
-}
-
-.login-title {
-  font-size: 1.5rem;
-  font-weight: 700;
-  color: var(--el-text-color-primary);
-  margin: 0 0 8px 0;
-}
-
-.login-subtitle {
-  font-size: 14px;
-  color: var(--el-text-color-secondary);
-  margin: 0;
-}
-
-.login-btn {
-  width: 100%;
-  margin-top: 8px;
-}
-
-.login-error {
-  text-align: center;
-  color: var(--el-color-danger);
-  font-size: 13px;
-  margin: 12px 0 0 0;
-}
-
-@media (max-width: 480px) {
-  .login-card {
-    padding: 32px 20px;
+  if (!form.username || !form.password) { errorMsg.value = '请填写用户名和密码'; return }
+  loading.value = true
+  errorMsg.value = ''
+  try {
+    const res = await api.login(form.username, form.password)
+    if (res.data.token) localStorage.setItem('auth_token', res.data.token)
+    router.push({ name: 'Home' })
+  } catch (err) {
+    errorMsg.value = err.response?.data?.detail || '登录失败，请检查网络'
+  } finally {
+    loading.value = false
   }
 }
-</style>
+</script>
