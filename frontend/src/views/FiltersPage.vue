@@ -76,7 +76,7 @@
             </select>
             <template v-if="!['is_empty', 'is_not_empty'].includes(rule.operator)">
               <template v-if="['PremiereDate', 'DateCreated', 'DateLastMediaAdded'].includes(rule.field)">
-                <input type="date" v-model="rule.value" :disabled="!!rule.relative_days" class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-500/20" />
+                <BaseDatePicker v-model="rule.value" :disabled="!!rule.relative_days" />
                 <input type="number" :value="rule.relative_days" @input="setRelDays(rule, $event.target.value)" placeholder="最近N天" min="1" class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm w-24 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-500/20" />
               </template>
               <select v-else-if="rule.field === 'ProductionLocations'" v-model="rule.value" class="rounded-lg border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:outline-none focus:ring-2 focus:ring-primary-500/20 w-36">
@@ -134,6 +134,7 @@ import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseTag from '@/components/ui/BaseTag.vue'
 import BaseDialog from '@/components/ui/BaseDialog.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
+import BaseDatePicker from '@/components/ui/BaseDatePicker.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
 import ConfirmPopover from '@/components/ui/ConfirmPopover.vue'
 
@@ -177,7 +178,7 @@ const operators = [
 ]
 
 const countries = [
-  { code: 'CN', name: '中国内地' }, { code: 'HK', name: '香港' }, { code: 'TW', name: '台湾' },
+  { code: 'CN', name: '中国内地' }, { code: 'HK', name: '香港' }, { code: 'TW', name: '台湾' }, { code: 'MO', name: '澳门' },
   { code: 'JP', name: '日本' }, { code: 'KR', name: '韩国' }, { code: 'US', name: '美国' },
   { code: 'GB', name: '英国' }, { code: 'FR', name: '法国' }, { code: 'DE', name: '德国' },
   { code: 'IT', name: '意大利' }, { code: 'ES', name: '西班牙' }, { code: 'RU', name: '俄罗斯' },
