@@ -391,7 +391,7 @@ export const useMainStore = defineStore('main', {
     async saveRealLibraries() {
         this.saving = true;
         try {
-            await api.saveRealLibraries(this.config.real_libraries);
+            await api.saveRealLibraries(this.config.real_libraries, this.config.real_library_cover_cron);
             ElMessage.success('真实库配置已保存');
         } catch (error) {
             this._handleApiError(error, '保存真实库配置失败');

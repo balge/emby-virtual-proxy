@@ -64,23 +64,26 @@
 
     <!-- Mobile card view -->
     <div class="card-view" v-if="store.config.real_libraries?.length">
-      <div v-for="row in store.config.real_libraries" :key="row.id" class="lib-card" :class="{ 'lib-card-disabled': !row.enabled }">
+      <div v-for="row in store.config.real_libraries" :key="row.id" class="lib-card">
         <div class="lib-card-top">
           <img v-if="row.image_tag" class="cover-thumb-card" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
           <div class="lib-card-info">
-            <div class="lib-card-header">
-              <span class="lib-card-name">{{ row.name }}</span>
-              <el-switch v-model="row.enabled" size="small" />
-            </div>
-            <div class="lib-card-switches">
-              <span class="switch-label-sm">生成封面</span>
-              <el-switch v-model="row.cover_enabled" size="small" />
-            </div>
-            <div class="lib-card-inputs">
-              <el-input v-model="row.cover_title_zh" size="small" :placeholder="row.name" :disabled="!row.cover_enabled" />
-              <el-input v-model="row.cover_title_en" size="small" placeholder="英文标题（可选）" :disabled="!row.cover_enabled" />
+            <span class="lib-card-name">{{ row.name }}</span>
+            <div class="lib-card-switch-row">
+              <div class="lib-card-switch-item">
+                <span class="switch-label-sm">启用</span>
+                <el-switch v-model="row.enabled" size="small" />
+              </div>
+              <div class="lib-card-switch-item">
+                <span class="switch-label-sm">生成封面</span>
+                <el-switch v-model="row.cover_enabled" size="small" />
+              </div>
             </div>
           </div>
+        </div>
+        <div class="lib-card-inputs" v-if="row.cover_enabled">
+          <el-input v-model="row.cover_title_zh" size="small" :placeholder="row.name" />
+          <el-input v-model="row.cover_title_en" size="small" placeholder="英文标题（可选）" />
         </div>
         <div class="lib-card-actions">
           <el-button size="small" type="primary" plain @click="store.refreshRealLibraryCover(row.id)" :disabled="!row.cover_enabled">刷新封面</el-button>
@@ -136,8 +139,7 @@ const store = useMainStore();
   background: var(--el-fill-color-lighter);
   margin-bottom: 12px;
 }
-.lib-card-disabled { opacity: 0.55; }
-.lib-card-top { display: flex; gap: 12px; }
+.lib-card-top { display: flex; gap: 12px; align-items: flex-start; }
 .cover-thumb-card {
   width: 56px;
   height: 56px;
@@ -147,16 +149,19 @@ const store = useMainStore();
   flex-shrink: 0;
 }
 .lib-card-info { flex: 1; min-width: 0; }
-.lib-card-header {
+.lib-card-name { font-weight: 600; font-size: 15px; display: block; margin-bottom: 8px; }
+.lib-card-switch-row {
   display: flex;
-  justify-content: space-between;
+  gap: 16px;
   align-items: center;
-  margin-bottom: 8px;
 }
-.lib-card-name { font-weight: 600; font-size: 15px; }
-.lib-card-inputs { display: flex; flex-direction: column; gap: 6px; }
-.lib-card-switches { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.lib-card-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
 .switch-label-sm { font-size: 12px; color: var(--el-text-color-secondary); }
+.lib-card-inputs { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; }
 .lib-card-actions { margin-top: 10px; }
 
 @media (max-width: 900px) {

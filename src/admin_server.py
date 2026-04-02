@@ -561,13 +561,14 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         logger.warning("Cannot upload image to Emby: URL or API key not configured.")
         return
     url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
+    image_b64 = base64.b64encode(image_bytes).decode('ascii')
     headers = {
         'X-Emby-Token': config.emby_api_key,
         'Content-Type': 'image/jpeg',
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, data=image_bytes, headers=headers, timeout=30) as resp:
+            async with session.post(url, data=image_b64, headers=headers, timeout=30) as resp:
                 if resp.status in (200, 204):
                     logger.info(f"Uploaded cover to Emby for item {item_id}")
                 else:
@@ -627,13 +628,31 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         if img.mode != 'RGB':
             img = img.convert('RGB')
 
+        # 裁剪为 16:9 比例（居中裁剪）
+        w, h = img.size
+        target_ratio = 16 / 9
+        current_ratio = w / h
+        if current_ratio > target_ratio:
+            # 太宽，裁左右
+            new_w = int(h * target_ratio)
+            left = (w - new_w) // 2
+            img = img.crop((left, 0, left + new_w, h))
+        elif current_ratio < target_ratio:
+            # 太高，裁上下
+            new_h = int(w / target_ratio)
+            top = (h - new_h) // 2
+            img = img.crop((0, top, w, top + new_h))
+
+        # 保存本地
         output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
         img.save(output_path, "JPEG", quality=90)
         image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
         logger.info(f"Real lib cover saved: {output_path}, tag={image_tag}")
 
-        # 上传封面到 Emby，使直连 Emby 时也能看到自定义封面
-        await _upload_image_to_emby(rl.id, image_data, config)
+        # 上传封面到 Emby（需要重新编码裁剪后的图片）
+        buf = BytesIO()
+        img.save(buf, "JPEG", quality=90)
+        await _upload_image_to_emby(rl.id, buf.getvalue(), config)
 
         return image_tag
     except Exception as e:
@@ -1245,11 +1264,16 @@ async def sync_real_libraries():
     return [rl.model_dump() for rl in synced]
 
 
+class SaveRealLibrariesRequest(BaseModel):
+    libraries: List[RealLibraryConfig]
+    cover_cron: Optional[str] = None
+
 @api_router.post("/real-libraries", tags=["Real Libraries"])
-async def save_real_libraries(libraries: List[RealLibraryConfig]):
-    """保存真实库配置列表。"""
+async def save_real_libraries(body: SaveRealLibrariesRequest):
+    """保存真实库配置列表及封面 cron。"""
     config = config_manager.load_config()
-    config.real_libraries = libraries
+    config.real_libraries = body.libraries
+    config.real_library_cover_cron = body.cover_cron
     config_manager.save_config(config)
     update_real_library_cover_cron(config)
     return {"ok": True}

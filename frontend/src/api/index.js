@@ -63,7 +63,7 @@ export default {
 
     // Real Libraries
     syncRealLibraries: () => apiClient.get('/real-libraries/sync'),
-    saveRealLibraries: (libraries) => apiClient.post('/real-libraries', libraries),
+    saveRealLibraries: (libraries, coverCron) => apiClient.post('/real-libraries', { libraries, cover_cron: coverCron }),
     refreshRealLibraryCover: (id) => apiClient.post(`/real-libraries/${id}/refresh-cover`),
     refreshAllRealLibraryCovers: () => apiClient.post('/real-libraries/refresh-all-covers'),
 
