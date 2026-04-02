@@ -60,7 +60,7 @@
                         <div class="action-buttons">
                             <el-button v-if="scope.row.resource_type === 'rsshub'" size="small" type="success" @click="store.refreshRssLibrary(scope.row.id)">刷新RSS</el-button>
                             <el-button size="small" type="primary" plain @click="store.refreshLibraryCover(scope.row.id)">更新封面</el-button>
-                            <el-button size="small" type="success" plain @click="store.refreshLibraryData(scope.row.id)">更新数据</el-button>
+                            <el-button v-if="scope.row.resource_type !== 'rsshub'" size="small" type="success" plain @click="store.refreshLibraryData(scope.row.id)">更新数据</el-button>
                             <el-button size="small" @click="store.openEditDialog(scope.row)">编辑</el-button>
                             <el-button size="small" :type="scope.row.hidden ? 'warning' : 'info'" plain @click="store.toggleLibraryHidden(scope.row.id)">
                                 {{ scope.row.hidden ? '显示' : '隐藏' }}
@@ -104,7 +104,7 @@
                 <div class="lib-card-actions">
                     <el-button v-if="row.resource_type === 'rsshub'" size="small" type="success" @click="store.refreshRssLibrary(row.id)">刷新RSS</el-button>
                     <el-button size="small" type="primary" plain @click="store.refreshLibraryCover(row.id)">封面</el-button>
-                    <el-button size="small" type="success" plain @click="store.refreshLibraryData(row.id)">数据</el-button>
+                    <el-button v-if="row.resource_type !== 'rsshub'" size="small" type="success" plain @click="store.refreshLibraryData(row.id)">数据</el-button>
                     <el-button size="small" @click="store.openEditDialog(row)">编辑</el-button>
                     <el-button size="small" :type="row.hidden ? 'warning' : 'info'" plain @click="store.toggleLibraryHidden(row.id)">
                         {{ row.hidden ? '显示' : '隐藏' }}
@@ -160,15 +160,21 @@ const getResourceNameById = (type, id, row) => {
     }
     if (type === 'random') return '基于播放记录推荐';
     if (type === 'all') return '全部媒体库';
+
+    const refreshSuffix = (() => {
+        const custom = Number(row.cache_refresh_interval);
+        return Number.isFinite(custom) && custom > 0 ? `（刷新: ${custom}h）` : '';
+    })();
+
     if (type === 'person') {
         const name = store.personNameCache[id];
-        if (name && name !== '...') return `${name} (${id})`;
+        if (name && name !== '...') return `${name} (${id})${refreshSuffix}`;
         return name === '...' ? '正在加载...' : `ID: ${id}`;
     }
     const pluralType = type + 's';
     const resourceList = store.classifications[pluralType] || [];
     const resource = resourceList.find(r => r.id === id);
-    return resource ? `${resource.name} (${resource.id})` : `未知ID: ${id}`;
+    return resource ? `${resource.name} (${resource.id})${refreshSuffix}` : `未知ID: ${id}`;
 };
 </script>
 

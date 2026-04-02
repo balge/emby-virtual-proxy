@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 logger = logging.getLogger(__name__)
+
+SUPPORTED_EVENTS = {"library.new", "library.deleted"}
 
 
 def parse_request_payload(raw: Any) -> Dict[str, Any]:
@@ -34,65 +36,12 @@ def extract_event_raw(payload: Dict[str, Any]) -> str:
     return ""
 
 
-def classify_event(event_raw: str) -> Optional[str]:
-    """返回 'add' | 'remove' | None（无法识别则忽略）。"""
-    e = (event_raw or "").lower().replace(" ", "").replace("_", "")
-    if not e:
-        return None
-    if any(x in e for x in ("itemremoved", "itemdeleted", "librarydeleted", "mediadeleted", "libraryremove")):
-        return "remove"
-    if any(
-        x in e
-        for x in (
-            "itemadded",
-            "libraryadded",
-            "librarynew",
-            "mediafileadded",
-            "pendingitem",
-            "episodeadded",
-            "movieadded",
-            "seasonadded",
-        )
-    ):
-        return "add"
-    return None
-
-
 def extract_item_dict(payload: Dict[str, Any]) -> Dict[str, Any]:
     item = payload.get("Item") or payload.get("item")
     if isinstance(item, dict):
         return item
     out: Dict[str, Any] = {}
-    for k in ("Id", "ItemId", "SeriesId", "AlbumId", "Type", "ParentId", "Name", "ServerId"):
+    for k in ("Id", "ItemId", "SeriesId", "AlbumId", "Type", "ParentId", "Name", "ServerId", "Path"):
         if k in payload:
             out[k] = payload[k]
     return out
-
-
-def extract_item_id(payload: Dict[str, Any], item: Dict[str, Any]) -> Optional[str]:
-    for obj in (item, payload):
-        if not isinstance(obj, dict):
-            continue
-        for k in ("Id", "ItemId", "item_id", "ItemGuid"):
-            v = obj.get(k)
-            if isinstance(v, str) and v:
-                return v
-    return None
-
-
-def extract_library_hints(payload: Dict[str, Any], item: Dict[str, Any]) -> tuple[Optional[str], Optional[str]]:
-    """返回 (library_id, library_name) 其一或二者"""
-    for obj in (item, payload):
-        if not isinstance(obj, dict):
-            continue
-        lid = obj.get("LibraryId") or obj.get("libraryId") or obj.get("MediaSourceId")
-        if lid and isinstance(lid, str):
-            return lid, None
-    for obj in (payload, item):
-        if not isinstance(obj, dict):
-            continue
-        for k in ("LibraryName", "MediaLibraryName", "CollectionName"):
-            v = obj.get(k)
-            if isinstance(v, str) and v.strip():
-                return None, v.strip()
-    return None, None

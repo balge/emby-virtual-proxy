@@ -34,10 +34,8 @@ from models import AppConfig, VirtualLibrary, AdvancedFilter
 from emby_webhook import (
     parse_request_payload,
     extract_event_raw,
-    classify_event,
+    SUPPORTED_EVENTS,
     extract_item_dict,
-    extract_item_id,
-    extract_library_hints,
 )
 import config_manager
 from db_manager import DBManager, RSS_CACHE_DB
@@ -498,76 +496,6 @@ async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> 
         return None
 
 
-async def _resolve_collection_folder_id_for_item(item_id: str) -> Optional[str]:
-    """自任意 Item 沿 ParentId 向上找到 CollectionFolder（与源库 ID 一致）。"""
-    current = item_id
-    for _ in range(40):
-        data = await _admin_emby_get_json(f"/Items/{current}", {"Fields": "ParentId,Type,CollectionType,Name"})
-        if not data or not isinstance(data, dict):
-            return None
-        if data.get("Type") == "CollectionFolder":
-            return data.get("Id")
-        pid = data.get("ParentId")
-        if not pid:
-            return None
-        current = pid
-    return None
-
-
-async def _real_library_id_from_name(name: str) -> Optional[str]:
-    if not name:
-        return None
-    try:
-        libs = await get_real_libraries_hybrid_mode()
-    except Exception:
-        return None
-    name_l = name.strip().lower()
-    for lib in libs:
-        if (lib.get("Name") or "").strip().lower() == name_l:
-            return lib.get("Id")
-    return None
-
-
-async def _enrich_item_from_emby(item_id: str, base: dict) -> dict:
-    data = await _admin_emby_get_json(
-        f"/Items/{item_id}",
-        {"Fields": "ParentId,Type,SeriesId,AlbumId,Name,CollectionType"},
-    )
-    if not isinstance(data, dict):
-        return base
-    out = {**base}
-    for k in ("ParentId", "Type", "SeriesId", "AlbumId", "Name", "CollectionType"):
-        if data.get(k) is not None and out.get(k) is None:
-            out[k] = data[k]
-    return out
-
-
-def _virtual_libs_linked_to_real_library(real_lib_id: str, config: AppConfig) -> List[VirtualLibrary]:
-    """
-    仅当虚拟库为「全部媒体库」(resource_type=all) 且配置了源库范围、且 source_libraries 包含该真实库时，
-    才由 Webhook 触发刷新。其它资源详情类型（合集/标签/流派/人物等）及 random、rsshub 均不走 Webhook。
-    """
-    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
-    if real_lib_id in ignore_set:
-        return []
-    out: List[VirtualLibrary] = []
-    for v in config.virtual_libraries:
-        if v.hidden:
-            continue
-        if v.resource_type in ("rsshub", "random"):
-            continue
-        if v.resource_type != "all":
-            continue
-        raw_src = v.source_libraries or []
-        if not raw_src:
-            continue  # 未配置源库限定 → 不走 Webhook
-        src = [x for x in raw_src if x not in ignore_set]
-        if not src or real_lib_id not in src:
-            continue
-        out.append(v)
-    return out
-
-
 async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
     library_id = vlib.id
@@ -594,27 +522,6 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
 
 
-async def _refresh_virtual_libs_for_real_library(real_lib_id: str) -> None:
-    config = config_manager.load_config()
-    wc = config.webhook
-    if not wc.enabled:
-        return
-    linked = _virtual_libs_linked_to_real_library(real_lib_id, config)
-    if not linked:
-        logger.info(
-            f"Webhook: 真实库 {real_lib_id} 无关联虚拟库（仅 resource_type=all 且源库命中才刷新；其余类型/未配置源库跳过）。"
-        )
-        return
-    logger.info(
-        f"Webhook: real_lib={real_lib_id} matched_vlibs={len(linked)} vlib_ids={[v.id for v in linked]}"
-    )
-    for v in linked:
-        try:
-            logger.info(f"Webhook: 开始刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {real_lib_id}")
-            await refresh_virtual_library_data_and_cover(v)
-        except Exception as e:
-            logger.error(f"Webhook: 刷新虚拟库 '{v.name}' 失败: {e}", exc_info=True)
-
 
 async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
     config = config_manager.load_config()
@@ -623,29 +530,49 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
         return
 
     event_raw = extract_event_raw(payload)
-    kind = classify_event(event_raw)
-    if kind is None:
+    if event_raw not in SUPPORTED_EVENTS:
         logger.debug(f"Webhook: 忽略事件类型 '{event_raw}'")
         return
 
     item = extract_item_dict(payload)
-    item_id = extract_item_id(payload, item)
-    if item_id:
-        item = await _enrich_item_from_emby(item_id, item)
-
-    lib_id_hint, lib_name_hint = extract_library_hints(payload, item)
-    real_lib_id: Optional[str] = lib_id_hint
-    if not real_lib_id and lib_name_hint:
-        real_lib_id = await _real_library_id_from_name(lib_name_hint)
-    if not real_lib_id and item_id:
-        real_lib_id = await _resolve_collection_folder_id_for_item(item_id)
-
-    if not real_lib_id:
-        logger.warning(f"Webhook: 无法解析真实媒体库 ID（event={event_raw}, item_id={item_id}）")
+    item_path = item.get("Path") or ""
+    if not item_path:
+        logger.warning(f"Webhook: 事件 '{event_raw}' 缺少 Item.Path，跳过")
         return
 
-    logger.info(f"Webhook: 事件 kind={kind} event={event_raw} → 刷新真实库 {real_lib_id}")
-    asyncio.create_task(_refresh_virtual_libs_for_real_library(real_lib_id))
+    # 获取真实库列表，用库名匹配 item path
+    try:
+        real_libs = await get_real_libraries_hybrid_mode()
+    except Exception as e:
+        logger.error(f"Webhook: 获取真实库列表失败: {e}")
+        return
+
+    matched_lib_ids: List[str] = []
+    for lib in real_libs:
+        lib_name = lib.get("Name") or ""
+        if lib_name and lib_name in item_path:
+            matched_lib_ids.append(lib.get("Id"))
+
+    if not matched_lib_ids:
+        logger.info(f"Webhook: event={event_raw} path='{item_path}' 未匹配到任何真实库")
+        return
+
+    logger.info(f"Webhook: event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}")
+
+    ignore_set = set(config.ignore_libraries) if config.ignore_libraries else set()
+    refreshed = set()
+    for v in config.virtual_libraries:
+        if v.hidden or v.resource_type in ("rsshub", "random") or v.resource_type != "all":
+            continue
+        src = v.source_libraries or []
+        if not src:
+            continue  # 未配置源库 → 不走 Webhook
+        src_filtered = [x for x in src if x not in ignore_set]
+        if any(lid in src_filtered for lid in matched_lib_ids):
+            if v.id not in refreshed:
+                refreshed.add(v.id)
+                logger.info(f"Webhook: 刷新虚拟库 '{v.name}' ({v.id})")
+                asyncio.create_task(refresh_virtual_library_data_and_cover(v))
 
 
 # --- API ---
@@ -716,6 +643,9 @@ async def refresh_rss_library_internal(vlib: VirtualLibrary):
             f"type={vlib.rss_type} interval_h={vlib.cache_refresh_interval}"
         )
         clear_vlib_page_cache(vlib.id)
+        keys_to_remove = [k for k in api_cache if vlib.id in str(k)]
+        for k in keys_to_remove:
+            api_cache.pop(k, None)
         if vlib.rss_type == "douban":
             from rss_processor.douban import DoubanProcessor
             processor = DoubanProcessor(vlib)
@@ -787,11 +717,14 @@ async def refresh_library_cover(library_id: str):
 @api_router.post("/libraries/{library_id}/refresh-data", status_code=202, tags=["Libraries"])
 async def refresh_library_data(library_id: str):
     """Refresh data for a single virtual library, then regenerate its cover."""
+    logger.info(f"API refresh_library_data called for library_id={library_id}")
     config = config_manager.load_config()
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
     if not vlib:
+        logger.warning(f"refresh_library_data: 虚拟库 {library_id} 不存在")
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
+    logger.info(f"refresh_library_data: 开始刷新虚拟库 '{vlib.name}' ({vlib.id}) type={vlib.resource_type}")
     asyncio.create_task(refresh_virtual_library_data_and_cover(vlib))
     return {"message": f"Data and cover refresh started for '{vlib.name}'."}
 
