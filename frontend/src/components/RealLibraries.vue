@@ -34,8 +34,7 @@
         </el-table-column>
         <el-table-column label="封面" width="200" align="center" class-name="cover-col">
           <template #default="{ row }">
-            <img v-if="row.image_tag" class="cover-thumb" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
-            <span v-else class="cover-empty">—</span>
+            <img class="cover-thumb" :src="getCoverUrl(row)" alt="封面" />
           </template>
         </el-table-column>
         <el-table-column prop="name" label="库名称" min-width="120" />
@@ -66,7 +65,7 @@
     <div class="card-view" v-if="store.config.real_libraries?.length">
       <div v-for="row in store.config.real_libraries" :key="row.id" class="lib-card">
         <div class="lib-card-top">
-          <img v-if="row.image_tag" class="cover-thumb-card" :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" alt="封面" />
+          <img class="cover-thumb-card" :src="getCoverUrl(row)" alt="封面" />
           <div class="lib-card-info">
             <span class="lib-card-name">{{ row.name }}</span>
             <div class="lib-card-switch-row">
