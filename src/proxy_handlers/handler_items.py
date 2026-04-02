@@ -55,7 +55,7 @@ def _resolve_cache_ttl_seconds(vlib: VirtualLibrary, config: AppConfig) -> Optio
     return h * 3600
 
 
-def _cache_current_and_next_page(
+def _cache_current_page(
     *,
     vlib_id: str,
     context_key: str,
@@ -820,7 +820,7 @@ async def _handle_source_library_scoped_request(
     if method == "GET":
         try:
             ctx = _build_vlib_page_context_key(request, user_id)
-            _cache_current_and_next_page(
+            _cache_current_page(
                 vlib_id=found_vlib.id,
                 context_key=ctx,
                 start_idx=start_idx,
@@ -1061,7 +1061,7 @@ async def _handle_random_library(
 
     final_data = {"Items": paginated, "TotalRecordCount": total, "StartIndex": start_idx}
     if method == "GET" and limit_count > 0:
-        _cache_current_and_next_page(
+        _cache_current_page(
             vlib_id=found_vlib.id,
             context_key=page_ctx_key,
             start_idx=start_idx,
@@ -1409,7 +1409,7 @@ async def handle_virtual_library_items(
             page_items = deduped[start_idx: start_idx + limit_count]
             final_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
             if method == "GET":
-                _cache_current_and_next_page(
+                _cache_current_page(
                     vlib_id=found_vlib.id,
                     context_key=page_ctx_key,
                     start_idx=start_idx,
@@ -1457,7 +1457,7 @@ async def handle_virtual_library_items(
                         try:
                             start_idx = int(data.get("StartIndex", client_start_index))
                             total_record_count = int(data.get("TotalRecordCount", len(items_list)))
-                            _cache_current_and_next_page(
+                            _cache_current_page(
                                 vlib_id=found_vlib.id,
                                 context_key=page_ctx_key,
                                 start_idx=start_idx,
