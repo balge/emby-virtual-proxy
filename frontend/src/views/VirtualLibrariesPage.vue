@@ -64,9 +64,9 @@
                 </p>
                 <div class="flex flex-wrap gap-1">
                   <BaseTag v-if="row.merge_by_tmdb_id" variant="success">TMDB合并</BaseTag>
-                  <BaseTag v-if="row.source_libraries?.length" variant="warning" :title="getSourceLibNames(row)">
-                    源库: {{ getSourceLibSummary(row) }}
-                  </BaseTag>
+                  <BaseTooltip v-if="row.source_libraries?.length" :text="getSourceLibNames(row)">
+                    <BaseTag variant="warning">源库: {{ getSourceLibSummary(row) }}</BaseTag>
+                  </BaseTooltip>
                   <BaseTag v-else-if="row.resource_type !== 'rsshub'" variant="default">全部源库</BaseTag>
                   <BaseTag v-if="row.advanced_filter_id" variant="info">{{ getFilterName(row.advanced_filter_id) }}</BaseTag>
                   <BaseTag v-if="getRefreshText(row)" variant="default">{{ getRefreshText(row) }}</BaseTag>
@@ -78,15 +78,29 @@
             </td>
             <td class="px-4 py-3">
               <div class="flex justify-end gap-1 flex-wrap">
-                <BaseButton v-if="row.resource_type === 'rsshub'" size="xs" variant="success-outline" title="刷新 RSS" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
-                <BaseButton size="xs" title="刷新封面" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
-                <BaseButton v-if="row.resource_type !== 'rsshub'" size="xs" variant="success-outline" title="刷新数据和封面" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
-                <BaseButton size="xs" title="编辑虚拟库" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
-                <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" :title="row.hidden ? '显示虚拟库' : '隐藏虚拟库'" @click="store.toggleLibraryHidden(row.id)">
-                  <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /><EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
-                </BaseButton>
+                <BaseTooltip v-if="row.resource_type === 'rsshub'" text="刷新 RSS">
+                  <BaseButton size="xs" variant="success-outline" @click="store.refreshRssLibrary(row.id)"><RssIcon class="w-3.5 h-3.5" /> RSS</BaseButton>
+                </BaseTooltip>
+                <BaseTooltip text="刷新封面">
+                  <BaseButton size="xs" @click="store.refreshLibraryCover(row.id)"><ArrowPathIcon class="w-3.5 h-3.5" /> 封面</BaseButton>
+                </BaseTooltip>
+                <BaseTooltip v-if="row.resource_type !== 'rsshub'" text="刷新数据和封面">
+                  <BaseButton size="xs" variant="success-outline" @click="store.refreshLibraryData(row.id)"><CircleStackIcon class="w-3.5 h-3.5" /> 数据</BaseButton>
+                </BaseTooltip>
+                <BaseTooltip text="编辑虚拟库">
+                  <BaseButton size="xs" @click="store.openEditDialog(row)"><PencilSquareIcon class="w-3.5 h-3.5" /> 编辑</BaseButton>
+                </BaseTooltip>
+                <BaseTooltip :text="row.hidden ? '显示虚拟库' : '隐藏虚拟库'">
+                  <BaseButton size="xs" :variant="row.hidden ? 'warning' : 'ghost'" @click="store.toggleLibraryHidden(row.id)">
+                    <EyeIcon v-if="row.hidden" class="w-3.5 h-3.5" /><EyeSlashIcon v-else class="w-3.5 h-3.5" /> {{ row.hidden ? '显示' : '隐藏' }}
+                  </BaseButton>
+                </BaseTooltip>
                 <ConfirmPopover :message="`确定删除虚拟库「${row.name}」？`" confirm-text="删除" @confirm="store.deleteLibrary(row.id)">
-                  <template #trigger><BaseButton size="xs" variant="danger-outline" title="删除虚拟库"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton></template>
+                  <template #trigger>
+                    <BaseTooltip text="删除虚拟库">
+                      <BaseButton size="xs" variant="danger-outline"><TrashIcon class="w-3.5 h-3.5" /> 删除</BaseButton>
+                    </BaseTooltip>
+                  </template>
                 </ConfirmPopover>
               </div>
             </td>
@@ -114,7 +128,9 @@
           <p class="text-xs text-gray-500 dark:text-gray-400 truncate mb-1.5" :title="getResourceDetail(row)">{{ getResourceDetail(row) }}</p>
           <div class="flex flex-wrap gap-1 mb-2">
             <BaseTag v-if="row.merge_by_tmdb_id" variant="success">TMDB合并</BaseTag>
-            <BaseTag v-if="row.source_libraries?.length" variant="warning" :title="getSourceLibNames(row)">源库: {{ getSourceLibSummary(row) }}</BaseTag>
+            <BaseTooltip v-if="row.source_libraries?.length" :text="getSourceLibNames(row)" position="bottom">
+              <BaseTag variant="warning">源库: {{ getSourceLibSummary(row) }}</BaseTag>
+            </BaseTooltip>
             <BaseTag v-if="row.advanced_filter_id" variant="info">{{ getFilterName(row.advanced_filter_id) }}</BaseTag>
             <BaseTag v-if="getRefreshText(row)" variant="default">{{ getRefreshText(row) }}</BaseTag>
           </div>
