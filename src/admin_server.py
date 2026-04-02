@@ -101,7 +101,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse as StarletteJSONResponse
 
 # 不需要认证的路径白名单
-AUTH_PUBLIC_PATHS = {"/api/login", "/api/auth-status", "/api/logout", "/api/webhook/emby"}
+AUTH_PUBLIC_PATHS = {"/api/login", "/api/auth-status", "/api/logout", "/api/webhook/emby", "/api/internal"}
 
 class AuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
