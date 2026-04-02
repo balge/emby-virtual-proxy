@@ -3,8 +3,7 @@
     <div class="w-full max-w-sm">
       <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8">
         <div class="text-center mb-8">
-          <img src="/logo.png" alt="Logo" class="h-16 mx-auto mb-3 rounded-xl" />
-          <h1 class="text-xl font-bold text-gray-900 dark:text-gray-100">Emby Virtual Proxy</h1>
+          <img src="/logo.png" alt="Logo" class="h-[140px] mx-auto mb-3 rounded-xl" />
           <p class="text-sm text-gray-500 dark:text-gray-400 mt-1">请登录以继续</p>
         </div>
 
