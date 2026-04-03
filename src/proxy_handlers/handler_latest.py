@@ -12,7 +12,8 @@ from pathlib import Path
 from . import handler_merger
 from . import handler_autogen
 from ._filter_translator import translate_rules
-from .handler_items import _apply_post_filter, _apply_custom_sort, _build_headers_to_forward, _fetch_all_items_for_parent
+from .handler_items import _apply_post_filter, _apply_custom_sort, _build_headers_to_forward
+from vlib_cache_manager import _fetch_all_pages as _fetch_all_items_pages
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ async def handle_home_latest_items(
         client_limit_val = int(params.get("Limit", 20))
 
         tasks = [
-            _fetch_all_items_for_parent(session, target_url, new_params, pid, headers_to_forward)
+            _fetch_all_items_pages(session, target_url, dict(new_params, ParentId=pid), headers_to_forward)
             for pid in effective_source_libs
         ]
         results = await asyncio.gather(*tasks)

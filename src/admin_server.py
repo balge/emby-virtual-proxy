@@ -754,6 +754,12 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
 
     if vlib.resource_type == "rsshub":
         await refresh_rss_library_internal(vlib)
+    else:
+        # Refresh full cache via cache manager
+        from vlib_cache_manager import refresh_vlib_cache
+        config = config_manager.load_config()
+        await refresh_vlib_cache(vlib, config)
+
     await _regenerate_cover_for_vlib(vlib)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
 
@@ -963,7 +969,8 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     try:
         # Populate cache only if not already present
         if vlib.id not in vlib_items_cache:
-            await _populate_vlib_cache(vlib, config)
+            from vlib_cache_manager import refresh_vlib_cache
+            await refresh_vlib_cache(vlib, config)
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
@@ -1575,6 +1582,14 @@ async def startup_event():
     config = config_manager.load_config()
     update_rss_refresh_job(config)
     update_real_library_cover_cron(config)
+
+    # 启动时异步预热所有虚拟库缓存
+    async def _warmup():
+        from vlib_cache_manager import refresh_all_vlib_caches
+        cfg = config_manager.load_config()
+        results = await refresh_all_vlib_caches(cfg)
+        logger.info(f"Startup cache warmup complete: {results}")
+    asyncio.create_task(_warmup())
 
 @admin_app.on_event("shutdown")
 async def shutdown_event():
