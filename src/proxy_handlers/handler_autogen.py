@@ -45,7 +45,8 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
         # --- 不再需要自己获取用户ID，直接使用传入的 ---
         
         # --- 2. 通过内部请求调用 proxy-core 自身来获取项目 ---
-        internal_proxy_url = f"http://localhost:8999/emby/Users/{user_id}/Items"
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        internal_proxy_url = f"{base}/emby/Users/{user_id}/Items"
         
         # 使用传入的、保证正确的 api_key
         params = {

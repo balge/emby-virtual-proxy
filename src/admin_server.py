@@ -48,6 +48,22 @@ from proxy_handlers.handler_items import _apply_custom_sort
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
+
+
+async def _notify_proxy_invalidate_cache(library_id: str) -> None:
+    """通知 proxy 进程清除指定虚拟库的内存缓存（admin 与 proxy 为不同进程）。"""
+    try:
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
+        token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
+        headers = {"X-Internal-Token": token} if token else {}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status != 200:
+                    text = await resp.text()
+                    logger.warning(f"PROXY_INVALIDATE vlib={library_id} HTTP {resp.status}: {text[:300]}")
+    except Exception as e:
+        logger.warning(f"PROXY_INVALIDATE vlib={library_id} failed: {e}")
 _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "info").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -713,18 +729,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
 
     # Admin 与 Proxy 为不同进程，必须通知 proxy 进程清内存缓存。
     # 否则你会看到“刷新后仍返回旧数据”的概率性现象。
-    try:
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
-        url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
-        token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
-        headers = {"X-Internal-Token": token} if token else {}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    logger.warning(f"PROXY_INVALIDATE vlib={library_id} HTTP {resp.status}: {text[:300]}")
-    except Exception as e:
-        logger.warning(f"PROXY_INVALIDATE vlib={library_id} failed: {e}")
+    await _notify_proxy_invalidate_cache(library_id)
 
     logger.info(
         f"VLIB_REFRESH CACHE_CLEARED vlib={library_id} "
@@ -1248,6 +1253,9 @@ async def toggle_library_hidden(library_id: str):
                 api_cache.pop(k, None)
             clear_vlib_items_cache(library_id)
             clear_vlib_page_cache(library_id)
+
+            await _notify_proxy_invalidate_cache(library_id)
+
             return {"id": lib.id, "hidden": lib.hidden}
     raise HTTPException(status_code=404, detail="Virtual library not found")
 
