@@ -14,7 +14,12 @@ from pathlib import Path
 from typing import Tuple, Dict
 
 # 【【【 同时修改这一行，从 proxy_cache 导入缓存与失效函数 】】】
-from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache, list_user_ids_with_vlib_cache
+from proxy_cache import (
+    vlib_items_cache,
+    clear_vlib_items_cache,
+    clear_vlib_page_cache,
+    list_user_ids_with_vlib_cache,
+)
 import config_manager
 from proxy_handlers import (
     handler_system, 
@@ -91,6 +96,16 @@ async def get_cached_items_for_admin(
 
     logger.info(f"Admin 读取缓存 user={uid} vlib={library_id} count={len(cached_items)}")
     return JSONResponse(content={"Items": cached_items, "UserId": uid})
+
+
+@proxy_app.get("/api/internal/vlib-cache-user-ids/{library_id}")
+async def internal_list_vlib_cache_user_ids(library_id: str):
+    """
+    列出磁盘上对该虚拟库已有 items.db 的 Emby 用户 Id（目录名排序后顺序）。
+    供 Admin 封面：用「第一个曾访问该库的用户」而非 Emby /Users 列表顺序的第一个。
+    """
+    uids = list_user_ids_with_vlib_cache(library_id)
+    return JSONResponse(content={"vlib_id": library_id, "user_ids": uids})
 
 
 def _allow_internal_cache_invalidate(request: Request) -> bool:

@@ -71,13 +71,42 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
     return out
 
 
-async def _get_cached_items_from_proxy(library_id: str) -> list[dict] | None:
-    """从 proxy 读取指定虚拟库缓存（默认服务器首个 Emby 用户）。"""
+async def _list_vlib_cache_user_ids_from_proxy(library_id: str) -> list[str]:
+    """磁盘上对该虚拟库已有缓存的用户 Id（与 proxy 目录遍历顺序一致，已排序）。"""
     try:
-        users = await _fetch_from_emby("/Users")
-        if not users:
-            return None
-        uid = users[0].get("Id")
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/vlib-cache-user-ids/{library_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return list(data.get("user_ids") or [])
+    except Exception as e:
+        logger.warning(f"list vlib cache users from proxy failed '{library_id}': {e}")
+    return []
+
+
+async def _resolve_cover_cache_user_id(library_id: str) -> Optional[str]:
+    """
+    封面素材：优先使用「该库磁盘缓存里第一个用户」（真正访问过该库的人），
+    避免 Emby /Users 顺序第一个与缓存所有者不一致导致 404。
+    若尚无任何缓存，再退回 Emby 首个用户（与旧行为一致，便于无访问记录时的兜底刷新）。
+    """
+    uids = await _list_vlib_cache_user_ids_from_proxy(library_id)
+    if uids:
+        return uids[0]
+    users = await _fetch_from_emby("/Users")
+    if users:
+        return users[0].get("Id")
+    return None
+
+
+async def _get_cached_items_from_proxy(
+    library_id: str, user_id: Optional[str] = None
+) -> list[dict] | None:
+    """从 proxy 读虚拟库全量缓存。user_id 缺省时按 _resolve_cover_cache_user_id 选取。"""
+    try:
+        uid = user_id or await _resolve_cover_cache_user_id(library_id)
         if not uid:
             return None
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
@@ -95,25 +124,8 @@ async def _get_cached_items_from_proxy(library_id: str) -> list[dict] | None:
 
 
 async def _cache_exists_in_proxy(library_id: str) -> bool:
-    """检查 proxy 上是否存在「首个 Emby 用户」下该虚拟库的磁盘缓存。"""
-    try:
-        users = await _fetch_from_emby("/Users")
-        if not users:
-            return False
-        uid = users[0].get("Id")
-        if not uid:
-            return False
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
-        url = f"{base}/api/internal/cache-exists/{library_id}"
-        params = {"user_id": uid}
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    return data.get("exists", False)
-    except Exception:
-        pass
-    return False
+    """是否存在任意用户对该虚拟库的磁盘缓存。"""
+    return len(await _list_vlib_cache_user_ids_from_proxy(library_id)) > 0
 
 
 async def _notify_proxy_refresh_cache(
@@ -467,11 +479,19 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
 async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig):
     """
     Read items from proxy cache via internal API and download cover images.
+    Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
     """
-    logger.info(f"Fetching cover images for vlib {library_id} from proxy cache...")
+    cache_uid = await _resolve_cover_cache_user_id(library_id)
+    if not cache_uid:
+        raise HTTPException(
+            status_code=404,
+            detail="No cached items found for this virtual library. Please refresh data first.",
+        )
+    logger.info(
+        f"Fetching cover images for vlib {library_id} from proxy cache (user={cache_uid})..."
+    )
 
-    # Read cached items from proxy process
-    items = await _get_cached_items_from_proxy(library_id)
+    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid)
     if not items:
         raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
@@ -1021,14 +1041,25 @@ async def refresh_rss_library(library_id: str, request: Request):
 
 
 async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
-    """Populate vlib cache first, then regenerate cover."""
+    """刷新代表用户的列表缓存后重生成封面（非全用户；代表用户 = 磁盘上该库第一个缓存用户）。"""
     config = config_manager.load_config()
     style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        # 只刷新磁盘上已有该库缓存的用户（与手动/自动刷新策略一致）
-        await _notify_proxy_refresh_cache(vlib.id, user_ids=None)
+        uids = await _list_vlib_cache_user_ids_from_proxy(vlib.id)
+        if uids:
+            rep = uids[0]
+            logger.info(f"Cover refresh: refresh cache for representative user={rep} vlib={vlib.id}")
+            await _notify_proxy_refresh_cache(vlib.id, user_ids=[rep])
+        else:
+            users = await _fetch_from_emby("/Users")
+            uid0 = users[0].get("Id") if users else None
+            if uid0:
+                logger.info(
+                    f"Cover refresh: no prior vlib cache; fallback refresh Emby-first user={uid0} vlib={vlib.id}"
+                )
+                await _notify_proxy_refresh_cache(vlib.id, user_ids=[uid0])
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
