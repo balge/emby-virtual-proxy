@@ -23,13 +23,12 @@ import importlib
 # 导入封面生成模块
 # from cover_generator import style_multi_1 # 改为动态导入
 import base64
-from PIL import Image
+import json
 from io import BytesIO
 from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-import docker
 from proxy_cache import api_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
@@ -727,6 +726,7 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             return None
 
         image_data = base64.b64decode(res)
+        from PIL import Image
         img = Image.open(BytesIO(image_data))
         if img.mode != 'RGB':
             img = img.convert('RGB')
@@ -935,6 +935,7 @@ async def restart_proxy_container():
 
     try:
         # 通过挂载的 socket 连接到 Docker 守护进程
+        import docker
         client = docker.from_env()
         
         print(f"[PROXY-ADMIN-INFO] 正在查找要重启的容器: '{proxy_container_name}'")
@@ -1214,6 +1215,7 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
 
         # --- 4. 解码、转换并以虚拟库ID为名保存图片 ---
         image_data = base64.b64decode(res)
+        from PIL import Image
         img = Image.open(BytesIO(image_data))
 
         if img.mode != 'RGB':

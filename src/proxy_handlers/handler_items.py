@@ -260,6 +260,40 @@ def _make_page_response(items: List[Dict[str, Any]], start_idx: int, limit_count
 
 
 # ---------------------------------------------------------------------------
+# Data fetching helper (used by handler_latest for source-library scoping)
+# ---------------------------------------------------------------------------
+
+async def _fetch_all_items_for_parent(
+    session: ClientSession, search_url: str, base_params: Dict,
+    parent_id: str, headers: Dict,
+) -> List[Dict]:
+    """Fetch ALL items from a single parent library with pagination."""
+    all_items: List[Dict] = []
+    start_index = 0
+    limit = 400
+    fetch_params = dict(base_params)
+    fetch_params["ParentId"] = parent_id
+    fetch_params.pop("StartIndex", None)
+    fetch_params.pop("Limit", None)
+    while True:
+        batch_params = dict(fetch_params)
+        batch_params["StartIndex"] = str(start_index)
+        batch_params["Limit"] = str(limit)
+        async with session.get(search_url, params=batch_params, headers=headers) as resp:
+            if resp.status != 200:
+                break
+            data = await resp.json()
+            batch = data.get("Items", [])
+            if not batch:
+                break
+            all_items.extend(batch)
+            start_index += len(batch)
+            if len(batch) < limit:
+                break
+    return all_items
+
+
+# ---------------------------------------------------------------------------
 # Random library handler
 # ---------------------------------------------------------------------------
 

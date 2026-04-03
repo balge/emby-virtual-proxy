@@ -10,7 +10,6 @@ import hashlib
 import time
 from pathlib import Path
 from io import BytesIO
-from PIL import Image
 import aiohttp
 import importlib
 
@@ -155,6 +154,7 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
             return
 
         image_data = base64.b64decode(res_b64)
+        from PIL import Image
         img = Image.open(BytesIO(image_data)).convert("RGB")
         final_path = output_dir / f"{library_id}.jpg"
         img.save(final_path, "JPEG", quality=90)

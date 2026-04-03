@@ -93,16 +93,18 @@ _init_db()
 class VLibItemsCache:
     """
     In-memory full-item-list cache backed by SQLite for persistence across restarts.
-
-    Keys:
-    - "<vlib_id>"                  → full item list for a virtual library
-    - "random:<user_id>:<vlib_id>" → random recommendations per user
+    DB loading is deferred until first access to avoid memory usage in admin process.
     """
 
     def __init__(self):
         self._mem: dict[str, list[dict]] = {}
         self._conn: sqlite3.Connection | None = None
-        self._load_from_db()
+        self._loaded = False
+
+    def _ensure_loaded(self):
+        if not self._loaded:
+            self._loaded = True
+            self._load_from_db()
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -125,21 +127,24 @@ class VLibItemsCache:
     # -- read --
 
     def get(self, key: str, default=None) -> list[dict] | None:
+        self._ensure_loaded()
         with _mem_lock:
             return self._mem.get(key, default)
 
     def __contains__(self, key: str) -> bool:
+        self._ensure_loaded()
         with _mem_lock:
             return key in self._mem
 
     def __getitem__(self, key: str) -> list[dict]:
+        self._ensure_loaded()
         with _mem_lock:
             return self._mem[key]
 
     # -- write --
 
     def set(self, key: str, items: list[dict], *, persist: bool = True):
-        """Store items (already slimmed) into cache."""
+        self._ensure_loaded()
         with _mem_lock:
             self._mem[key] = items
         if persist:
@@ -149,12 +154,14 @@ class VLibItemsCache:
         self.set(key, value)
 
     def pop(self, key: str, *args):
+        self._ensure_loaded()
         with _mem_lock:
             val = self._mem.pop(key, *args)
         self._delete_from_db(key)
         return val
 
     def keys(self) -> list[str]:
+        self._ensure_loaded()
         with _mem_lock:
             return list(self._mem.keys())
 
