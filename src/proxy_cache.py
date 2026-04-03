@@ -3,10 +3,10 @@
 Virtual library cache layer.
 
 Design:
-- Full item lists are cached in memory (and persisted to SQLite for restart recovery).
-- All browsing requests are served by slicing from the in-memory full list.
-- Data is populated on startup / manual refresh / webhook / scheduled refresh.
-- Items are "slimmed" before caching to keep memory usage low (~300-600 bytes per item
+- Full item lists are persisted in SQLite and read on-demand (no in-memory copy).
+- This avoids the ~500 MB RAM overhead from loading a 40 MB DB into Python dicts.
+- Browsing requests read from DB per-request (~20-80 ms per read due to json.loads).
+- Items are "slimmed" before caching to keep DB size low (~300-600 bytes per item
   instead of 3-8 KB for a full Emby response).
 """
 
@@ -63,7 +63,6 @@ def slim_items(items: list[dict]) -> list[dict]:
 
 _DB_PATH = Path(__file__).parent.parent / "config" / "vlib_cache.db"
 _db_lock = threading.Lock()
-_mem_lock = threading.Lock()
 
 
 def _get_db() -> sqlite3.Connection:
@@ -92,78 +91,93 @@ _init_db()
 
 class VLibItemsCache:
     """
-    In-memory full-item-list cache backed by SQLite for persistence across restarts.
-    DB loading is deferred until first access to avoid memory usage in admin process.
+    DB-only virtual library item cache.
+
+    All reads go directly to SQLite (WAL mode) — no in-memory copy.
+    This trades ~20-80 ms per read for massive memory savings
+    (40 MB DB was inflating to ~500 MB in RAM after json.loads).
     """
 
     def __init__(self):
-        self._mem: dict[str, list[dict]] = {}
         self._conn: sqlite3.Connection | None = None
-        self._loaded = False
-
-    def _ensure_loaded(self):
-        if not self._loaded:
-            self._loaded = True
-            self._load_from_db()
+        logger.info("VLibItemsCache initialized (DB-only mode, no in-memory loading).")
 
     def _get_conn(self) -> sqlite3.Connection:
         if self._conn is None:
             self._conn = _get_db()
         return self._conn
 
-    def _load_from_db(self):
-        try:
-            conn = self._get_conn()
-            rows = conn.execute("SELECT vlib_id, items_json FROM vlib_items").fetchall()
-            for vlib_id, items_json in rows:
-                try:
-                    self._mem[vlib_id] = json.loads(items_json)
-                except json.JSONDecodeError:
-                    pass
-            logger.info(f"Loaded {len(self._mem)} vlib item caches from DB.")
-        except Exception as e:
-            logger.warning(f"Failed to load vlib_items from DB: {e}")
-
     # -- read --
 
     def get(self, key: str, default=None) -> list[dict] | None:
-        self._ensure_loaded()
-        with _mem_lock:
-            return self._mem.get(key, default)
+        try:
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT items_json FROM vlib_items WHERE vlib_id = ?", (key,)
+            ).fetchone()
+            if row is None:
+                return default
+            return json.loads(row[0])
+        except Exception as e:
+            logger.warning(f"VLibItemsCache.get({key}) failed: {e}")
+            return default
 
     def __contains__(self, key: str) -> bool:
-        self._ensure_loaded()
-        with _mem_lock:
-            return key in self._mem
+        try:
+            conn = self._get_conn()
+            row = conn.execute(
+                "SELECT 1 FROM vlib_items WHERE vlib_id = ? LIMIT 1", (key,)
+            ).fetchone()
+            return row is not None
+        except Exception as e:
+            logger.warning(f"VLibItemsCache.__contains__({key}) failed: {e}")
+            return False
 
     def __getitem__(self, key: str) -> list[dict]:
-        self._ensure_loaded()
-        with _mem_lock:
-            return self._mem[key]
+        val = self.get(key)
+        if val is None:
+            raise KeyError(key)
+        return val
 
     # -- write --
 
     def set(self, key: str, items: list[dict], *, persist: bool = True):
-        self._ensure_loaded()
-        with _mem_lock:
-            self._mem[key] = items
         if persist:
             self._persist(key, items)
 
     def __setitem__(self, key: str, value: list[dict]):
-        self.set(key, value)
+        self._persist(key, value)
 
     def pop(self, key: str, *args):
-        self._ensure_loaded()
-        with _mem_lock:
-            val = self._mem.pop(key, *args)
+        val = self.get(key)
         self._delete_from_db(key)
+        if val is None and args:
+            return args[0]
         return val
 
     def keys(self) -> list[str]:
-        self._ensure_loaded()
-        with _mem_lock:
-            return list(self._mem.keys())
+        try:
+            conn = self._get_conn()
+            rows = conn.execute("SELECT vlib_id FROM vlib_items").fetchall()
+            return [r[0] for r in rows]
+        except Exception as e:
+            logger.warning(f"VLibItemsCache.keys() failed: {e}")
+            return []
+
+    def delete_by_prefix_suffix(self, prefix: str, suffix: str) -> int:
+        """Delete rows where vlib_id starts with prefix AND ends with suffix. Returns count."""
+        try:
+            with _db_lock:
+                conn = self._get_conn()
+                cursor = conn.execute(
+                    "DELETE FROM vlib_items WHERE vlib_id LIKE ? AND vlib_id LIKE ?",
+                    (f"{prefix}%", f"%{suffix}"),
+                )
+                conn.commit()
+                return cursor.rowcount
+        except Exception as e:
+            logger.warning(f"VLibItemsCache.delete_by_prefix_suffix failed: {e}")
+            return 0
 
     # -- persistence --
 
@@ -212,11 +226,8 @@ def clear_vlib_items_cache(vlib_id: str) -> dict:
         vlib_items_cache.pop(vlib_id, None)
         removed_main = 1
 
-    suffix = f":{vlib_id}"
-    for k in vlib_items_cache.keys():
-        if isinstance(k, str) and k.startswith("random:") and k.endswith(suffix):
-            vlib_items_cache.pop(k, None)
-            removed_random += 1
+    # Use SQL LIKE to efficiently find and delete random:*:<vlib_id> keys
+    removed_random = vlib_items_cache.delete_by_prefix_suffix("random:", f":{vlib_id}")
 
     return {"main": removed_main, "random_scoped": removed_random}
 
