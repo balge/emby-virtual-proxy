@@ -416,6 +416,10 @@ async def refresh_vlib_cache(
                 all_items = _deduplicate(all_items)
                 if custom_sort_field and custom_sort_order:
                     _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
+                else:
+                    # DLA 合并顺序为「剧集块 + 电影块」，且 Ids 批量接口不保证时间序；未配置排序时
+                    # 默认按「最近媒体入库」降序，与 DateLastMediaAdded 规则语义一致。
+                    _apply_custom_sort(all_items, "DateLastMediaAdded", "desc")
                 slimmed = slim_items(all_items)
                 vlib_items_cache[vlib.id] = slimmed
                 logger.info(f"Cache refreshed (DLA) for '{vlib.name}': {len(slimmed)} items")
