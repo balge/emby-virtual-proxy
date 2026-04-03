@@ -21,6 +21,7 @@ from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
 from proxy_cache import vlib_items_cache, slim_items
+from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +365,6 @@ async def _handle_random_library(
     if source_libs and ignore_set:
         source_libs = [lid for lid in source_libs if lid not in ignore_set]
     if not source_libs:
-        from admin_server import get_real_libraries_hybrid_mode
         try:
             real_libs = await get_real_libraries_hybrid_mode()
             source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]

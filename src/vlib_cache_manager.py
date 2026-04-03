@@ -22,6 +22,7 @@ from models import AppConfig, VirtualLibrary
 from proxy_cache import vlib_items_cache, slim_items
 from proxy_handlers._filter_translator import translate_rules
 from proxy_handlers.handler_merger import merge_items_by_tmdb
+from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
 
@@ -303,7 +304,6 @@ async def _refresh_random_cache(
     ignore_set = config.disabled_library_ids
     source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
     if not source_libs:
-        from admin_server import get_real_libraries_hybrid_mode
         try:
             real_libs = await get_real_libraries_hybrid_mode()
             source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
@@ -416,7 +416,6 @@ async def refresh_vlib_cache(
         source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
 
         if vlib.resource_type == "all" and ignore_set and not source_libs:
-            from admin_server import get_real_libraries_hybrid_mode
             try:
                 real_libs = await get_real_libraries_hybrid_mode()
                 source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]

@@ -13,6 +13,7 @@ from . import handler_merger
 from . import handler_autogen
 from ._filter_translator import translate_rules
 from .handler_items import _apply_post_filter, _apply_custom_sort, _build_headers_to_forward, _fetch_all_items_for_parent
+from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
 
@@ -179,7 +180,6 @@ async def handle_home_latest_items(
         effective_source_libs = [lid for lid in effective_source_libs if lid not in ignore_set]
 
     if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
-        from admin_server import get_real_libraries_hybrid_mode
         try:
             real_libs = await get_real_libraries_hybrid_mode()
             effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]

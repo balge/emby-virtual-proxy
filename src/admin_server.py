@@ -34,6 +34,7 @@ from emby_webhook import (
     extract_item_dict,
 )
 import config_manager
+from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
 import cover_subprocess
 from db_manager import DBManager, RSS_CACHE_DB
 
@@ -95,7 +96,7 @@ async def _resolve_cover_cache_user_id(library_id: str) -> Optional[str]:
     uids = await _list_vlib_cache_user_ids_from_proxy(library_id)
     if uids:
         return uids[0]
-    users = await _fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users")
     if users:
         return users[0].get("Id")
     return None
@@ -372,7 +373,7 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
 
     # Get a reference user ID for the query
-    users = await _fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users")
     if not users:
         logger.warning("Cannot populate cache: no Emby users found.")
         return
@@ -571,71 +572,6 @@ async def _fetch_images_from_custom_path(custom_path: str, temp_dir: Path):
     if not any(temp_dir.iterdir()):
         raise HTTPException(status_code=500, detail="从自定义目录复制图片素材失败。")
 
-# --- 辅助函数：健壮地获取 Emby 数据 ---
-async def _fetch_from_emby(endpoint: str, params: Dict = None) -> List:
-    config = config_manager.load_config()
-    if not config.emby_url or not config.emby_api_key:
-        raise HTTPException(status_code=400, detail="请在系统设置中配置Emby服务器地址和API密钥。")
-    
-    headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
-    url = f"{config.emby_url.rstrip('/')}/emby{endpoint}"
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=headers, params=params, timeout=15) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    logger_msg = f"从Emby获取数据失败 (Endpoint: {endpoint}, Status: {response.status}): {error_text}"
-                    print(f"[PROXY-ADMIN-ERROR] {logger_msg}")
-                    raise HTTPException(status_code=response.status, detail=logger_msg)
-                
-                json_response = await response.json()
-                if isinstance(json_response, dict):
-                    return json_response.get("Items", json_response)
-                elif isinstance(json_response, list):
-                    return json_response
-                else:
-                    return []
-    except aiohttp.ClientError as e:
-        logger_msg = f"连接到Emby时发生网络错误 (Endpoint: {endpoint}): {e}"
-        print(f"[PROXY-ADMIN-ERROR] {logger_msg}")
-        raise HTTPException(status_code=502, detail=logger_msg)
-    except Exception as e:
-        logger_msg = f"处理Emby请求时发生未知错误 (Endpoint: {endpoint}): {e}"
-        print(f"[PROXY-ADMIN-ERROR] {logger_msg}")
-        raise HTTPException(status_code=500, detail=logger_msg)
-
-async def get_real_libraries_hybrid_mode() -> List:
-    all_real_libs = {}
-    try:
-        media_folders = await _fetch_from_emby("/Library/MediaFolders")
-        for lib in media_folders:
-            lib_id = lib.get("Id")
-            if lib_id:
-                all_real_libs[lib_id] = {
-                    "Id": lib_id, "Name": lib.get("Name"), "CollectionType": lib.get("CollectionType")
-                }
-    except HTTPException as e:
-        print(f"[PROXY-ADMIN-WARNING] 从 /Library/MediaFolders 获取数据失败: {e.detail}")
-
-    try:
-        user_items = await _fetch_from_emby("/Users")
-        if user_items:
-            ref_user_id = user_items[0].get("Id")
-            if ref_user_id:
-                views = await _fetch_from_emby(f"/Users/{ref_user_id}/Views")
-                for lib in views:
-                    lib_id = lib.get("Id")
-                    if lib_id and lib_id not in all_real_libs:
-                        all_real_libs[lib_id] = {
-                           "Id": lib_id, "Name": lib.get("Name"), "CollectionType": lib.get("CollectionType")
-                        }
-    except HTTPException as e:
-         print(f"[PROXY-ADMIN-WARNING] 从 /Users/.../Views 获取数据失败: {e.detail}")
-
-    return list(all_real_libs.values())
-
-
 async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> Optional[dict]:
     """GET Emby JSON，失败返回 None（不抛 HTTPException）。"""
     config = config_manager.load_config()
@@ -661,7 +597,7 @@ async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path
         return
 
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
-    users = await _fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users")
     if not users:
         return
     user_id = users[0].get("Id")
@@ -1053,7 +989,7 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
             logger.info(f"Cover refresh: refresh cache for representative user={rep} vlib={vlib.id}")
             await _notify_proxy_refresh_cache(vlib.id, user_ids=[rep])
         else:
-            users = await _fetch_from_emby("/Users")
+            users = await fetch_from_emby("/Users")
             uid0 = users[0].get("Id") if users else None
             if uid0:
                 logger.info(
@@ -1499,10 +1435,10 @@ async def get_emby_classifications():
 
     try:
         tasks = {
-            "collections": _fetch_from_emby("/Items", params={"IncludeItemTypes": "BoxSet", "Recursive": "true"}),
-            "genres": _fetch_from_emby("/Genres"),
-            "tags": _fetch_from_emby("/Tags"),
-            "studios": _fetch_from_emby("/Studios"),
+            "collections": fetch_from_emby("/Items", params={"IncludeItemTypes": "BoxSet", "Recursive": "true"}),
+            "genres": fetch_from_emby("/Genres"),
+            "tags": fetch_from_emby("/Tags"),
+            "studios": fetch_from_emby("/Studios"),
         }
         results_list = await asyncio.gather(*tasks.values())
         results_dict = dict(zip(tasks.keys(), results_list))
@@ -1518,10 +1454,10 @@ async def search_emby_persons(query: str = Query(None), page: int = Query(1)):
     try:
         if query:
             params = { "SearchTerm": query, "IncludeItemTypes": "Person", "Recursive": "true", "StartIndex": start_index, "Limit": PAGE_SIZE }
-            persons = await _fetch_from_emby("/Items", params=params)
+            persons = await fetch_from_emby("/Items", params=params)
         else:
             params = { "StartIndex": start_index, "Limit": PAGE_SIZE }
-            persons = await _fetch_from_emby("/Persons", params=params)
+            persons = await fetch_from_emby("/Persons", params=params)
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in persons]
     except HTTPException as e:
         raise e
@@ -1529,12 +1465,12 @@ async def search_emby_persons(query: str = Query(None), page: int = Query(1)):
 @api_router.get("/emby/resolve-item/{item_id}", tags=["Emby Helper"])
 async def resolve_emby_item(item_id: str):
     try:
-        users = await _fetch_from_emby("/Users")
+        users = await fetch_from_emby("/Users")
         if not users:
             raise HTTPException(status_code=500, detail="无法获取任何Emby用户用于查询")
         
         ref_user_id = users[0]['Id']
-        item_details = await _fetch_from_emby(f"/Users/{ref_user_id}/Items/{item_id}")
+        item_details = await fetch_from_emby(f"/Users/{ref_user_id}/Items/{item_id}")
         
         if not item_details:
              raise HTTPException(status_code=404, detail="在Emby中未找到指定的项目ID")
