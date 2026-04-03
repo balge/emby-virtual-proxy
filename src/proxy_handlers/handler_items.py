@@ -1,4 +1,14 @@
 # src/proxy_handlers/handler_items.py
+"""
+Virtual library items handler.
+
+Architecture (after refactor):
+- Full item lists are cached in vlib_items_cache (slimmed to ~300-600 bytes/item).
+- All browsing requests are served by sorting + slicing from the cached full list.
+- Cache is populated on startup / manual refresh / webhook / scheduled refresh.
+- On cache MISS (cold start, first browse before background refresh completes),
+  we fetch from Emby, slim, cache, then respond.
+"""
 
 import logging
 import json
@@ -8,17 +18,14 @@ from collections import Counter
 from datetime import datetime, timezone
 from fastapi import Request, Response
 from aiohttp import ClientSession
-from models import AppConfig, AdvancedFilter, VirtualLibrary
+from models import AppConfig, VirtualLibrary
 from typing import List, Any, Dict, Optional, Tuple
 
 from . import handler_merger, handler_views
 from ._filter_translator import translate_rules
 from .handler_rss import RssHandler
-from proxy_cache import (
-    vlib_items_cache,
-    get_vlib_page_cache,
-    set_vlib_page_cache,
-)
+from proxy_cache import vlib_items_cache, slim_items
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -37,45 +44,6 @@ SORT_FIELD_MAP: Dict[str, str] = {
 # ---------------------------------------------------------------------------
 # Small shared helpers
 # ---------------------------------------------------------------------------
-
-def _build_vlib_page_context_key(request: Request, user_id: str) -> str:
-    """Build a pagination-insensitive context key for virtual library page cache."""
-    exclude = {"StartIndex", "Limit", "X-Emby-Token", "api_key"}
-    pairs = sorted(
-        (k, v) for k, v in request.query_params.items() if k not in exclude
-    )
-    return f"user:{user_id}:q:{tuple(pairs)}"
-
-
-def _resolve_cache_ttl_seconds(vlib: VirtualLibrary, config: AppConfig) -> Optional[int]:
-    hours = vlib.cache_refresh_interval
-    if hours is None:
-        hours = config.cache_refresh_interval
-    if hours is None:
-        return None
-    try:
-        h = int(hours)
-    except Exception:
-        return None
-    return h * 3600 if h > 0 else None
-
-
-def _cache_current_page(
-    *,
-    vlib_id: str,
-    context_key: str,
-    start_idx: int,
-    limit_count: int,
-    total_record_count: int,
-    page_items: List[Dict[str, Any]],
-    ttl_seconds: Optional[int] = None,
-):
-    """Cache current page only."""
-    if limit_count <= 0:
-        return
-    data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
-    set_vlib_page_cache(vlib_id, context_key, start_idx, limit_count, data, ttl_seconds=ttl_seconds)
-
 
 def _build_headers_to_forward(request: Request) -> Dict[str, str]:
     """Build whitelisted headers dict for forwarding to Emby."""
@@ -362,8 +330,7 @@ def _apply_client_sort(
 ):
     """
     Apply client-requested sort (from query params SortBy/SortOrder).
-    When series_latest_map is available, DateCreated/DateLastMediaAdded sorts use
-    episode-derived dates for Series.  Mutates items in-place.
+    Mutates items in-place.
     """
     sort_by = request.query_params.get("SortBy", "SortName")
     sort_order = request.query_params.get("SortOrder", "Ascending")
@@ -374,7 +341,6 @@ def _apply_client_sort(
         if primary_sort in ("DateLastMediaAdded", "DateLastContentAdded"):
             _sort_by_effective_last_media_added(items, series_latest_map, sort_order)
         else:
-            # DateCreated: for Series use episode-derived date
             def _k(it: Dict[str, Any]):
                 if it.get("Type") == "Series":
                     sid = str(it.get("Id") or "")
@@ -394,11 +360,7 @@ def _apply_final_sort(
     custom_sort_order: Optional[str],
     series_latest_map: Optional[Dict[str, datetime]] = None,
 ):
-    """
-    Unified sort pipeline:
-    1. Apply client sort from request params
-    2. If advanced filter has custom sort, override with that
-    """
+    """Unified sort pipeline."""
     _apply_client_sort(items, request, series_latest_map)
     if custom_sort_field and custom_sort_order:
         if custom_sort_field == "DateLastMediaAdded" and series_latest_map:
@@ -408,37 +370,17 @@ def _apply_final_sort(
 
 
 # ---------------------------------------------------------------------------
-# Unified paginate + cache + respond
+# Respond helper
 # ---------------------------------------------------------------------------
 
-def _paginate_and_respond(
-    *,
+def _make_page_response(
     items: List[Dict[str, Any]],
     start_idx: int,
     limit_count: int,
-    vlib_id: str,
-    page_ctx_key: str,
-    page_ttl_seconds: Optional[int],
-    cache_page: bool = True,
 ) -> Response:
-    """Slice items for the requested page, cache, update vlib_items_cache, return Response."""
+    """Slice items for the requested page and return Response."""
     total_record_count = len(items)
     page_items = items[start_idx: start_idx + limit_count]
-
-    if cache_page and limit_count > 0:
-        _cache_current_page(
-            vlib_id=vlib_id,
-            context_key=page_ctx_key,
-            start_idx=start_idx,
-            limit_count=limit_count,
-            total_record_count=total_record_count,
-            page_items=page_items,
-            ttl_seconds=page_ttl_seconds,
-        )
-
-    if page_items:
-        vlib_items_cache[vlib_id] = page_items
-
     final_data = {"Items": page_items, "TotalRecordCount": total_record_count, "StartIndex": start_idx}
     return Response(
         content=json.dumps(final_data).encode("utf-8"),
@@ -448,8 +390,84 @@ def _paginate_and_respond(
 
 
 # ---------------------------------------------------------------------------
-# Data fetching helpers
+# Data fetching helpers (used for cache-miss / full refresh)
 # ---------------------------------------------------------------------------
+
+# Standard Fields to request from Emby (superset of what all clients need for poster wall)
+_FETCH_FIELDS = ",".join([
+    "ProviderIds", "Genres", "Tags", "Studios", "OfficialRatings",
+    "CommunityRating", "ProductionYear", "VideoRange", "Container",
+    "ProductionLocations", "DateLastMediaAdded", "DateCreated",
+    "ImageTags", "BackdropImageTags", "SortName", "PremiereDate",
+    "CriticRating", "SeriesStatus", "RunTimeTicks",
+])
+
+
+async def _fetch_all_items_for_parent(
+    session: ClientSession, search_url: str, base_params: Dict,
+    parent_id: str, headers: Dict,
+) -> List[Dict]:
+    """Fetch ALL items from a single parent library with pagination."""
+    all_items: List[Dict] = []
+    start_index = 0
+    limit = 400
+
+    fetch_params = dict(base_params)
+    fetch_params["ParentId"] = parent_id
+    fetch_params.pop("StartIndex", None)
+    fetch_params.pop("Limit", None)
+
+    while True:
+        batch_params = dict(fetch_params)
+        batch_params["StartIndex"] = str(start_index)
+        batch_params["Limit"] = str(limit)
+
+        async with session.get(search_url, params=batch_params, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"Fetch failed for ParentId={parent_id}, status={resp.status}")
+                break
+            data = await resp.json()
+            batch = data.get("Items", [])
+            if not batch:
+                break
+            all_items.extend(batch)
+            start_index += len(batch)
+            if len(batch) < limit:
+                break
+    return all_items
+
+
+async def _fetch_all_items_global(
+    session: ClientSession, search_url: str, base_params: Dict, headers: Dict,
+) -> List[Dict]:
+    """Fetch ALL items globally (no ParentId) with pagination."""
+    all_items: List[Dict] = []
+    start_index = 0
+    limit = 400
+
+    fetch_params = dict(base_params)
+    fetch_params.pop("StartIndex", None)
+    fetch_params.pop("Limit", None)
+
+    while True:
+        batch_params = dict(fetch_params)
+        batch_params["StartIndex"] = str(start_index)
+        batch_params["Limit"] = str(limit)
+
+        async with session.get(search_url, params=batch_params, headers=headers) as resp:
+            if resp.status != 200:
+                logger.error(f"Global fetch failed, status={resp.status}")
+                break
+            data = await resp.json()
+            batch = data.get("Items", [])
+            if not batch:
+                break
+            all_items.extend(batch)
+            start_index += len(batch)
+            if len(batch) < limit:
+                break
+    return all_items
+
 
 async def _fetch_recent_episodes_series_ids(
     *,
@@ -485,7 +503,6 @@ async def _fetch_recent_episodes_series_ids(
 
             async with session.get(search_url, params=p, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.warning(f"Episode scan failed (ParentId={parent_id}), status={resp.status}")
                     return local_ids, local_latest
                 data = await resp.json()
                 items = data.get("Items", []) if isinstance(data, dict) else []
@@ -561,7 +578,6 @@ async def _fetch_items_recent_by_datecreated(
 
             async with session.get(search_url, params=p, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.warning(f"Recent scan failed (ParentId={parent_id}), status={resp.status}")
                     return out
                 data = await resp.json()
                 items = data.get("Items", []) if isinstance(data, dict) else []
@@ -636,316 +652,143 @@ async def _get_items_by_ids_chunked(
     return out
 
 
-async def _fetch_items_for_parent_id(
-    session: ClientSession, method: str, search_url: str,
-    base_params: Dict, parent_id: str, headers: Dict
-) -> List[Dict]:
-    """Fetch all items from a single parent library with pagination."""
-    all_items = []
-    start_index = 0
-    limit = 200
-    fetch_params = base_params.copy()
-    fetch_params["ParentId"] = parent_id
-    fetch_params.pop("StartIndex", None)
-    fetch_params.pop("Limit", None)
-
-    while True:
-        batch_params = fetch_params.copy()
-        batch_params["StartIndex"] = str(start_index)
-        batch_params["Limit"] = str(limit)
-
-        async with session.request(method, search_url, params=batch_params, headers=headers) as resp:
-            if resp.status != 200:
-                logger.error(f"Source library fetch failed for ParentId={parent_id}, status={resp.status}")
-                break
-            batch_data = await resp.json()
-            batch_items = batch_data.get("Items", [])
-            if not batch_items:
-                break
-            all_items.extend(batch_items)
-            start_index += len(batch_items)
-            if len(batch_items) < limit:
-                break
-    return all_items
-
-
-async def _fetch_items_for_parent_id_up_to(
-    session: ClientSession,
-    method: str,
-    search_url: str,
-    base_params: Dict,
-    parent_id: str,
-    headers: Dict,
-    max_items: int,
-) -> tuple[List[Dict], int | None]:
-    """Fetch items from a single parent library up to max_items. Returns (items, total_record_count)."""
-    if max_items <= 0:
-        return [], None
-
-    collected: List[Dict] = []
-    start_index = 0
-    limit = 400
-    total_record_count: int | None = None
-
-    fetch_params = base_params.copy()
-    fetch_params["ParentId"] = parent_id
-    fetch_params.pop("StartIndex", None)
-    fetch_params.pop("Limit", None)
-
-    while len(collected) < max_items:
-        batch_params = fetch_params.copy()
-        batch_params["StartIndex"] = str(start_index)
-        batch_params["Limit"] = str(min(limit, max_items - len(collected)))
-
-        async with session.request(method, search_url, params=batch_params, headers=headers) as resp:
-            if resp.status != 200:
-                logger.error(f"Source library fetch failed for ParentId={parent_id}, status={resp.status}")
-                break
-            batch_data = await resp.json()
-            if total_record_count is None:
-                trc = batch_data.get("TotalRecordCount")
-                if isinstance(trc, int):
-                    total_record_count = trc
-            batch_items = batch_data.get("Items", [])
-            if not batch_items:
-                break
-            collected.extend(batch_items)
-            start_index += len(batch_items)
-            if len(batch_items) < int(batch_params["Limit"]):
-                break
-
-    return collected, total_record_count
-
-
 # ---------------------------------------------------------------------------
-# Optimized DateLastMediaAdded flow (unified for scoped and non-scoped)
+# Full data fetch → slim → cache → serve (used on cache miss)
 # ---------------------------------------------------------------------------
 
-async def _handle_dla_optimized_flow(
+async def _fetch_and_cache_full_items(
     *,
     request: Request,
-    method: str,
     found_vlib: VirtualLibrary,
-    new_params: Dict,
     user_id: str,
+    real_emby_url: str,
     session: ClientSession,
-    search_url: str,
-    headers_to_forward: Dict,
-    source_parent_ids: Optional[List[str]],
-    threshold_dt: datetime,
-    post_filter_rules: list,
-    filter_match_all: bool,
-    is_tmdb_merge_enabled: bool,
-    custom_sort_field: Optional[str],
-    custom_sort_order: Optional[str],
-    client_start_index: str,
-    client_limit: str,
-    page_ctx_key: str,
-    page_ttl_seconds: Optional[int],
-) -> Response:
-    """Unified DateLastMediaAdded optimized path for both scoped and non-scoped requests."""
-    logger.info(
-        f"Optimized DateLastMediaAdded: threshold={threshold_dt.isoformat()}, "
-        f"scoped={'yes' if source_parent_ids else 'no'}"
-    )
-
-    scan_base_params = dict(new_params)
-    for k in ("StartIndex", "Limit", "SortBy", "SortOrder"):
-        scan_base_params.pop(k, None)
-
-    ep_task = _fetch_recent_episodes_series_ids(
-        session=session,
-        search_url=search_url,
-        headers=headers_to_forward,
-        base_params=scan_base_params,
-        threshold_dt=threshold_dt,
-        source_parent_ids=source_parent_ids,
-    )
-    mv_task = _fetch_items_recent_by_datecreated(
-        session=session,
-        search_url=search_url,
-        headers=headers_to_forward,
-        base_params=scan_base_params,
-        threshold_dt=threshold_dt,
-        include_item_types="Movie,Video",
-        source_parent_ids=source_parent_ids,
-    )
-    (series_ids_hit, series_latest_map), movie_video_items = await asyncio.gather(ep_task, mv_task)
-
-    series_items: List[Dict] = []
-    if series_ids_hit:
-        series_items = await _get_items_by_ids_chunked(
-            session=session,
-            search_url=search_url,
-            headers=headers_to_forward,
-            ids=list(series_ids_hit),
-            fields=new_params.get("Fields", ""),
-        )
-
-    remaining_post_filters = [
-        r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"
-    ]
-    if remaining_post_filters:
-        series_items = _apply_post_filter(series_items, remaining_post_filters, filter_match_all)
-        movie_video_items = _apply_post_filter(movie_video_items, remaining_post_filters, filter_match_all)
-
-    combined = series_items + movie_video_items
-    if is_tmdb_merge_enabled:
-        combined = await handler_merger.merge_items_by_tmdb(combined)
-
-    combined = _deduplicate_by_id(combined)
-
-    _apply_final_sort(combined, request, custom_sort_field, custom_sort_order, series_latest_map)
-
-    start_idx = int(client_start_index)
-    limit_count = int(client_limit)
-    return _paginate_and_respond(
-        items=combined,
-        start_idx=start_idx,
-        limit_count=limit_count,
-        vlib_id=found_vlib.id,
-        page_ctx_key=page_ctx_key,
-        page_ttl_seconds=page_ttl_seconds,
-        cache_page=(method == "GET"),
-    )
-
-
-# ---------------------------------------------------------------------------
-# Source library scoped request handler
-# ---------------------------------------------------------------------------
-
-async def _handle_source_library_scoped_request(
-    request: Request, method: str, found_vlib: VirtualLibrary,
-    new_params: Dict, user_id: str, real_emby_url: str,
-    session: ClientSession, config: AppConfig,
-    client_start_index: str, client_limit: str,
-    page_ctx_key: str, page_ttl_seconds: Optional[int],
-) -> Response:
+    config: AppConfig,
+) -> List[Dict[str, Any]]:
     """
-    Handle virtual library requests scoped to specific real libraries.
-    Issues parallel requests per source library, merges results, then applies
-    post-filter / TMDB merge / pagination in the proxy.
+    Fetch the complete item list for a virtual library from Emby,
+    apply post-filters / TMDB merge / sort, slim, and store in cache.
+    Returns the full (slimmed) item list.
     """
-    logger.info(f"Source library scoping enabled for '{found_vlib.name}': {found_vlib.source_libraries}")
-
     headers_to_forward = _build_headers_to_forward(request)
     search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
+
+    # Build base params
+    base_params: Dict[str, Any] = {
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie,Series,Video",
+        "Fields": _FETCH_FIELDS,
+    }
+    token = request.query_params.get("X-Emby-Token")
+    if token:
+        base_params["X-Emby-Token"] = token
+
+    # Apply resource type
+    resource_map = {
+        "collection": "CollectionIds", "tag": "TagIds",
+        "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds",
+    }
+    if found_vlib.resource_type in resource_map:
+        base_params[resource_map[found_vlib.resource_type]] = found_vlib.resource_id
 
     # Parse advanced filter
     post_filter_rules, filter_match_all, custom_sort_field, custom_sort_order, emby_native_params = \
         _resolve_advanced_filter(found_vlib, config)
-    new_params.update(emby_native_params)
+    base_params.update(emby_native_params)
 
-    if new_params.get("IsMovie") == "true":
-        new_params["IncludeItemTypes"] = "Movie"
-    elif new_params.get("IsSeries") == "true":
-        new_params["IncludeItemTypes"] = "Series"
+    # Determine source libraries
+    ignore_set = config.disabled_library_ids
+    effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
+    if effective_source_libs and ignore_set:
+        effective_source_libs = [lid for lid in effective_source_libs if lid not in ignore_set]
 
-    is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
+    if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
+        from admin_server import get_real_libraries_hybrid_mode
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")
 
     # Check for optimized DateLastMediaAdded path
     date_last_media_added_rule = _extract_dla_rule(post_filter_rules, filter_match_all)
+    series_latest_map: Optional[Dict[str, datetime]] = None
+
     if date_last_media_added_rule:
         threshold_dt = _parse_iso_dt(getattr(date_last_media_added_rule, "value", None))
         if threshold_dt:
-            return await _handle_dla_optimized_flow(
-                request=request,
-                method=method,
-                found_vlib=found_vlib,
-                new_params=new_params,
-                user_id=user_id,
-                session=session,
-                search_url=search_url,
-                headers_to_forward=headers_to_forward,
-                source_parent_ids=list(found_vlib.source_libraries),
-                threshold_dt=threshold_dt,
-                post_filter_rules=post_filter_rules,
-                filter_match_all=filter_match_all,
-                is_tmdb_merge_enabled=is_tmdb_merge_enabled,
-                custom_sort_field=custom_sort_field,
-                custom_sort_order=custom_sort_order,
-                client_start_index=client_start_index,
-                client_limit=client_limit,
-                page_ctx_key=page_ctx_key,
-                page_ttl_seconds=page_ttl_seconds,
+            source_pids = effective_source_libs if effective_source_libs else None
+
+            scan_base = dict(base_params)
+            for k in ("StartIndex", "Limit", "SortBy", "SortOrder"):
+                scan_base.pop(k, None)
+
+            ep_task = _fetch_recent_episodes_series_ids(
+                session=session, search_url=search_url, headers=headers_to_forward,
+                base_params=scan_base, threshold_dt=threshold_dt, source_parent_ids=source_pids,
             )
+            mv_task = _fetch_items_recent_by_datecreated(
+                session=session, search_url=search_url, headers=headers_to_forward,
+                base_params=scan_base, threshold_dt=threshold_dt,
+                include_item_types="Movie,Video", source_parent_ids=source_pids,
+            )
+            (series_ids_hit, series_latest_map), movie_video_items = await asyncio.gather(ep_task, mv_task)
 
-    # --- Normal scoped path: fetch from each source library, merge, sort, paginate ---
-    enable_total = request.query_params.get("EnableTotalRecordCount", "true").lower() != "false"
-    start_idx = int(client_start_index)
-    limit_count = int(client_limit)
+            series_items: List[Dict] = []
+            if series_ids_hit:
+                series_items = await _get_items_by_ids_chunked(
+                    session=session, search_url=search_url, headers=headers_to_forward,
+                    ids=list(series_ids_hit), fields=base_params.get("Fields", ""),
+                )
 
-    async def _fetch_merge_sort_paginate(per_lib_target: int) -> tuple[list[dict], int, list[dict]]:
+            remaining_post_filters = [
+                r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"
+            ]
+            if remaining_post_filters:
+                series_items = _apply_post_filter(series_items, remaining_post_filters, filter_match_all)
+                movie_video_items = _apply_post_filter(movie_video_items, remaining_post_filters, filter_match_all)
+
+            all_items = series_items + movie_video_items
+            is_tmdb_merge = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
+            if is_tmdb_merge:
+                all_items = await handler_merger.merge_items_by_tmdb(all_items)
+            all_items = _deduplicate_by_id(all_items)
+
+            _apply_final_sort(all_items, request, custom_sort_field, custom_sort_order, series_latest_map)
+
+            slimmed = slim_items(all_items)
+            vlib_items_cache[found_vlib.id] = slimmed
+            logger.info(f"Cache populated (DLA path) for '{found_vlib.name}': {len(slimmed)} items")
+            return slimmed
+
+    # --- Standard full fetch ---
+    all_items: List[Dict] = []
+    if effective_source_libs:
         tasks = [
-            _fetch_items_for_parent_id_up_to(
-                session, method, search_url, new_params, pid, headers_to_forward, per_lib_target
-            )
-            for pid in found_vlib.source_libraries
+            _fetch_all_items_for_parent(session, search_url, base_params, pid, headers_to_forward)
+            for pid in effective_source_libs
         ]
         results = await asyncio.gather(*tasks)
-        fetched: List[Dict] = []
-        summed_totals_local = 0
-        for items, trc in results:
-            fetched.extend(items)
-            if enable_total and isinstance(trc, int):
-                summed_totals_local += trc
+        for items in results:
+            all_items.extend(items)
+    else:
+        all_items = await _fetch_all_items_global(session, search_url, base_params, headers_to_forward)
 
-        logger.info(
-            f"Source library scoped fetch complete: {len(fetched)} fetched items "
-            f"from {len(found_vlib.source_libraries)} libraries (per_lib_target={per_lib_target})."
-        )
+    all_items = _deduplicate_by_id(all_items)
 
-        merged = _deduplicate_by_id(fetched)
+    if post_filter_rules:
+        all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
 
-        if post_filter_rules:
-            merged = _apply_post_filter(merged, post_filter_rules, filter_match_all)
-        if is_tmdb_merge_enabled:
-            merged = await handler_merger.merge_items_by_tmdb(merged)
+    is_tmdb_merge = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
+    if is_tmdb_merge:
+        all_items = await handler_merger.merge_items_by_tmdb(all_items)
 
-        _apply_final_sort(merged, request, custom_sort_field, custom_sort_order)
+    _apply_final_sort(all_items, request, custom_sort_field, custom_sort_order)
 
-        page = merged[start_idx: start_idx + limit_count]
-        total_rc = summed_totals_local if enable_total else 0
-        return page, total_rc, merged
-
-    buffer = max(50, limit_count)
-    per_lib_target = start_idx + limit_count + buffer
-    paginated_items, total_record_count, merged_items = await _fetch_merge_sort_paginate(per_lib_target)
-
-    # Retry once with larger target if page is under-filled
-    if len(paginated_items) < limit_count:
-        retry_target = per_lib_target * 2
-        logger.info(
-            f"Scoped result under-filled (page={len(paginated_items)}/{limit_count}), "
-            f"retrying with per_lib_target={retry_target}."
-        )
-        paginated_items, total_record_count, merged_items = await _fetch_merge_sort_paginate(retry_target)
-
-    if paginated_items:
-        vlib_items_cache[found_vlib.id] = paginated_items
-
-    final_data = {
-        "Items": paginated_items,
-        "TotalRecordCount": total_record_count,
-        "StartIndex": start_idx,
-    }
-    if method == "GET" and limit_count > 0:
-        _cache_current_page(
-            vlib_id=found_vlib.id,
-            context_key=page_ctx_key,
-            start_idx=start_idx,
-            limit_count=limit_count,
-            total_record_count=total_record_count,
-            page_items=paginated_items,
-            ttl_seconds=page_ttl_seconds,
-        )
-    logger.info(f"Source library scoped result: total={total_record_count}, page={len(paginated_items)}")
-
-    return Response(
-        content=json.dumps(final_data).encode('utf-8'),
-        status_code=200,
-        media_type="application/json",
-    )
+    slimmed = slim_items(all_items)
+    vlib_items_cache[found_vlib.id] = slimmed
+    logger.info(f"Cache populated for '{found_vlib.name}': {len(slimmed)} items")
+    return slimmed
 
 
 # ---------------------------------------------------------------------------
@@ -1016,145 +859,132 @@ async def _handle_random_library(
     new_params: Dict, user_id: str, real_emby_url: str,
     session: ClientSession, config: AppConfig,
     client_start_index: str, client_limit: str,
-    page_ctx_key: str, page_ttl_seconds: Optional[int]
 ) -> Response:
     """Handle 'random' type virtual library."""
     cache_key = f"random:{user_id}:{found_vlib.id}"
     start_idx = int(client_start_index)
     limit_count = int(client_limit)
 
-    if method == "GET" and limit_count > 0:
-        cached_page = get_vlib_page_cache(found_vlib.id, page_ctx_key, start_idx, limit_count)
-        if cached_page:
-            logger.info(f"Random page cache HIT: vlib={found_vlib.id}, user={user_id}, start={start_idx}, limit={limit_count}")
-            return Response(content=json.dumps(cached_page).encode("utf-8"), status_code=200, media_type="application/json")
-
     cached = vlib_items_cache.get(cache_key)
     if cached:
         logger.info(f"Random library '{found_vlib.name}': serving cached result for user {user_id}")
-        all_items = cached
+        return _make_page_response(cached, start_idx, limit_count)
+
+    logger.info(f"Random library '{found_vlib.name}': generating new recommendations for user {user_id}")
+    headers_to_forward = _build_headers_to_forward(request)
+    search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
+
+    ignore_set = config.disabled_library_ids
+    source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
+    if source_libs and ignore_set:
+        source_libs = [lid for lid in source_libs if lid not in ignore_set]
+
+    if not source_libs:
+        from admin_server import get_real_libraries_hybrid_mode
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Random library: failed to fetch real libraries: {e}")
+
+    if not source_libs:
+        logger.warning(f"Random library '{found_vlib.name}': no libraries available.")
+        empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
+        return Response(content=json.dumps(empty).encode('utf-8'), status_code=200, media_type="application/json")
+
+    preferred_genres = await _fetch_user_genre_preferences(session, real_emby_url, user_id, headers_to_forward)
+    has_preferences = len(preferred_genres) > 0
+    if has_preferences:
+        logger.info(f"User {user_id} preferred genres: {preferred_genres[:5]}")
     else:
-        logger.info(f"Random library '{found_vlib.name}': generating new recommendations for user {user_id}")
-        headers_to_forward = _build_headers_to_forward(request)
-        search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
+        logger.info(f"User {user_id} has no play history, will use pure random selection.")
 
-        ignore_set = config.disabled_library_ids
-        source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
-        if source_libs and ignore_set:
-            source_libs = [lid for lid in source_libs if lid not in ignore_set]
+    fetch_params = {
+        "Recursive": "true",
+        "IsPlayed": "false",
+        "Fields": _FETCH_FIELDS,
+        "SortBy": "Random",
+        "SortOrder": "Ascending",
+    }
+    token = new_params.get("X-Emby-Token")
+    if token:
+        fetch_params["X-Emby-Token"] = token
 
-        if not source_libs:
-            from admin_server import get_real_libraries_hybrid_mode
+    all_movies: List[Dict] = []
+    all_series: List[Dict] = []
+
+    for pid in source_libs:
+        for item_type, target_list in [("Movie", all_movies), ("Series", all_series)]:
+            p = dict(fetch_params)
+            p["ParentId"] = pid
+            p["IncludeItemTypes"] = item_type
+            p["Limit"] = "300"
             try:
-                real_libs = await get_real_libraries_hybrid_mode()
-                source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+                async with session.get(search_url, params=p, headers=headers_to_forward) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        target_list.extend(data.get("Items", []))
             except Exception as e:
-                logger.error(f"Random library: failed to fetch real libraries: {e}")
+                logger.warning(f"Random fetch failed for ParentId={pid}, type={item_type}: {e}")
 
-        if not source_libs:
-            logger.warning(f"Random library '{found_vlib.name}': no libraries available.")
-            empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": 0}
-            return Response(content=json.dumps(empty).encode('utf-8'), status_code=200, media_type="application/json")
+    # Deduplicate
+    seen: set = set()
+    for lst in [all_movies, all_series]:
+        deduped = []
+        for item in lst:
+            iid = item.get("Id")
+            if iid and iid not in seen:
+                seen.add(iid)
+                deduped.append(item)
+        lst.clear()
+        lst.extend(deduped)
 
-        preferred_genres = await _fetch_user_genre_preferences(session, real_emby_url, user_id, headers_to_forward)
-        has_preferences = len(preferred_genres) > 0
-        if has_preferences:
-            logger.info(f"User {user_id} preferred genres: {preferred_genres[:5]}")
-        else:
-            logger.info(f"User {user_id} has no play history, will use pure random selection.")
+    logger.info(f"Random pool: {len(all_movies)} movies, {len(all_series)} series")
 
-        fetch_params = {
-            "Recursive": "true",
-            "IsPlayed": "false",
-            "Fields": "Genres,ProviderIds,ProductionYear,CommunityRating,DateCreated,ImageTags",
-            "SortBy": "Random",
-            "SortOrder": "Ascending",
-        }
-        token = new_params.get("X-Emby-Token")
-        if token:
-            fetch_params["X-Emby-Token"] = token
+    target_per_type = 15
+    if has_preferences:
+        selected_movies = _weighted_random_select(all_movies, preferred_genres, target_per_type)
+        selected_series = _weighted_random_select(all_series, preferred_genres, target_per_type)
+    else:
+        selected_movies = random_module.sample(all_movies, min(target_per_type, len(all_movies)))
+        selected_series = random_module.sample(all_series, min(target_per_type, len(all_series)))
 
-        all_movies = []
-        all_series = []
+    # Auto-fill if insufficient
+    if len(selected_movies) < target_per_type:
+        selected_ids = {item.get("Id") for item in selected_movies}
+        remaining_movies = [m for m in all_movies if m.get("Id") not in selected_ids]
+        fill_count = target_per_type - len(selected_movies)
+        selected_movies.extend(random_module.sample(remaining_movies, min(fill_count, len(remaining_movies))))
 
-        for pid in source_libs:
-            for item_type, target_list in [("Movie", all_movies), ("Series", all_series)]:
-                p = fetch_params.copy()
-                p["ParentId"] = pid
-                p["IncludeItemTypes"] = item_type
-                p["Limit"] = "300"
-                try:
-                    async with session.get(search_url, params=p, headers=headers_to_forward) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            target_list.extend(data.get("Items", []))
-                except Exception as e:
-                    logger.warning(f"Random fetch failed for ParentId={pid}, type={item_type}: {e}")
+    if len(selected_series) < target_per_type:
+        selected_ids = {item.get("Id") for item in selected_series}
+        remaining_series = [s for s in all_series if s.get("Id") not in selected_ids]
+        fill_count = target_per_type - len(selected_series)
+        selected_series.extend(random_module.sample(remaining_series, min(fill_count, len(remaining_series))))
 
-        # Deduplicate
-        seen = set()
-        for lst in [all_movies, all_series]:
-            deduped = []
-            for item in lst:
-                iid = item.get("Id")
-                if iid and iid not in seen:
-                    seen.add(iid)
-                    deduped.append(item)
-            lst.clear()
-            lst.extend(deduped)
+    total_selected = len(selected_movies) + len(selected_series)
+    if total_selected < 30:
+        all_selected_ids = {item.get("Id") for item in selected_movies + selected_series}
+        remaining_all = [i for i in all_movies + all_series if i.get("Id") not in all_selected_ids]
+        fill_count = 30 - total_selected
+        extra = random_module.sample(remaining_all, min(fill_count, len(remaining_all)))
+        selected_movies.extend(extra)
 
-        logger.info(f"Random pool: {len(all_movies)} movies, {len(all_series)} series")
+    all_items = selected_movies + selected_series
+    random_module.shuffle(all_items)
 
-        target_per_type = 15
-        if has_preferences:
-            selected_movies = _weighted_random_select(all_movies, preferred_genres, target_per_type)
-            selected_series = _weighted_random_select(all_series, preferred_genres, target_per_type)
-        else:
-            selected_movies = random_module.sample(all_movies, min(target_per_type, len(all_movies)))
-            selected_series = random_module.sample(all_series, min(target_per_type, len(all_series)))
-
-        # Auto-fill if insufficient
-        if len(selected_movies) < target_per_type:
-            selected_ids = {item.get("Id") for item in selected_movies}
-            remaining_movies = [m for m in all_movies if m.get("Id") not in selected_ids]
-            fill_count = target_per_type - len(selected_movies)
-            selected_movies.extend(random_module.sample(remaining_movies, min(fill_count, len(remaining_movies))))
-
-        if len(selected_series) < target_per_type:
-            selected_ids = {item.get("Id") for item in selected_series}
-            remaining_series = [s for s in all_series if s.get("Id") not in selected_ids]
-            fill_count = target_per_type - len(selected_series)
-            selected_series.extend(random_module.sample(remaining_series, min(fill_count, len(remaining_series))))
-
-        total_selected = len(selected_movies) + len(selected_series)
-        if total_selected < 30:
-            all_selected_ids = {item.get("Id") for item in selected_movies + selected_series}
-            remaining_all = [i for i in all_movies + all_series if i.get("Id") not in all_selected_ids]
-            fill_count = 30 - total_selected
-            extra = random_module.sample(remaining_all, min(fill_count, len(remaining_all)))
-            selected_movies.extend(extra)
-
-        all_items = selected_movies + selected_series
-        random_module.shuffle(all_items)
-
-        logger.info(
-            f"Random library '{found_vlib.name}': selected {len(selected_movies)} movies + "
-            f"{len(selected_series)} series for user {user_id}"
-        )
-
-        if all_items:
-            vlib_items_cache[cache_key] = all_items
-            vlib_items_cache[found_vlib.id] = all_items
-
-    return _paginate_and_respond(
-        items=all_items,
-        start_idx=start_idx,
-        limit_count=limit_count,
-        vlib_id=found_vlib.id,
-        page_ctx_key=page_ctx_key,
-        page_ttl_seconds=page_ttl_seconds,
-        cache_page=(method == "GET"),
+    logger.info(
+        f"Random library '{found_vlib.name}': selected {len(selected_movies)} movies + "
+        f"{len(selected_series)} series for user {user_id}"
     )
+
+    # Slim and cache
+    slimmed = slim_items(all_items)
+    if slimmed:
+        vlib_items_cache[cache_key] = slimmed
+        vlib_items_cache[found_vlib.id] = slimmed
+
+    return _make_page_response(slimmed, start_idx, limit_count)
 
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +1030,7 @@ async def handle_virtual_library_items(
             return await handler_views.handle_view_injection(request, full_path, method, real_emby_url, session, config)
         return None
 
-    logger.info(f"Intercepted virtual library '{found_vlib.name}', starting optimized filter flow.")
+    logger.info(f"Intercepted virtual library '{found_vlib.name}', type={found_vlib.resource_type}")
 
     user_id = params.get("UserId")
     if not user_id:
@@ -1221,51 +1051,8 @@ async def handle_virtual_library_items(
         empty = {"Items": [], "TotalRecordCount": 0, "StartIndex": start_idx}
         return Response(content=json.dumps(empty).encode("utf-8"), status_code=200, media_type="application/json")
 
-    # --- Page cache check ---
-    page_start = int(params.get("StartIndex", 0))
-    page_limit = int(params.get("Limit", 50))
-    page_ctx_key = _build_vlib_page_context_key(request, user_id)
-    page_ttl_seconds = _resolve_cache_ttl_seconds(found_vlib, config)
-    if method == "GET" and found_vlib.resource_type not in ("rsshub", "random") and page_limit > 0:
-        cached = get_vlib_page_cache(found_vlib.id, page_ctx_key, page_start, page_limit)
-        if cached:
-            logger.info(f"Vlib page cache HIT: vlib={found_vlib.id}, start={page_start}, limit={page_limit}")
-            return Response(content=json.dumps(cached).encode("utf-8"), status_code=200, media_type="application/json")
-        logger.info(f"Vlib page cache MISS: vlib={found_vlib.id}, start={page_start}, limit={page_limit}")
-
-    # --- Build request params ---
-    new_params = {}
-    client_start_index = params.get("StartIndex", "0")
-    client_limit = params.get("Limit", "50")
-    safe_params_to_inherit = [
-        "SortBy", "SortOrder", "Fields", "EnableImageTypes", "ImageTypeLimit",
-        "EnableTotalRecordCount", "X-Emby-Token", "StartIndex", "Limit"
-    ]
-    for key in safe_params_to_inherit:
-        if key in params:
-            new_params[key] = params[key]
-
-    required_fields = [
-        "ProviderIds", "Genres", "Tags", "Studios", "People", "OfficialRatings",
-        "CommunityRating", "ProductionYear", "VideoRange", "Container",
-        "ProductionLocations", "DateLastMediaAdded", "DateCreated"
-    ]
-    if "Fields" in new_params:
-        existing_fields = set(new_params["Fields"].split(','))
-        missing_fields = [f for f in required_fields if f not in existing_fields]
-        if missing_fields:
-            new_params["Fields"] += "," + ",".join(missing_fields)
-    else:
-        new_params["Fields"] = ",".join(required_fields)
-
-    new_params["Recursive"] = "true"
-    new_params["IncludeItemTypes"] = "Movie,Series,Video"
-
     # --- RSS type: delegate to RssHandler ---
-    resource_map = {"collection": "CollectionIds", "tag": "TagIds", "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds"}
-    if found_vlib.resource_type in resource_map:
-        new_params[resource_map[found_vlib.resource_type]] = found_vlib.resource_id
-    elif found_vlib.resource_type == "rsshub":
+    if found_vlib.resource_type == "rsshub":
         rss_handler = RssHandler()
         response_data = await rss_handler.handle(
             request_path=full_path,
@@ -1292,191 +1079,37 @@ async def handle_virtual_library_items(
 
     # --- Random type ---
     if found_vlib.resource_type == "random":
+        new_params: Dict[str, Any] = {}
+        token = params.get("X-Emby-Token")
+        if token:
+            new_params["X-Emby-Token"] = token
         return await _handle_random_library(
             request, method, found_vlib, new_params, user_id,
-            real_emby_url, session, config, client_start_index, client_limit,
-            page_ctx_key, page_ttl_seconds
+            real_emby_url, session, config,
+            params.get("StartIndex", "0"), params.get("Limit", "50"),
         )
 
-    # --- Source library scoping ---
-    ignore_set = config.disabled_library_ids
-    effective_source_libs = list(found_vlib.source_libraries) if found_vlib.source_libraries else []
-    if effective_source_libs and ignore_set:
-        effective_source_libs = [lid for lid in effective_source_libs if lid not in ignore_set]
+    # --- Standard virtual library: serve from cache, fetch on miss ---
+    start_idx = int(params.get("StartIndex", 0))
+    limit_count = int(params.get("Limit", 50))
 
-    if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
-        from admin_server import get_real_libraries_hybrid_mode
-        try:
-            real_libs = await get_real_libraries_hybrid_mode()
-            effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
-        except Exception as e:
-            logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")
+    cached_items = vlib_items_cache.get(found_vlib.id)
+    if cached_items is not None:
+        logger.info(f"Cache HIT for '{found_vlib.name}': {len(cached_items)} items, serving page start={start_idx} limit={limit_count}")
+        # Re-sort in memory based on client request
+        items = list(cached_items)  # shallow copy for sorting
+        _apply_client_sort(items, request)
+        return _make_page_response(items, start_idx, limit_count)
 
-    if effective_source_libs and found_vlib.resource_type != "rsshub":
-        found_vlib_copy = found_vlib.model_copy(update={"source_libraries": effective_source_libs})
-        return await _handle_source_library_scoped_request(
-            request, method, found_vlib_copy, new_params, user_id,
-            real_emby_url, session, config, client_start_index, client_limit,
-            page_ctx_key, page_ttl_seconds,
-        )
+    # Cache MISS: fetch full data, slim, cache, then serve
+    logger.info(f"Cache MISS for '{found_vlib.name}', fetching full data from Emby...")
+    all_items = await _fetch_and_cache_full_items(
+        request=request,
+        found_vlib=found_vlib,
+        user_id=user_id,
+        real_emby_url=real_emby_url,
+        session=session,
+        config=config,
+    )
 
-
-    # --- Non-scoped paths: advanced filter, standard, TMDB merge ---
-    post_filter_rules, filter_match_all, custom_sort_field, custom_sort_order, emby_native_params = \
-        _resolve_advanced_filter(found_vlib, config)
-    new_params.update(emby_native_params)
-
-    date_last_media_added_rule = _extract_dla_rule(post_filter_rules, filter_match_all)
-
-    if new_params.get("IsMovie") == "true":
-        new_params["IncludeItemTypes"] = "Movie"
-    elif new_params.get("IsSeries") == "true":
-        new_params["IncludeItemTypes"] = "Series"
-
-    is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
-
-    search_url = f"{real_emby_url}/emby/Users/{user_id}/Items"
-    headers_to_forward = _build_headers_to_forward(request)
-
-    logger.debug(f"Final optimized request to Emby: URL={search_url}, Params={new_params}")
-
-    # --- Optimized DateLastMediaAdded flow ---
-    if date_last_media_added_rule:
-        threshold_dt = _parse_iso_dt(getattr(date_last_media_added_rule, "value", None))
-        if threshold_dt:
-            # Scope to source libraries if configured (respect disabled list)
-            source_parent_ids = list(found_vlib.source_libraries) if found_vlib.source_libraries else None
-            if source_parent_ids and ignore_set:
-                source_parent_ids = [lid for lid in source_parent_ids if lid not in ignore_set]
-            if source_parent_ids and len(source_parent_ids) == 0:
-                source_parent_ids = None
-
-            return await _handle_dla_optimized_flow(
-                request=request,
-                method=method,
-                found_vlib=found_vlib,
-                new_params=new_params,
-                user_id=user_id,
-                session=session,
-                search_url=search_url,
-                headers_to_forward=headers_to_forward,
-                source_parent_ids=source_parent_ids,
-                threshold_dt=threshold_dt,
-                post_filter_rules=post_filter_rules,
-                filter_match_all=filter_match_all,
-                is_tmdb_merge_enabled=is_tmdb_merge_enabled,
-                custom_sort_field=custom_sort_field,
-                custom_sort_order=custom_sort_order,
-                client_start_index=client_start_index,
-                client_limit=client_limit,
-                page_ctx_key=page_ctx_key,
-                page_ttl_seconds=page_ttl_seconds,
-            )
-
-    # --- Standard pagination path (no TMDB merge, or has post-filter rules) ---
-    if not is_tmdb_merge_enabled or post_filter_rules:
-        if is_tmdb_merge_enabled and post_filter_rules:
-            logger.warning("TMDB merge enabled but post-filter rules exist; merge will be partial (current page only).")
-
-        async with session.request(method, search_url, params=new_params, headers=headers_to_forward) as resp:
-            if resp.status != 200:
-                content = await resp.read()
-                return Response(content=content, status_code=resp.status, headers=resp.headers)
-
-            content = await resp.read()
-            response_headers = {
-                k: v for k, v in resp.headers.items()
-                if k.lower() not in ('transfer-encoding', 'connection', 'content-encoding', 'content-length')
-            }
-
-            if "application/json" in resp.headers.get("Content-Type", ""):
-                try:
-                    data = json.loads(content)
-                    items_list = data.get("Items", [])
-
-                    if post_filter_rules:
-                        items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
-                    if is_tmdb_merge_enabled:
-                        items_list = await handler_merger.merge_items_by_tmdb(items_list)
-                    if custom_sort_field and custom_sort_order:
-                        items_list = _apply_custom_sort(items_list, custom_sort_field, custom_sort_order)
-
-                    data["Items"] = items_list
-                    logger.info(f"Native filter/merge done. Emby total: {data.get('TotalRecordCount')}, page items: {len(items_list)}")
-
-                    if method == "GET":
-                        try:
-                            start_idx = int(data.get("StartIndex", client_start_index))
-                            total_record_count = int(data.get("TotalRecordCount", len(items_list)))
-                            _cache_current_page(
-                                vlib_id=found_vlib.id,
-                                context_key=page_ctx_key,
-                                start_idx=start_idx,
-                                limit_count=page_limit,
-                                total_record_count=total_record_count,
-                                page_items=items_list,
-                                ttl_seconds=page_ttl_seconds,
-                            )
-                        except Exception:
-                            pass
-
-                    if items_list:
-                        vlib_items_cache[found_vlib.id] = items_list
-
-                    content = json.dumps(data).encode('utf-8')
-                except (json.JSONDecodeError, Exception) as e:
-                    logger.error(f"Error processing response: {e}")
-
-            return Response(content=content, status_code=resp.status, headers=response_headers)
-
-    # --- TMDB merge full-fetch path ---
-    else:
-        logger.info("TMDB merge enabled, starting full data fetch...")
-        all_items = []
-        start_index = 0
-        limit = 200
-
-        new_params.pop("StartIndex", None)
-        new_params.pop("Limit", None)
-
-        while True:
-            fetch_params = new_params.copy()
-            fetch_params["StartIndex"] = str(start_index)
-            fetch_params["Limit"] = str(limit)
-
-            async with session.request(method, search_url, params=fetch_params, headers=headers_to_forward) as resp:
-                if resp.status != 200:
-                    logger.error(f"Batch fetch failed, status: {resp.status}")
-                    return Response(
-                        content=json.dumps({"Items": [], "TotalRecordCount": 0}).encode("utf-8"),
-                        status_code=200,
-                        media_type="application/json",
-                    )
-                batch_data = await resp.json()
-                batch_items = batch_data.get("Items", [])
-                if not batch_items:
-                    break
-                all_items.extend(batch_items)
-                start_index += len(batch_items)
-                if len(batch_items) < limit:
-                    break
-
-        logger.info(f"Full data fetch complete, total {len(all_items)} items.")
-
-        merged_items = await handler_merger.merge_items_by_tmdb(all_items)
-        if custom_sort_field and custom_sort_order:
-            merged_items = _apply_custom_sort(merged_items, custom_sort_field, custom_sort_order)
-
-        start_idx = int(client_start_index)
-        limit_count = int(client_limit)
-        return _paginate_and_respond(
-            items=merged_items,
-            start_idx=start_idx,
-            limit_count=limit_count,
-            vlib_id=found_vlib.id,
-            page_ctx_key=page_ctx_key,
-            page_ttl_seconds=page_ttl_seconds,
-            cache_page=(method == "GET"),
-        )
-
-    return None
+    return _make_page_response(all_items, start_idx, limit_count)

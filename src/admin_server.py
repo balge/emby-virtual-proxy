@@ -30,7 +30,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import docker
-from proxy_cache import api_cache, vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache
+from proxy_cache import api_cache, vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache, slim_items
 from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
     parse_request_payload,
@@ -284,9 +284,11 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     params = {
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
-        # DateLastMediaAdded: needed when advanced filter custom-sorts by「最近入库」(same semantics as handler_items._get_value_for_rule)
-        "Fields": "ImageTags,ProviderIds,Genres,DateCreated,DateLastMediaAdded",
-        "Limit": "200",
+        "Fields": "ImageTags,ProviderIds,Genres,Tags,Studios,OfficialRatings,"
+                  "CommunityRating,ProductionYear,VideoRange,Container,"
+                  "ProductionLocations,DateLastMediaAdded,DateCreated,"
+                  "BackdropImageTags,SortName,PremiereDate,CriticRating,"
+                  "SeriesStatus,RunTimeTicks",
         "SortBy": "DateCreated",
         "SortOrder": "Descending",
     }
@@ -317,21 +319,35 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     all_items = []
     try:
         async with aiohttp.ClientSession() as session:
+            async def _fetch_all_pages(fetch_params):
+                """Fetch all pages from Emby."""
+                items = []
+                start = 0
+                limit = 400
+                while True:
+                    p = dict(fetch_params)
+                    p["StartIndex"] = str(start)
+                    p["Limit"] = str(limit)
+                    async with session.get(base_url, params=p, headers=headers, timeout=30) as resp:
+                        if resp.status != 200:
+                            break
+                        data = await resp.json()
+                        batch = data.get("Items", [])
+                        if not batch:
+                            break
+                        items.extend(batch)
+                        start += len(batch)
+                        if len(batch) < limit:
+                            break
+                return items
+
             if source_libs:
-                # Fetch from each source library
                 for pid in source_libs:
                     p = dict(params)
                     p["ParentId"] = pid
-                    async with session.get(base_url, params=p, headers=headers, timeout=30) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            all_items.extend(data.get("Items", []))
+                    all_items.extend(await _fetch_all_pages(p))
             else:
-                # Fetch globally (for 'all', 'random', or no source_libraries)
-                async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        all_items.extend(data.get("Items", []))
+                all_items = await _fetch_all_pages(params)
     except Exception as e:
         logger.error(f"Failed to populate cache for '{vlib.name}': {e}")
         return
@@ -355,8 +371,8 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
             )
 
     if deduped:
-        vlib_items_cache[vlib.id] = deduped
-        logger.info(f"Populated cache for '{vlib.name}': {len(deduped)} items.")
+        vlib_items_cache[vlib.id] = slim_items(deduped)
+        logger.info(f"Populated cache for '{vlib.name}': {len(deduped)} items (slimmed).")
     else:
         logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
 

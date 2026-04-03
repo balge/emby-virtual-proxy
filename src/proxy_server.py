@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Tuple, Dict
 
 # 【【【 同时修改这一行，从 proxy_cache 导入缓存与失效函数 】】】
-from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache
+from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache, slim_items
 import config_manager
 from proxy_handlers import (
     handler_system, 
