@@ -8,10 +8,8 @@ and store directly into vlib_items_cache.
 Runs inside the proxy process. Admin triggers refresh via HTTP API.
 
 Triggered by:
-- Proxy startup (background warmup)
-- Admin manual refresh (via proxy internal API)
+- First user browse (lazy fill) or admin-triggered refresh (via proxy internal API)
 - Admin webhook handler (via proxy internal API)
-- Admin scheduled refresh (via proxy internal API)
 """
 
 import logging
@@ -26,6 +24,33 @@ from proxy_handlers._filter_translator import translate_rules
 from proxy_handlers.handler_merger import merge_items_by_tmdb
 
 logger = logging.getLogger(__name__)
+
+
+async def resolve_emby_user_id(
+    session: aiohttp.ClientSession,
+    config: AppConfig,
+    user_id: Optional[str] = None,
+) -> Optional[str]:
+    """Return user_id if provided; otherwise first Emby user id."""
+    if user_id:
+        return user_id
+    if not config.emby_url or not config.emby_api_key:
+        return None
+    headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
+    try:
+        async with session.get(
+            f"{config.emby_url.rstrip('/')}/emby/Users",
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status == 200:
+                users = await resp.json()
+                if users:
+                    return users[0].get("Id")
+    except Exception as e:
+        logger.error(f"resolve_emby_user_id failed: {e}")
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Fields to request from Emby (superset for poster wall + filter + sort)
@@ -314,7 +339,7 @@ async def _refresh_random_cache(
 
     slimmed = slim_items(selected)
     if slimmed:
-        vlib_items_cache[vlib.id] = slimmed
+        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
     logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
     return len(slimmed)
 
@@ -331,8 +356,9 @@ async def refresh_vlib_cache(
     user_id: str | None = None,
 ) -> int:
     """
-    Fetch complete item list from Emby, slim, store in vlib_items_cache.
-    Runs inside proxy process. Returns item count (0 if skipped/failed).
+    Fetch complete item list from Emby for the given user, slim, store on disk
+    under config/vlib/users/{user_id}/{vlib_id}/. Runs inside proxy process.
+    Returns item count (0 if skipped/failed).
     """
     if vlib.resource_type == "rsshub":
         return 0
@@ -348,20 +374,10 @@ async def refresh_vlib_cache(
     try:
         headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
 
+        user_id = await resolve_emby_user_id(session, config, user_id)
         if not user_id:
-            try:
-                async with session.get(
-                    f"{config.emby_url.rstrip('/')}/emby/Users",
-                    headers=headers, timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status == 200:
-                        users = await resp.json()
-                        if users:
-                            user_id = users[0].get("Id")
-            except Exception as e:
-                logger.error(f"Failed to get Emby users: {e}")
-            if not user_id:
-                return 0
+            logger.warning(f"Cannot refresh cache for '{vlib.name}': no Emby user id.")
+            return 0
 
         # --- Random library: fetch unplayed items, pick 30 randomly ---
         if vlib.resource_type == "random":
@@ -432,7 +448,7 @@ async def refresh_vlib_cache(
                     # 默认按「最近媒体入库」降序，与 DateLastMediaAdded 规则语义一致。
                     _apply_custom_sort(all_items, "DateLastMediaAdded", "desc")
                 slimmed = slim_items(all_items)
-                vlib_items_cache[vlib.id] = slimmed
+                vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
                 logger.info(f"Cache refreshed (DLA) for '{vlib.name}': {len(slimmed)} items")
                 return len(slimmed)
 
@@ -462,7 +478,7 @@ async def refresh_vlib_cache(
             _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
 
         slimmed = slim_items(all_items)
-        vlib_items_cache[vlib.id] = slimmed
+        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
         logger.info(f"Cache refreshed for '{vlib.name}': {len(slimmed)} items")
         return len(slimmed)
 
@@ -513,24 +529,10 @@ async def _do_dla_fetch(session, url, headers, base_params, threshold_dt, source
 # ---------------------------------------------------------------------------
 
 async def refresh_all_vlib_caches(config: AppConfig) -> Dict[str, int]:
-    """Refresh caches for all non-hidden, non-RSS virtual libraries."""
+    """Refresh on-disk cache for all non-hidden, non-RSS vlibs (first Emby user only)."""
     results: Dict[str, int] = {}
     async with aiohttp.ClientSession() as session:
-        user_id = None
-        if config.emby_url and config.emby_api_key:
-            headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
-            try:
-                async with session.get(
-                    f"{config.emby_url.rstrip('/')}/emby/Users",
-                    headers=headers, timeout=aiohttp.ClientTimeout(total=15),
-                ) as resp:
-                    if resp.status == 200:
-                        users = await resp.json()
-                        if users:
-                            user_id = users[0].get("Id")
-            except Exception as e:
-                logger.error(f"Failed to get Emby users: {e}")
-
+        user_id = await resolve_emby_user_id(session, config, None)
         if not user_id:
             logger.warning("Cannot refresh caches: no Emby user found.")
             return results

@@ -54,9 +54,8 @@ async def handle_home_latest_items(
     # Random library branch: reuse cached random items for latest
     if found_vlib.resource_type == 'random':
         from proxy_cache import vlib_items_cache
-        cache_key = f"random:{user_id}:{found_vlib.id}"
-        cached = vlib_items_cache.get(cache_key)
-        if cached:
+        cached = vlib_items_cache.get_for_user(user_id, found_vlib.id)
+        if cached is not None:
             limit = int(params.get("Limit", 20))
             items = cached[:limit]
         else:

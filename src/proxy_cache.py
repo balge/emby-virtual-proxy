@@ -2,264 +2,211 @@
 """
 Virtual library cache layer.
 
-Design:
-- Full item lists are persisted in SQLite as gzip-compressed BLOBs and read on-demand.
-- This avoids ~500 MB RAM overhead and reduces DB size by ~60-70% vs plain JSON TEXT.
-- Browsing requests: decompress + json.loads per-request (~20-80 ms, IO savings offset
-  decompression cost).
-- Items are "slimmed" before caching to keep per-item size low (~300-600 bytes).
+Per-user per-virtual-library SQLite files under config/vlib/users/{user_id}/{vlib_id}/items.db.
+No long-lived connections: open → read/write → close to avoid memory growth from many handles.
+
+Legacy config/vlib_cache.db (single table) is no longer written; old rows are ignored.
 """
 
+from __future__ import annotations
+
 import json
+import re
+import logging
+import shutil
 import sqlite3
 import threading
-import logging
 import zlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
+from typing import List, Dict, Any, Optional
+
 from cachetools import TTLCache
 
 logger = logging.getLogger(__name__)
 
-# API response cache: short-lived, no persistence needed
-# Default TTL: 2 hours (used by admin_server for general API caching)
 api_cache = TTLCache(maxsize=500, ttl=7200)
 
 # ---------------------------------------------------------------------------
 # Field slimming
 # ---------------------------------------------------------------------------
 
-# Fields needed for poster-wall display + filtering + sorting.
-# Everything else (Overview, People, MediaSources, Chapters, etc.) is dropped.
 KEEP_FIELDS = frozenset({
-    # Display
     "Id", "Name", "SortName", "Type", "ServerId",
     "ImageTags", "BackdropImageTags",
     "ProductionYear", "CommunityRating", "OfficialRating",
     "RunTimeTicks", "UserData", "SeriesName",
     "IsFolder", "CollectionType",
-    # Filter & sort
     "ProviderIds", "Genres", "Tags", "Studios",
     "DateCreated", "DateLastMediaAdded", "PremiereDate",
     "Container", "VideoRange", "ProductionLocations",
     "CriticRating", "SeriesStatus",
-    # Needed by some clients / handlers
     "ParentId", "SeriesId", "SeasonId", "SeasonName",
 })
 
 
 def slim_item(item: dict) -> dict:
-    """Strip an Emby item dict down to only the fields we need."""
     return {k: item[k] for k in KEEP_FIELDS if k in item}
 
 
 def slim_items(items: list[dict]) -> list[dict]:
-    """Slim a list of items."""
     return [slim_item(it) for it in items]
 
 
 # ---------------------------------------------------------------------------
-# Persistent cache backed by SQLite
+# Per-user per-vlib SQLite (filesystem layout)
 # ---------------------------------------------------------------------------
 
-_DB_PATH = Path(__file__).parent.parent / "config" / "vlib_cache.db"
-_db_lock = threading.Lock()
+# config/ is sibling to src/ at runtime image layout /app/config
+VLIB_USER_CACHE_ROOT = Path(__file__).resolve().parent.parent / "config" / "vlib" / "users"
+
+_write_lock = threading.Lock()
 
 
-def _get_db() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(_DB_PATH), check_same_thread=False)
+def _safe_fs_segment(part: str, name: str) -> str:
+    """Map Emby ids to a single path segment (no slashes / traversal)."""
+    if not part or not str(part).strip():
+        raise ValueError(f"empty {name}")
+    s = re.sub(r"[^a-zA-Z0-9\-]", "_", str(part).strip())
+    if not s or s.replace("_", "") == "":
+        raise ValueError(f"invalid {name} for vlib cache path")
+    return s
+
+
+def _items_db_path(user_id: str, vlib_id: str) -> Path:
+    u = _safe_fs_segment(user_id, "user_id")
+    v = _safe_fs_segment(vlib_id, "vlib_id")
+    return VLIB_USER_CACHE_ROOT / u / v / "items.db"
+
+
+def list_user_ids_with_vlib_cache(vlib_id: str) -> list[str]:
+    """
+    Emby user ids that already have items.db for this virtual library
+    (i.e. have browsed this vlib at least once).
+    """
+    try:
+        v_seg = _safe_fs_segment(vlib_id, "vlib_id")
+    except ValueError:
+        return []
+    root = VLIB_USER_CACHE_ROOT
+    if not root.is_dir():
+        return []
+    out: list[str] = []
+    for user_dir in sorted(root.iterdir()):
+        if not user_dir.is_dir():
+            continue
+        if (user_dir / v_seg / "items.db").is_file():
+            out.append(user_dir.name)
+    return out
+
+
+def _init_items_db(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA journal_mode=WAL")
-    return conn
-
-
-def _init_db():
-    _DB_PATH.parent.mkdir(exist_ok=True)
-    conn = _get_db()
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS vlib_items (
-            vlib_id TEXT PRIMARY KEY,
-            items_json TEXT,
-            items_data BLOB,
+        CREATE TABLE IF NOT EXISTS items_payload (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            items_z BLOB NOT NULL,
             updated_at TEXT NOT NULL
         )
     """)
-    # Migrate: add items_data column if missing (upgrade from TEXT-only schema)
-    cols = {row[1] for row in conn.execute("PRAGMA table_info(vlib_items)").fetchall()}
-    if "items_data" not in cols:
-        conn.execute("ALTER TABLE vlib_items ADD COLUMN items_data BLOB")
-        conn.commit()
-        logger.info("Added items_data BLOB column to vlib_items table.")
-    # Migrate old TEXT rows → compressed BLOB, then clear TEXT column
-    rows = conn.execute(
-        "SELECT vlib_id, items_json FROM vlib_items WHERE items_data IS NULL AND items_json IS NOT NULL"
-    ).fetchall()
-    if rows:
-        for vlib_id, items_json in rows:
-            compressed = zlib.compress(items_json.encode("utf-8"), level=6)
-            conn.execute(
-                "UPDATE vlib_items SET items_data = ?, items_json = NULL WHERE vlib_id = ?",
-                (compressed, vlib_id),
-            )
-        conn.commit()
-        logger.info(f"Migrated {len(rows)} vlib_items rows from TEXT to compressed BLOB.")
-    conn.execute("DROP TABLE IF EXISTS random_recommend")
-    conn.commit()
-    conn.close()
 
 
-_init_db()
-
-
-class VLibItemsCache:
+class VLibUserItemsCache:
     """
-    DB-only virtual library item cache.
-
-    All reads go directly to SQLite (WAL mode) — no in-memory copy.
-    This trades ~20-80 ms per read for massive memory savings
-    (40 MB DB was inflating to ~500 MB in RAM after json.loads).
+    One compressed JSON blob per (user_id, vlib_id), stored on disk.
+    Reads/writes do not keep connections open.
     """
 
-    def __init__(self):
-        self._conn: sqlite3.Connection | None = None
-        logger.info("VLibItemsCache initialized (DB-only mode, no in-memory loading).")
-
-    def _get_conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = _get_db()
-        return self._conn
-
-    # -- read --
-
-    def get(self, key: str, default=None) -> list[dict] | None:
+    def get_for_user(self, user_id: str, vlib_id: str) -> Optional[List[Dict[str, Any]]]:
+        path = _items_db_path(user_id, vlib_id)
+        if not path.is_file():
+            return None
         try:
-            conn = self._get_conn()
-            row = conn.execute(
-                "SELECT items_data, items_json FROM vlib_items WHERE vlib_id = ?", (key,)
-            ).fetchone()
-            if row is None:
-                return default
-            items_data, items_json = row
-            if items_data is not None:
-                return json.loads(zlib.decompress(items_data))
-            if items_json is not None:
-                return json.loads(items_json)
-            return default
+            conn = sqlite3.connect(str(path), timeout=60.0, check_same_thread=False)
+            try:
+                _init_items_db(conn)
+                row = conn.execute(
+                    "SELECT items_z FROM items_payload WHERE id = 1"
+                ).fetchone()
+                if not row or row[0] is None:
+                    return None
+                return json.loads(zlib.decompress(row[0]))
+            finally:
+                conn.close()
         except Exception as e:
-            logger.warning(f"VLibItemsCache.get({key}) failed: {e}")
-            return default
+            logger.warning("VLibUserItemsCache.get_for_user(%s, %s) failed: %s", user_id, vlib_id, e)
+            return None
 
-    def __contains__(self, key: str) -> bool:
-        try:
-            conn = self._get_conn()
-            row = conn.execute(
-                "SELECT 1 FROM vlib_items WHERE vlib_id = ? LIMIT 1", (key,)
-            ).fetchone()
-            return row is not None
-        except Exception as e:
-            logger.warning(f"VLibItemsCache.__contains__({key}) failed: {e}")
-            return False
-
-    def __getitem__(self, key: str) -> list[dict]:
-        val = self.get(key)
-        if val is None:
-            raise KeyError(key)
-        return val
-
-    # -- write --
-
-    def set(self, key: str, items: list[dict], *, persist: bool = True):
-        if persist:
-            self._persist(key, items)
-
-    def __setitem__(self, key: str, value: list[dict]):
-        self._persist(key, value)
-
-    def pop(self, key: str, *args):
-        val = self.get(key)
-        self._delete_from_db(key)
-        if val is None and args:
-            return args[0]
-        return val
-
-    def keys(self) -> list[str]:
-        try:
-            conn = self._get_conn()
-            rows = conn.execute("SELECT vlib_id FROM vlib_items").fetchall()
-            return [r[0] for r in rows]
-        except Exception as e:
-            logger.warning(f"VLibItemsCache.keys() failed: {e}")
-            return []
-
-    def delete_by_prefix_suffix(self, prefix: str, suffix: str) -> int:
-        """Delete rows where vlib_id starts with prefix AND ends with suffix. Returns count."""
-        try:
-            with _db_lock:
-                conn = self._get_conn()
-                cursor = conn.execute(
-                    "DELETE FROM vlib_items WHERE vlib_id LIKE ? AND vlib_id LIKE ?",
-                    (f"{prefix}%", f"%{suffix}"),
-                )
-                conn.commit()
-                return cursor.rowcount
-        except Exception as e:
-            logger.warning(f"VLibItemsCache.delete_by_prefix_suffix failed: {e}")
-            return 0
-
-    # -- persistence --
-
-    def _persist(self, key: str, value: list[dict]):
-        try:
-            raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
-            compressed = zlib.compress(raw, level=6)
-            with _db_lock:
-                conn = self._get_conn()
+    def set_for_user(self, user_id: str, vlib_id: str, items: List[Dict[str, Any]]) -> None:
+        path = _items_db_path(user_id, vlib_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        raw = json.dumps(items, ensure_ascii=False).encode("utf-8")
+        compressed = zlib.compress(raw, level=6)
+        updated = datetime.utcnow().isoformat()
+        with _write_lock:
+            conn = sqlite3.connect(str(path), timeout=60.0, check_same_thread=False)
+            try:
+                _init_items_db(conn)
                 conn.execute(
-                    "INSERT OR REPLACE INTO vlib_items (vlib_id, items_data, items_json, updated_at) VALUES (?, ?, NULL, ?)",
-                    (key, compressed, datetime.utcnow().isoformat()),
+                    "INSERT OR REPLACE INTO items_payload (id, items_z, updated_at) VALUES (1, ?, ?)",
+                    (compressed, updated),
                 )
                 conn.commit()
-        except Exception as e:
-            logger.warning(f"Failed to persist vlib_items for {key}: {e}")
+            finally:
+                conn.close()
 
-    def _delete_from_db(self, key: str):
+    def has_for_user(self, user_id: str, vlib_id: str) -> bool:
+        path = _items_db_path(user_id, vlib_id)
+        return path.is_file()
+
+    def delete_for_user(self, user_id: str, vlib_id: str) -> bool:
+        path = _items_db_path(user_id, vlib_id)
+        parent = path.parent
         try:
-            with _db_lock:
-                conn = self._get_conn()
-                conn.execute("DELETE FROM vlib_items WHERE vlib_id = ?", (key,))
-                conn.commit()
+            if parent.is_dir():
+                shutil.rmtree(parent, ignore_errors=True)
+                return True
         except Exception as e:
-            logger.warning(f"Failed to delete vlib_items for {key}: {e}")
+            logger.warning("delete_for_user failed %s/%s: %s", user_id, vlib_id, e)
+        return False
+
+    def delete_vlib_all_users(self, vlib_id: str) -> int:
+        """Remove this vlib's cache directory under every user. Returns user dirs removed."""
+        v_seg = _safe_fs_segment(vlib_id, "vlib_id")
+        removed = 0
+        if not VLIB_USER_CACHE_ROOT.is_dir():
+            return 0
+        with _write_lock:
+            for user_dir in VLIB_USER_CACHE_ROOT.iterdir():
+                if not user_dir.is_dir():
+                    continue
+                target = user_dir / v_seg
+                if target.is_dir():
+                    try:
+                        shutil.rmtree(target, ignore_errors=True)
+                        removed += 1
+                    except Exception as e:
+                        logger.warning("delete_vlib_all_users: %s: %s", target, e)
+        return removed
 
 
-# ---------------------------------------------------------------------------
-# Module-level cache instance
-# ---------------------------------------------------------------------------
-vlib_items_cache = VLibItemsCache()
+vlib_items_cache = VLibUserItemsCache()
 
-
-# ---------------------------------------------------------------------------
-# Cache invalidation helpers
-# ---------------------------------------------------------------------------
 
 def clear_vlib_items_cache(vlib_id: str) -> dict:
     """
-    Clear all vlib_items_cache entries related to this virtual library:
-    - Main key: <vlib_id>
-    - Random per-user keys: random:<user_id>:<vlib_id>
+    Drop on-disk cache for this virtual library for all users.
+    Returns user_ids that had cache *before* deletion (for targeted refresh).
     """
-    removed_main = 0
-    removed_random = 0
-
-    if vlib_id in vlib_items_cache:
-        vlib_items_cache.pop(vlib_id, None)
-        removed_main = 1
-
-    # Use SQL LIKE to efficiently find and delete random:*:<vlib_id> keys
-    removed_random = vlib_items_cache.delete_by_prefix_suffix("random:", f":{vlib_id}")
-
-    return {"main": removed_main, "random_scoped": removed_random}
+    user_ids = list_user_ids_with_vlib_cache(vlib_id)
+    n = vlib_items_cache.delete_vlib_all_users(vlib_id)
+    return {
+        "main": n,
+        "random_scoped": 0,
+        "user_dirs_removed": n,
+        "user_ids": user_ids,
+    }
 
 
 def clear_vlib_page_cache(vlib_id: str):
-    """No-op kept for backward compatibility. Page cache has been removed."""
     logger.debug(f"clear_vlib_page_cache({vlib_id}) called (no-op, page cache removed)")

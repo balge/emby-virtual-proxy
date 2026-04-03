@@ -1,19 +1,20 @@
 # src/proxy_server.py (最终修复版)
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 import aiohttp
 # 【【【 修改这一行 】】】
-from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Tuple, Dict
 
 # 【【【 同时修改这一行，从 proxy_cache 导入缓存与失效函数 】】】
-from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache
+from proxy_cache import vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache, list_user_ids_with_vlib_cache
 import config_manager
 from proxy_handlers import (
     handler_system, 
@@ -51,18 +52,6 @@ async def lifespan(app: FastAPI):
     app.state.aiohttp_session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
     logger.info("Global AIOHTTP ClientSession created.")
 
-    # Background warmup: populate caches for all virtual libraries
-    async def _warmup():
-        await asyncio.sleep(2)  # Wait for server to be ready
-        try:
-            from vlib_cache_manager import refresh_all_vlib_caches
-            cfg = config_manager.load_config()
-            results = await refresh_all_vlib_caches(cfg)
-            logger.info(f"Startup cache warmup complete: {results}")
-        except Exception as e:
-            logger.error(f"Startup cache warmup failed: {e}")
-    asyncio.create_task(_warmup())
-
     yield
     await app.state.aiohttp_session.close()
     logger.info("Global AIOHTTP ClientSession closed.")
@@ -77,20 +66,31 @@ else:
     logger.warning(f"Generated covers directory not found at {covers_dir}, skipping mount.")
 
 @proxy_app.get("/api/internal/get-cached-items/{library_id}")
-async def get_cached_items_for_admin(library_id: str):
+async def get_cached_items_for_admin(
+    request: Request,
+    library_id: str,
+    user_id: str | None = Query(None, description="Emby user id; default first server user"),
+):
     """
-    一个内部API，专门用于给admin服务提供已缓存的虚拟库项目列表。
+    内部 API：按用户读取虚拟库全量缓存（config/vlib/users/{user}/{vlib}/items.db）。
     """
-    cached_items = vlib_items_cache.get(library_id)
-    if not cached_items:
-        logger.warning(f"Admin请求缓存，但未找到库 {library_id} 的缓存。")
+    config = config_manager.load_config()
+    session = request.app.state.aiohttp_session
+    from vlib_cache_manager import resolve_emby_user_id
+
+    uid = await resolve_emby_user_id(session, config, user_id)
+    if not uid:
+        raise HTTPException(status_code=400, detail="无法解析 Emby 用户，请传入 user_id 查询参数。")
+    cached_items = vlib_items_cache.get_for_user(uid, library_id)
+    if cached_items is None:
+        logger.warning(f"Admin 请求缓存: 无 user={uid} vlib={library_id}")
         raise HTTPException(
             status_code=404,
-            detail="未找到该虚拟库的项目缓存。请先在Emby客户端中实际浏览一次该虚拟库，以生成缓存数据。"
+            detail="未找到该用户下该虚拟库的缓存。请先用对应账号在客户端浏览该库，或触发刷新。",
         )
-    
-    logger.info(f"Admin成功获取到库 {library_id} 的 {len(cached_items)} 条缓存项目。")
-    return JSONResponse(content={"Items": cached_items})
+
+    logger.info(f"Admin 读取缓存 user={uid} vlib={library_id} count={len(cached_items)}")
+    return JSONResponse(content={"Items": cached_items, "UserId": uid})
 
 
 def _allow_internal_cache_invalidate(request: Request) -> bool:
@@ -106,8 +106,7 @@ def _allow_internal_cache_invalidate(request: Request) -> bool:
 @proxy_app.post("/api/internal/invalidate-vlib-cache/{library_id}")
 async def internal_invalidate_vlib_cache(request: Request, library_id: str):
     """
-    Internal endpoint: drop proxy-process in-memory caches for one virtual library.
-    Needed because admin/proxy are separate processes with separate RAM.
+    Internal endpoint: remove on-disk per-user caches for one virtual library (config/vlib/users/*/vlib_id).
     """
     if not _allow_internal_cache_invalidate(request):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -120,31 +119,61 @@ async def internal_invalidate_vlib_cache(request: Request, library_id: str):
 @proxy_app.post("/api/internal/set-cached-items/{library_id}")
 async def internal_set_cached_items(request: Request, library_id: str):
     """
-    Internal endpoint: write slimmed items into proxy-process vlib_items_cache.
-    Called by admin/vlib_cache_manager after fetching from Emby.
+    Internal endpoint: write slimmed items for one user + virtual library on disk.
+    Body: {"Items": [...], "UserId": "<optional; default first Emby user>"}
     """
     if not _allow_internal_cache_invalidate(request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
     body = await request.json()
     items = body.get("Items", [])
-    vlib_items_cache[library_id] = items
-    logger.info(f"Internal set-cached-items: {library_id} = {len(items)} items")
-    return JSONResponse(content={"vlib_id": library_id, "count": len(items)})
+    config = config_manager.load_config()
+    session = request.app.state.aiohttp_session
+    from vlib_cache_manager import resolve_emby_user_id
+
+    uid = await resolve_emby_user_id(session, config, body.get("UserId"))
+    if not uid:
+        raise HTTPException(status_code=400, detail="无法解析 Emby 用户，请在 Body 中提供 UserId。")
+    vlib_items_cache.set_for_user(uid, library_id, items)
+    logger.info(f"Internal set-cached-items: user={uid} vlib={library_id} count={len(items)}")
+    return JSONResponse(content={"vlib_id": library_id, "UserId": uid, "count": len(items)})
 
 
 @proxy_app.get("/api/internal/cache-exists/{library_id}")
-async def internal_cache_exists(library_id: str):
-    """Check if a vlib cache entry exists in proxy memory."""
-    exists = library_id in vlib_items_cache
-    return JSONResponse(content={"exists": exists})
+async def internal_cache_exists(
+    request: Request,
+    library_id: str,
+    user_id: str | None = Query(None),
+):
+    """Check if on-disk cache exists for user + virtual library."""
+    config = config_manager.load_config()
+    session = request.app.state.aiohttp_session
+    from vlib_cache_manager import resolve_emby_user_id
+
+    uid = await resolve_emby_user_id(session, config, user_id)
+    if not uid:
+        return JSONResponse(content={"exists": False, "UserId": None})
+    exists = vlib_items_cache.has_for_user(uid, library_id)
+    return JSONResponse(content={"exists": exists, "UserId": uid})
 
 
 @proxy_app.post("/api/internal/refresh-vlib-cache/{library_id}")
-async def internal_refresh_vlib_cache(request: Request, library_id: str):
+async def internal_refresh_vlib_cache(
+    request: Request,
+    library_id: str,
+    user_id: str | None = Query(
+        None,
+        description="Single Emby user (optional). If set, only this user is refreshed.",
+    ),
+):
     """
-    Internal endpoint: fetch full data from Emby, slim, and store in proxy cache.
-    Called by admin process to trigger cache refresh without admin holding the data.
+    Refresh on-disk cache from Emby.
+
+    - JSON body ``{"user_ids": ["...", ...]}``: refresh exactly those users (e.g. after invalidate).
+      Empty list → no-op.
+    - Query ``user_id=``: refresh one user only.
+    - Otherwise: refresh every user who **currently** has a cache file for this vlib
+      (no cache on disk → nothing to do).
     """
     if not _allow_internal_cache_invalidate(request):
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -154,9 +183,57 @@ async def internal_refresh_vlib_cache(request: Request, library_id: str):
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
+    session = request.app.state.aiohttp_session
     from vlib_cache_manager import refresh_vlib_cache
-    count = await refresh_vlib_cache(vlib, config)
-    return JSONResponse(content={"vlib_id": library_id, "count": count})
+
+    body_user_ids = None
+    raw = await request.body()
+    if raw:
+        try:
+            parsed = json.loads(raw.decode("utf-8"))
+            if isinstance(parsed, dict) and "user_ids" in parsed:
+                u = parsed.get("user_ids")
+                if u is not None and not isinstance(u, list):
+                    raise HTTPException(status_code=400, detail="user_ids must be a JSON array")
+                body_user_ids = [str(x) for x in u] if isinstance(u, list) else []
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if body_user_ids is not None:
+        to_refresh = body_user_ids
+    elif user_id:
+        to_refresh = [user_id]
+    else:
+        to_refresh = list_user_ids_with_vlib_cache(library_id)
+
+    if not to_refresh:
+        logger.info(f"Internal refresh vlib={library_id}: no users to refresh")
+        return JSONResponse(
+            content={"vlib_id": library_id, "counts": {}, "refreshed_users": 0},
+        )
+
+    counts: Dict[str, int] = {}
+    for uid in to_refresh:
+        try:
+            counts[uid] = await refresh_vlib_cache(vlib, config, session=session, user_id=uid)
+        except Exception as e:
+            logger.error(f"refresh_vlib_cache user={uid} vlib={library_id}: {e}", exc_info=True)
+            counts[uid] = 0
+
+    total = sum(counts.values())
+    logger.info(
+        f"Internal refresh vlib={library_id} users={len(to_refresh)} total_items={total}"
+    )
+    return JSONResponse(
+        content={
+            "vlib_id": library_id,
+            "counts": counts,
+            "refreshed_users": len(to_refresh),
+            "total": total,
+        },
+    )
 
 # --- 【【【 核心修复：重写 WebSocket 代理 】】】 ---
 @proxy_app.websocket("/{full_path:path}")

@@ -3,9 +3,8 @@
 Virtual library items handler.
 
 Architecture:
-- Full item lists live in vlib_items_cache (populated by vlib_cache_manager).
-- Browsing requests: read from cache → sort → slice → respond.
-- Cache MISS: trigger on-demand fetch via vlib_cache_manager, then serve.
+- Full item lists: on-disk config/vlib/users/{user}/{vlib}/items.db (per-user UserData).
+- Browsing: read → sort → slice. MISS: refresh_vlib_cache for that user, then serve.
 """
 
 import logging
@@ -351,10 +350,8 @@ async def _handle_random_library(
 ) -> Response:
     """Handle 'random' type virtual library."""
     from vlib_cache_manager import FETCH_FIELDS
-    cache_key = f"random:{user_id}:{found_vlib.id}"
-
-    cached = vlib_items_cache.get(cache_key)
-    if cached:
+    cached = vlib_items_cache.get_for_user(user_id, found_vlib.id)
+    if cached is not None:
         logger.info(f"Random '{found_vlib.name}': cache HIT for user {user_id}")
         return _make_page_response(cached, start_idx, limit_count)
 
@@ -433,8 +430,7 @@ async def _handle_random_library(
 
     slimmed = slim_items(all_items)
     if slimmed:
-        vlib_items_cache[cache_key] = slimmed
-        vlib_items_cache[found_vlib.id] = slimmed
+        vlib_items_cache.set_for_user(user_id, found_vlib.id, slimmed)
 
     return _make_page_response(slimmed, start_idx, limit_count)
 
@@ -530,19 +526,19 @@ async def handle_virtual_library_items(
     start_idx = int(params.get("StartIndex", 0))
     limit_count = int(params.get("Limit", 50))
 
-    cached_items = vlib_items_cache.get(found_vlib.id)
+    cached_items = vlib_items_cache.get_for_user(user_id, found_vlib.id)
     if cached_items is not None:
-        logger.info(f"Cache HIT '{found_vlib.name}': {len(cached_items)} items")
+        logger.info(f"Cache HIT '{found_vlib.name}' user={user_id}: {len(cached_items)} items")
         items = list(cached_items)
         _apply_client_sort(items, request)
         return _make_page_response(items, start_idx, limit_count)
 
-    # Cache MISS: fetch on demand via cache manager
-    logger.info(f"Cache MISS '{found_vlib.name}', fetching from Emby...")
+    # Cache MISS: fetch on demand via cache manager (per-user on-disk cache)
+    logger.info(f"Cache MISS '{found_vlib.name}' user={user_id}, fetching from Emby...")
     from vlib_cache_manager import refresh_vlib_cache
-    await refresh_vlib_cache(found_vlib, config)
+    await refresh_vlib_cache(found_vlib, config, user_id=user_id)
 
-    cached_items = vlib_items_cache.get(found_vlib.id)
+    cached_items = vlib_items_cache.get_for_user(user_id, found_vlib.id)
     if cached_items is not None:
         items = list(cached_items)
         _apply_client_sort(items, request)

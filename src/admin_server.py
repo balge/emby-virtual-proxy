@@ -25,7 +25,7 @@ from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from proxy_cache import api_cache
+from proxy_cache import api_cache, vlib_items_cache, slim_items
 from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
     parse_request_payload,
@@ -46,8 +46,12 @@ from proxy_handlers.handler_items import _apply_custom_sort
 logger = logging.getLogger(__name__)
 
 
-async def _notify_proxy_invalidate_cache(library_id: str) -> None:
-    """通知 proxy 进程清除指定虚拟库的内存缓存（admin 与 proxy 为不同进程）。"""
+async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
+    """
+    通知 proxy 清除该虚拟库在磁盘上的所有用户缓存。
+    返回 JSON 中的 items.user_ids：清除**前**已有缓存的用户（供随后按用户重填）。
+    """
+    out: dict = {"user_ids": []}
     try:
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
@@ -55,20 +59,32 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> None:
         headers = {"X-Internal-Token": token} if token else {}
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
-                if resp.status != 200:
+                if resp.status == 200:
+                    data = await resp.json()
+                    items = data.get("items") or {}
+                    out["user_ids"] = list(items.get("user_ids") or [])
+                else:
                     text = await resp.text()
                     logger.warning(f"PROXY_INVALIDATE vlib={library_id} HTTP {resp.status}: {text[:300]}")
     except Exception as e:
         logger.warning(f"PROXY_INVALIDATE vlib={library_id} failed: {e}")
+    return out
 
 
 async def _get_cached_items_from_proxy(library_id: str) -> list[dict] | None:
-    """从 proxy 进程读取虚拟库缓存条目列表。"""
+    """从 proxy 读取指定虚拟库缓存（默认服务器首个 Emby 用户）。"""
     try:
+        users = await _fetch_from_emby("/Users")
+        if not users:
+            return None
+        uid = users[0].get("Id")
+        if not uid:
+            return None
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/get-cached-items/{library_id}"
+        params = {"user_id": uid}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("Items", [])
@@ -79,12 +95,19 @@ async def _get_cached_items_from_proxy(library_id: str) -> list[dict] | None:
 
 
 async def _cache_exists_in_proxy(library_id: str) -> bool:
-    """检查 proxy 进程中是否存在指定虚拟库的缓存。"""
+    """检查 proxy 上是否存在「首个 Emby 用户」下该虚拟库的磁盘缓存。"""
     try:
+        users = await _fetch_from_emby("/Users")
+        if not users:
+            return False
+        uid = users[0].get("Id")
+        if not uid:
+            return False
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/cache-exists/{library_id}"
+        params = {"user_id": uid}
         async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data.get("exists", False)
@@ -93,18 +116,33 @@ async def _cache_exists_in_proxy(library_id: str) -> bool:
     return False
 
 
-async def _notify_proxy_refresh_cache(library_id: str) -> None:
-    """通知 proxy 进程刷新指定虚拟库的缓存（proxy 自己从 Emby 拉取数据）。"""
+async def _notify_proxy_refresh_cache(
+    library_id: str,
+    user_ids: list[str] | None = None,
+) -> None:
+    """
+    通知 proxy 从 Emby 重填缓存。
+
+    - ``user_ids`` 非 None：只刷新这些用户（典型：invalidate 返回的列表；空列表则不刷新任何人）。
+    - ``user_ids`` 为 None：刷新**当前磁盘上已有该库缓存**的所有用户（无人访问过则跳过）。
+    """
     try:
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/refresh-vlib-cache/{library_id}"
         token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
         headers = {"X-Internal-Token": token} if token else {}
+        post_kw: dict = {"timeout": aiohttp.ClientTimeout(total=600)}
+        if user_ids is not None:
+            post_kw["json"] = {"user_ids": user_ids}
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+            async with session.post(url, headers=headers, **post_kw) as resp:
                 if resp.status == 200:
                     data = await resp.json()
-                    logger.info(f"PROXY_REFRESH vlib={library_id} count={data.get('count', 0)}")
+                    logger.info(
+                        f"PROXY_REFRESH vlib={library_id} "
+                        f"users={data.get('refreshed_users', data.get('count', '?'))} "
+                        f"total={data.get('total', data.get('count', '?'))}"
+                    )
                 else:
                     text = await resp.text()
                     logger.warning(f"PROXY_REFRESH vlib={library_id} HTTP {resp.status}: {text[:300]}")
@@ -419,8 +457,8 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
             )
 
     if deduped:
-        vlib_items_cache[vlib.id] = slim_items(deduped)
-        logger.info(f"Populated cache for '{vlib.name}': {len(deduped)} items (slimmed).")
+        vlib_items_cache.set_for_user(user_id, vlib.id, slim_items(deduped))
+        logger.info(f"Populated on-disk cache for '{vlib.name}' user={user_id}: {len(deduped)} items (slimmed).")
     else:
         logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
 
@@ -767,20 +805,19 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
-    # 通知 proxy 进程清内存缓存
-    await _notify_proxy_invalidate_cache(library_id)
+    inv = await _notify_proxy_invalidate_cache(library_id)
+    had_users = list(inv.get("user_ids") or [])
 
     logger.info(
         f"VLIB_REFRESH CACHE_CLEARED vlib={library_id} "
-        f"api_cache={len(keys_to_remove)}"
+        f"api_cache={len(keys_to_remove)} prior_cached_users={len(had_users)}"
     )
 
     if vlib.resource_type == "rsshub":
         await refresh_rss_library_internal(vlib)
     else:
-        # Notify proxy to refresh cache (proxy fetches from Emby itself)
-        # For random libraries, this generates a fresh random 30 items.
-        await _notify_proxy_refresh_cache(library_id)
+        # 仅对「此前已有磁盘缓存」的用户重拉；从未访问过该库的用户不建缓存
+        await _notify_proxy_refresh_cache(library_id, user_ids=had_users)
 
     await _regenerate_cover_for_vlib(vlib)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
@@ -990,12 +1027,8 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        # Proxy uses vlib_cache.db (table vlib_items), not rss/douban DBs. A row can
-        # exist with 0 items—or another db file was restored—so "exists" alone must not skip refresh.
-        if not await _cache_exists_in_proxy(vlib.id):
-            await _notify_proxy_refresh_cache(vlib.id)
-        elif not await _get_cached_items_from_proxy(vlib.id):
-            await _notify_proxy_refresh_cache(vlib.id)
+        # 只刷新磁盘上已有该库缓存的用户（与手动/自动刷新策略一致）
+        await _notify_proxy_refresh_cache(vlib.id, user_ids=None)
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
