@@ -101,6 +101,29 @@ async def internal_invalidate_vlib_cache(request: Request, library_id: str):
     clear_vlib_page_cache(library_id)
     return JSONResponse(content={"vlib_id": library_id, "items": items_stats})
 
+
+@proxy_app.post("/api/internal/set-cached-items/{library_id}")
+async def internal_set_cached_items(request: Request, library_id: str):
+    """
+    Internal endpoint: write slimmed items into proxy-process vlib_items_cache.
+    Called by admin/vlib_cache_manager after fetching from Emby.
+    """
+    if not _allow_internal_cache_invalidate(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    body = await request.json()
+    items = body.get("Items", [])
+    vlib_items_cache[library_id] = items
+    logger.info(f"Internal set-cached-items: {library_id} = {len(items)} items")
+    return JSONResponse(content={"vlib_id": library_id, "count": len(items)})
+
+
+@proxy_app.get("/api/internal/cache-exists/{library_id}")
+async def internal_cache_exists(library_id: str):
+    """Check if a vlib cache entry exists in proxy memory."""
+    exists = library_id in vlib_items_cache
+    return JSONResponse(content={"exists": exists})
+
 # --- 【【【 核心修复：重写 WebSocket 代理 】】】 ---
 @proxy_app.websocket("/{full_path:path}")
 async def websocket_proxy(client_ws: WebSocket, full_path: str):

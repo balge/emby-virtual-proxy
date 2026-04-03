@@ -30,7 +30,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 import docker
-from proxy_cache import api_cache, vlib_items_cache, clear_vlib_items_cache, clear_vlib_page_cache, slim_items
+from proxy_cache import api_cache
 from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
 from emby_webhook import (
     parse_request_payload,
@@ -64,6 +64,37 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> None:
                     logger.warning(f"PROXY_INVALIDATE vlib={library_id} HTTP {resp.status}: {text[:300]}")
     except Exception as e:
         logger.warning(f"PROXY_INVALIDATE vlib={library_id} failed: {e}")
+
+
+async def _get_cached_items_from_proxy(library_id: str) -> list[dict] | None:
+    """从 proxy 进程读取虚拟库缓存条目列表。"""
+    try:
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/get-cached-items/{library_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("Items", [])
+                return None
+    except Exception as e:
+        logger.warning(f"Failed to get cached items from proxy for '{library_id}': {e}")
+        return None
+
+
+async def _cache_exists_in_proxy(library_id: str) -> bool:
+    """检查 proxy 进程中是否存在指定虚拟库的缓存。"""
+    try:
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/cache-exists/{library_id}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("exists", False)
+    except Exception:
+        pass
+    return False
 _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "info").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -380,11 +411,12 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
 async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig):
     """
-    Read items from local vlib_items_cache and download cover images.
+    Read items from proxy cache via internal API and download cover images.
     """
-    logger.info(f"Fetching cover images for vlib {library_id} from local cache...")
+    logger.info(f"Fetching cover images for vlib {library_id} from proxy cache...")
 
-    items = vlib_items_cache.get(library_id)
+    # Read cached items from proxy process
+    items = await _get_cached_items_from_proxy(library_id)
     if not items:
         raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
@@ -740,16 +772,12 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
-    removed_items = clear_vlib_items_cache(library_id)
-    clear_vlib_page_cache(library_id)
-
-    # Admin 与 Proxy 为不同进程，必须通知 proxy 进程清内存缓存。
-    # 否则你会看到“刷新后仍返回旧数据”的概率性现象。
+    # 通知 proxy 进程清内存缓存
     await _notify_proxy_invalidate_cache(library_id)
 
     logger.info(
         f"VLIB_REFRESH CACHE_CLEARED vlib={library_id} "
-        f"api_cache={len(keys_to_remove)} vlib_items={removed_items} page_cache=cleared"
+        f"api_cache={len(keys_to_remove)}"
     )
 
     if vlib.resource_type == "rsshub":
@@ -925,7 +953,7 @@ async def refresh_rss_library_internal(vlib: VirtualLibrary):
             f"RSS_REFRESH START vlib={vlib.id} name='{vlib.name}' "
             f"type={vlib.rss_type} interval_h={vlib.cache_refresh_interval}"
         )
-        clear_vlib_page_cache(vlib.id)
+        # page cache removed in refactor
         keys_to_remove = [k for k in api_cache if vlib.id in str(k)]
         for k in keys_to_remove:
             api_cache.pop(k, None)
@@ -968,7 +996,7 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     title_en = vlib.cover_title_en or ""
     try:
         # Populate cache only if not already present
-        if vlib.id not in vlib_items_cache:
+        if not await _cache_exists_in_proxy(vlib.id):
             from vlib_cache_manager import refresh_vlib_cache
             await refresh_vlib_cache(vlib, config)
 
@@ -1284,12 +1312,10 @@ async def toggle_library_hidden(library_id: str):
             keys_to_remove = [k for k in api_cache if library_id in str(k)]
             for k in keys_to_remove:
                 api_cache.pop(k, None)
-            clear_vlib_items_cache(library_id)
-            clear_vlib_page_cache(library_id)
-
             await _notify_proxy_invalidate_cache(library_id)
 
             return {"id": lib.id, "hidden": lib.hidden}
+
     raise HTTPException(status_code=404, detail="Virtual library not found")
 
 @api_router.delete("/libraries/{library_id}", status_code=204, tags=["Libraries"])
@@ -1331,9 +1357,8 @@ async def delete_library(library_id: str):
     
     if library_id in config.display_order:
         config.display_order.remove(library_id)
-    clear_vlib_items_cache(library_id)
-    clear_vlib_page_cache(library_id)
-        
+    await _notify_proxy_invalidate_cache(library_id)
+
     config_manager.save_config(config)
     return Response(status_code=204)
 

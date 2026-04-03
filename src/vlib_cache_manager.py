@@ -3,30 +3,75 @@
 Virtual library cache manager.
 
 Single responsibility: fetch full item lists from Emby, slim them,
-and write into vlib_items_cache.
+and push into proxy process's vlib_items_cache via internal HTTP API.
+
+Runs in the admin process. Does NOT import or hold vlib_items_cache in memory.
 
 Triggered by:
 - Startup (populate all non-RSS/non-random libraries)
 - Manual refresh (admin UI "刷新数据" button)
 - Webhook (Emby library.changed events)
 - Scheduled refresh (APScheduler cron)
-
-The handler_items module reads from vlib_items_cache and only does
-sort + slice to serve browsing requests.
 """
 
 import logging
+import os
+import json
 import asyncio
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 import aiohttp
 from models import AppConfig, VirtualLibrary
-from proxy_cache import vlib_items_cache, slim_items, clear_vlib_items_cache
+from proxy_cache import slim_items
 from proxy_handlers._filter_translator import translate_rules
 from proxy_handlers.handler_merger import merge_items_by_tmdb
 
 logger = logging.getLogger(__name__)
+
+# Base URL for proxy internal API
+_PROXY_BASE = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+
+
+def _internal_headers() -> Dict[str, str]:
+    token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
+    return {"X-Internal-Token": token} if token else {}
+
+
+async def _push_cache_to_proxy(
+    session: aiohttp.ClientSession, vlib_id: str, items: List[Dict]
+) -> bool:
+    """Write slimmed items to proxy process via internal API."""
+    url = f"{_PROXY_BASE}/api/internal/set-cached-items/{vlib_id}"
+    try:
+        async with session.post(
+            url, json={"Items": items}, headers=_internal_headers(),
+            timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 200:
+                logger.info(f"Pushed {len(items)} items to proxy cache for '{vlib_id}'")
+                return True
+            text = await resp.text()
+            logger.warning(f"Push cache failed for '{vlib_id}': HTTP {resp.status} {text[:200]}")
+            return False
+    except Exception as e:
+        logger.warning(f"Push cache failed for '{vlib_id}': {e}")
+        return False
+
+
+async def _cache_exists_in_proxy(
+    session: aiohttp.ClientSession, vlib_id: str
+) -> bool:
+    """Check if proxy already has cache for this vlib."""
+    url = f"{_PROXY_BASE}/api/internal/cache-exists/{vlib_id}"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                return data.get("exists", False)
+    except Exception:
+        pass
+    return False
 
 # ---------------------------------------------------------------------------
 # Fields to request from Emby (superset for poster wall + filter + sort)
@@ -307,7 +352,7 @@ async def refresh_vlib_cache(
 ) -> int:
     """
     Fetch the complete item list for a virtual library from Emby,
-    apply filters / TMDB merge / sort, slim, and store in vlib_items_cache.
+    apply filters / TMDB merge / sort, slim, and push to proxy cache.
 
     Returns the number of items cached (0 if skipped or failed).
     """
@@ -408,7 +453,7 @@ async def refresh_vlib_cache(
                 if custom_sort_field and custom_sort_order:
                     _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
                 slimmed = slim_items(all_items)
-                vlib_items_cache[vlib.id] = slimmed
+                await _push_cache_to_proxy(session, vlib.id, slimmed)
                 logger.info(f"Cache refreshed (DLA) for '{vlib.name}': {len(slimmed)} items")
                 return len(slimmed)
 
@@ -442,7 +487,7 @@ async def refresh_vlib_cache(
             _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
 
         slimmed = slim_items(all_items)
-        vlib_items_cache[vlib.id] = slimmed
+        await _push_cache_to_proxy(session, vlib.id, slimmed)
         logger.info(f"Cache refreshed for '{vlib.name}': {len(slimmed)} items")
         return len(slimmed)
 
