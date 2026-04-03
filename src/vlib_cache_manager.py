@@ -249,6 +249,66 @@ async def _fetch_by_ids_chunked(session, url, headers, ids, fields):
 
 
 # ---------------------------------------------------------------------------
+# Random library refresh
+# ---------------------------------------------------------------------------
+
+async def _refresh_random_cache(
+    vlib: VirtualLibrary,
+    config: AppConfig,
+    session: aiohttp.ClientSession,
+    user_id: str,
+) -> int:
+    """Fetch unplayed items from source libraries, pick 30 randomly, store in cache."""
+    import random as random_module
+
+    headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
+    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+
+    ignore_set = config.disabled_library_ids
+    source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
+    if not source_libs:
+        from admin_server import get_real_libraries_hybrid_mode
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Random refresh: failed to fetch real libraries: {e}")
+            return 0
+
+    fetch_params = {
+        "Recursive": "true",
+        "IsPlayed": "false",
+        "Fields": FETCH_FIELDS,
+        "SortBy": "Random",
+        "SortOrder": "Ascending",
+        "IncludeItemTypes": "Movie,Series",
+        "Limit": "300",
+    }
+
+    all_items: List[Dict] = []
+    for pid in source_libs:
+        p = dict(fetch_params, ParentId=pid)
+        try:
+            async with session.get(base_url, params=p, headers=headers,
+                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    all_items.extend(data.get("Items", []))
+        except Exception as e:
+            logger.warning(f"Random refresh fetch failed for {pid}: {e}")
+
+    all_items = _deduplicate(all_items)
+    selected = random_module.sample(all_items, min(30, len(all_items)))
+    random_module.shuffle(selected)
+
+    slimmed = slim_items(selected)
+    if slimmed:
+        vlib_items_cache[vlib.id] = slimmed
+    logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
+    return len(slimmed)
+
+
+# ---------------------------------------------------------------------------
 # Core: refresh a single virtual library's full cache
 # ---------------------------------------------------------------------------
 
@@ -264,10 +324,6 @@ async def refresh_vlib_cache(
     Runs inside proxy process. Returns item count (0 if skipped/failed).
     """
     if vlib.resource_type == "rsshub":
-        return 0
-
-    if vlib.resource_type == "random":
-        # Random libraries are populated by user browsing, not by full Emby fetch.
         return 0
 
     if not config.emby_url or not config.emby_api_key:
@@ -295,6 +351,10 @@ async def refresh_vlib_cache(
                 logger.error(f"Failed to get Emby users: {e}")
             if not user_id:
                 return 0
+
+        # --- Random library: fetch unplayed items, pick 30 randomly ---
+        if vlib.resource_type == "random":
+            return await _refresh_random_cache(vlib, config, session, user_id)
 
         base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
         base_params: Dict[str, Any] = {
