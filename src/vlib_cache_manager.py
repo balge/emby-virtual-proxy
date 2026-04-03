@@ -140,6 +140,17 @@ def _parse_iso_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _format_dt_emby_like(dt: datetime) -> str:
+    """Serialize UTC datetime for JSON; consistent string sort with typical Emby payloads."""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    dt = dt.astimezone(timezone.utc)
+    s = dt.isoformat(timespec="milliseconds")
+    if s.endswith("+00:00"):
+        return s[:-6] + "Z"
+    return s
+
+
 # ---------------------------------------------------------------------------
 # DLA optimized fetch helpers
 # ---------------------------------------------------------------------------
@@ -463,14 +474,32 @@ async def refresh_vlib_cache(
             await session.close()
 
 
+def _apply_dla_series_latest_episode_dates(series_items: List[Dict], latest_episode_utc: Dict[str, datetime]) -> None:
+    """
+    DLA 用分集扫描判定「最近入库」；按 Ids 拉回的 Series 上 DateLastMediaAdded 可能滞后于库内实际，
+    排序与写入 DB 的 slim 仍沿用旧值。这里用扫描到的最新分集 DateCreated 写回 Series.DateLastMediaAdded。
+    """
+    for it in series_items:
+        if it.get("Type") != "Series":
+            continue
+        sid = it.get("Id")
+        if not sid:
+            continue
+        dt = latest_episode_utc.get(str(sid))
+        if dt is None:
+            continue
+        it["DateLastMediaAdded"] = _format_dt_emby_like(dt)
+
+
 async def _do_dla_fetch(session, url, headers, base_params, threshold_dt, source_pids, post_filter_rules, filter_match_all):
     scan_base = {k: v for k, v in base_params.items() if k not in ("StartIndex", "Limit", "SortBy", "SortOrder")}
     ep_task = _fetch_recent_episodes_series_ids(session, url, headers, scan_base, threshold_dt, source_pids)
     mv_task = _fetch_recent_by_datecreated(session, url, headers, scan_base, threshold_dt, "Movie,Video", source_pids)
-    (series_ids, _), movie_items = await asyncio.gather(ep_task, mv_task)
+    (series_ids, latest_by_series), movie_items = await asyncio.gather(ep_task, mv_task)
     series_items = []
     if series_ids:
         series_items = await _fetch_by_ids_chunked(session, url, headers, list(series_ids), base_params.get("Fields", ""))
+        _apply_dla_series_latest_episode_dates(series_items, latest_by_series)
     remaining = [r for r in post_filter_rules if getattr(r, "field", None) != "DateLastMediaAdded"]
     if remaining:
         from proxy_handlers.handler_items import _apply_post_filter
