@@ -266,6 +266,10 @@ async def refresh_vlib_cache(
     if vlib.resource_type == "rsshub":
         return 0
 
+    if vlib.resource_type == "random":
+        # Random libraries are populated by user browsing, not by full Emby fetch.
+        return 0
+
     if not config.emby_url or not config.emby_api_key:
         logger.warning(f"Cannot refresh cache for '{vlib.name}': no Emby config.")
         return 0

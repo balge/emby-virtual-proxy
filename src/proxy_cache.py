@@ -3,17 +3,18 @@
 Virtual library cache layer.
 
 Design:
-- Full item lists are persisted in SQLite and read on-demand (no in-memory copy).
-- This avoids the ~500 MB RAM overhead from loading a 40 MB DB into Python dicts.
-- Browsing requests read from DB per-request (~20-80 ms per read due to json.loads).
-- Items are "slimmed" before caching to keep DB size low (~300-600 bytes per item
-  instead of 3-8 KB for a full Emby response).
+- Full item lists are persisted in SQLite as gzip-compressed BLOBs and read on-demand.
+- This avoids ~500 MB RAM overhead and reduces DB size by ~60-70% vs plain JSON TEXT.
+- Browsing requests: decompress + json.loads per-request (~20-80 ms, IO savings offset
+  decompression cost).
+- Items are "slimmed" before caching to keep per-item size low (~300-600 bytes).
 """
 
 import json
 import sqlite3
 import threading
 import logging
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from cachetools import TTLCache
@@ -77,10 +78,30 @@ def _init_db():
     conn.execute("""
         CREATE TABLE IF NOT EXISTS vlib_items (
             vlib_id TEXT PRIMARY KEY,
-            items_json TEXT NOT NULL,
+            items_json TEXT,
+            items_data BLOB,
             updated_at TEXT NOT NULL
         )
     """)
+    # Migrate: add items_data column if missing (upgrade from TEXT-only schema)
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(vlib_items)").fetchall()}
+    if "items_data" not in cols:
+        conn.execute("ALTER TABLE vlib_items ADD COLUMN items_data BLOB")
+        conn.commit()
+        logger.info("Added items_data BLOB column to vlib_items table.")
+    # Migrate old TEXT rows → compressed BLOB, then clear TEXT column
+    rows = conn.execute(
+        "SELECT vlib_id, items_json FROM vlib_items WHERE items_data IS NULL AND items_json IS NOT NULL"
+    ).fetchall()
+    if rows:
+        for vlib_id, items_json in rows:
+            compressed = zlib.compress(items_json.encode("utf-8"), level=6)
+            conn.execute(
+                "UPDATE vlib_items SET items_data = ?, items_json = NULL WHERE vlib_id = ?",
+                (compressed, vlib_id),
+            )
+        conn.commit()
+        logger.info(f"Migrated {len(rows)} vlib_items rows from TEXT to compressed BLOB.")
     conn.execute("DROP TABLE IF EXISTS random_recommend")
     conn.commit()
     conn.close()
@@ -113,11 +134,16 @@ class VLibItemsCache:
         try:
             conn = self._get_conn()
             row = conn.execute(
-                "SELECT items_json FROM vlib_items WHERE vlib_id = ?", (key,)
+                "SELECT items_data, items_json FROM vlib_items WHERE vlib_id = ?", (key,)
             ).fetchone()
             if row is None:
                 return default
-            return json.loads(row[0])
+            items_data, items_json = row
+            if items_data is not None:
+                return json.loads(zlib.decompress(items_data))
+            if items_json is not None:
+                return json.loads(items_json)
+            return default
         except Exception as e:
             logger.warning(f"VLibItemsCache.get({key}) failed: {e}")
             return default
@@ -183,11 +209,13 @@ class VLibItemsCache:
 
     def _persist(self, key: str, value: list[dict]):
         try:
+            raw = json.dumps(value, ensure_ascii=False).encode("utf-8")
+            compressed = zlib.compress(raw, level=6)
             with _db_lock:
                 conn = self._get_conn()
                 conn.execute(
-                    "INSERT OR REPLACE INTO vlib_items (vlib_id, items_json, updated_at) VALUES (?, ?, ?)",
-                    (key, json.dumps(value, ensure_ascii=False), datetime.utcnow().isoformat()),
+                    "INSERT OR REPLACE INTO vlib_items (vlib_id, items_data, items_json, updated_at) VALUES (?, ?, NULL, ?)",
+                    (key, compressed, datetime.utcnow().isoformat()),
                 )
                 conn.commit()
         except Exception as e:

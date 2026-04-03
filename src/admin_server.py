@@ -793,6 +793,15 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
+
+    if vlib.resource_type == "random":
+        # Random libraries: regenerate cover first using current cached random items,
+        # then clear cache so next user browse generates fresh random picks.
+        await _regenerate_cover_for_vlib(vlib)
+        await _notify_proxy_invalidate_cache(library_id)
+        logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}' (random)")
+        return
+
     # 通知 proxy 进程清内存缓存
     await _notify_proxy_invalidate_cache(library_id)
 
@@ -1015,9 +1024,11 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        # Populate cache only if not already present
-        if not await _cache_exists_in_proxy(vlib.id):
-            await _notify_proxy_refresh_cache(vlib.id)
+        # For random libraries, skip full refresh — use the existing random items
+        # so the cover reflects what the user actually sees (the 30 random picks).
+        if vlib.resource_type != "random":
+            if not await _cache_exists_in_proxy(vlib.id):
+                await _notify_proxy_refresh_cache(vlib.id)
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
