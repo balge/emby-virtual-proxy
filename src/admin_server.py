@@ -761,18 +761,28 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
         logger.warning(f"Webhook: 事件 '{event_raw}' 缺少 Item.Path，跳过")
         return
 
-    # 获取真实库列表，用库名匹配 item path
+    # 通过 Emby VirtualFolders API 获取每个库的实际路径，用路径前缀匹配 item path
     try:
-        real_libs = await get_real_libraries_hybrid_mode()
+        vfolders = await _admin_emby_get_json("/Library/VirtualFolders")
     except Exception as e:
-        logger.error(f"Webhook: 获取真实库列表失败: {e}")
+        logger.error(f"Webhook: 获取 VirtualFolders 失败: {e}")
         return
 
+    if not vfolders:
+        logger.warning("Webhook: VirtualFolders 返回为空，跳过")
+        return
+
+    # vfolders 是一个列表，每项包含 Name, ItemId, Locations 等
     matched_lib_ids: List[str] = []
-    for lib in real_libs:
-        lib_name = lib.get("Name") or ""
-        if lib_name and lib_name in item_path:
-            matched_lib_ids.append(lib.get("Id"))
+    for vf in vfolders:
+        lib_id = vf.get("ItemId") or ""
+        locations = vf.get("Locations") or []
+        for loc in locations:
+            # 统一去掉尾部斜杠后做前缀匹配
+            loc_normalized = loc.rstrip("/")
+            if item_path.startswith(loc_normalized + "/") or item_path == loc_normalized:
+                matched_lib_ids.append(lib_id)
+                break  # 一个库匹配到即可，不用重复添加
 
     if not matched_lib_ids:
         logger.info(f"Webhook: event={event_raw} path='{item_path}' 未匹配到任何真实库")
