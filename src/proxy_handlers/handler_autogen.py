@@ -4,17 +4,14 @@ import asyncio
 import logging
 import shutil
 import random
-import base64
 import os
 import hashlib
 import time
 from pathlib import Path
-from io import BytesIO
 import aiohttp
-import importlib
 
 import config_manager
-# from cover_generator import style_multi_1 # 改为动态导入
+import cover_subprocess
 
 logger = logging.getLogger(__name__)
 
@@ -115,49 +112,38 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
             logger.error(f"后台任务：为库 {library_id} 下载封面素材失败。")
             return
 
-        # --- 动态调用所选的默认样式 ---
         style_name = config.default_cover_style
         logger.info(f"后台任务：使用默认样式 '{style_name}' 为 '{vlib.name}' 生成封面...")
 
-        try:
-            style_module = importlib.import_module(f"cover_generator.{style_name}")
-            create_function = getattr(style_module, f"create_{style_name}")
-        except (ImportError, AttributeError) as e:
-            logger.error(f"后台任务：无法加载样式 '{style_name}': {e}")
+        if style_name not in cover_subprocess.ALLOWED_COVER_STYLES:
+            logger.error(f"后台任务：未知的默认样式名称: {style_name}")
             return
 
-        # 检查自定义字体路径，如果未设置则使用默认值
         zh_font_path = config.custom_zh_font_path or "/app/src/assets/fonts/multi_1_zh.ttf"
         en_font_path = config.custom_en_font_path or "/app/src/assets/fonts/multi_1_en.ttf"
-        
-        kwargs = {
-            "title": (vlib.cover_title_zh or vlib.name, vlib.cover_title_en or ""),
-            "font_path": (zh_font_path, en_font_path),
-            "font_size": (1, 1.2)
-        }
 
-        if style_name == 'style_multi_1':
-            kwargs['library_dir'] = str(temp_dir)
-        elif style_name in ['style_single_1', 'style_single_2']:
+        if style_name in ('style_single_1', 'style_single_2'):
             main_image_path = temp_dir / "1.jpg"
             if not main_image_path.is_file():
                 logger.error(f"后台任务：无法找到用于单图模式的主素材图片 (1.jpg)。")
                 return
-            kwargs['image_path'] = str(main_image_path)
-        else:
-            logger.error(f"后台任务：未知的默认样式名称: {style_name}")
-            return
 
-        res_b64 = create_function(**kwargs)
-        if not res_b64:
-            logger.error(f"后台任务：为库 {library_id} 调用封面生成函数失败。")
-            return
-
-        image_data = base64.b64decode(res_b64)
-        from PIL import Image
-        img = Image.open(BytesIO(image_data)).convert("RGB")
         final_path = output_dir / f"{library_id}.jpg"
-        img.save(final_path, "JPEG", quality=90)
+        job = {
+            "style_name": style_name,
+            "title_zh": vlib.cover_title_zh or vlib.name,
+            "title_en": vlib.cover_title_en or "",
+            "zh_font_path": zh_font_path,
+            "en_font_path": en_font_path,
+            "library_dir": str(temp_dir),
+            "output_path": str(final_path),
+            "crop_16_9": False,
+        }
+        try:
+            await cover_subprocess.run_cover_worker_job(job)
+        except RuntimeError as e:
+            logger.error(f"后台任务：封面子进程失败 (库 {library_id}): {e}")
+            return
         
         new_image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
         current_config = config_manager.load_config()

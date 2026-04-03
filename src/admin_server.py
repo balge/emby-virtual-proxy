@@ -19,12 +19,8 @@ import time
 import secrets
 from typing import List, Dict, Optional, Any
 from pydantic import BaseModel
-import importlib
-# 导入封面生成模块
-# from cover_generator import style_multi_1 # 改为动态导入
 import base64
 import json
-from io import BytesIO
 from fastapi import Request
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -38,6 +34,7 @@ from emby_webhook import (
     extract_item_dict,
 )
 import config_manager
+import cover_subprocess
 from db_manager import DBManager, RSS_CACHE_DB
 
 # 【【【 在这里添加或者确认你有这几行 】】】
@@ -701,61 +698,38 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
         en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
 
-        style_module = importlib.import_module(f"cover_generator.{style_name}")
-        create_function = getattr(style_module, f"create_{style_name}")
+        if style_name not in cover_subprocess.ALLOWED_COVER_STYLES:
+            logger.warning(f"Unknown cover style: {style_name}")
+            return None
 
-        kwargs = {
-            "title": (title_zh, title_en),
-            "font_path": (zh_font_path, en_font_path),
-            "font_size": (1, 1.2),
-        }
-        if style_name == 'style_multi_1':
-            kwargs['library_dir'] = str(image_gen_dir)
-        elif style_name in ['style_single_1', 'style_single_2']:
+        if style_name in ('style_single_1', 'style_single_2'):
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 logger.warning(f"Real lib cover: no main image for {rl.name}")
                 return None
-            kwargs['image_path'] = str(main_image_path)
-        else:
-            logger.warning(f"Unknown cover style: {style_name}")
-            return None
 
-        res = create_function(**kwargs)
-        if not res:
-            return None
-
-        image_data = base64.b64decode(res)
-        from PIL import Image
-        img = Image.open(BytesIO(image_data))
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
-
-        # 裁剪为 16:9 比例（居中裁剪）
-        w, h = img.size
-        target_ratio = 16 / 9
-        current_ratio = w / h
-        if current_ratio > target_ratio:
-            # 太宽，裁左右
-            new_w = int(h * target_ratio)
-            left = (w - new_w) // 2
-            img = img.crop((left, 0, left + new_w, h))
-        elif current_ratio < target_ratio:
-            # 太高，裁上下
-            new_h = int(w / target_ratio)
-            top = (h - new_h) // 2
-            img = img.crop((0, top, w, top + new_h))
-
-        # 保存本地
         output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
-        img.save(output_path, "JPEG", quality=90)
+        job = {
+            "style_name": style_name,
+            "title_zh": title_zh,
+            "title_en": title_en,
+            "zh_font_path": zh_font_path,
+            "en_font_path": en_font_path,
+            "library_dir": str(image_gen_dir),
+            "output_path": output_path,
+            "crop_16_9": True,
+        }
+        try:
+            await cover_subprocess.run_cover_worker_job(job)
+        except RuntimeError as e:
+            logger.error(f"Failed to generate cover for real lib '{rl.name}': {e}")
+            return None
+
         image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
         logger.info(f"Real lib cover saved: {output_path}, tag={image_tag}")
 
-        # 上传封面到 Emby（需要重新编码裁剪后的图片）
-        buf = BytesIO()
-        img.save(buf, "JPEG", quality=90)
-        await _upload_image_to_emby(rl.id, buf.getvalue(), config)
+        with open(output_path, "rb") as f:
+            await _upload_image_to_emby(rl.id, f.read(), config)
 
         return image_tag
     except Exception as e:
@@ -1163,16 +1137,6 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
 
         # --- 3. 【核心改动】: 动态调用所选的样式生成函数 ---
         logger.info(f"素材准备完毕，开始使用样式 '{style_name}' 为 '{title_zh}' ({library_id}) 生成封面...")
-        
-        try:
-            # 动态导入选择的样式模块
-            style_module = importlib.import_module(f"cover_generator.{style_name}")
-            # 假设每个样式文件都有一个名为 create_... 的主函数
-            create_function_name = f"create_{style_name}" 
-            create_function = getattr(style_module, create_function_name)
-        except (ImportError, AttributeError) as e:
-            logger.error(f"无法加载或找到样式生成函数: {style_name} -> {e}")
-            raise HTTPException(status_code=400, detail=f"无效的样式名称: {style_name}")
 
         # --- 字体选择逻辑 ---
         vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
@@ -1193,45 +1157,33 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
         else:
             en_font_path = os.path.join(FONT_DIR, "multi_1_en.ttf")
 
-        kwargs = {
-            "title": (title_zh, title_en),
-            "font_path": (zh_font_path, en_font_path),
-            "font_size": (1, 1.2)
-        }
-
-        if style_name == 'style_multi_1':
-            kwargs['library_dir'] = str(image_gen_dir)
-        elif style_name in ['style_single_1', 'style_single_2']:
-            # 单图模式，选择第一张图作为主图
+        if style_name in ['style_single_1', 'style_single_2']:
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 raise HTTPException(status_code=404, detail="无法找到用于单图模式的主素材图片 (1.jpg)。")
-            kwargs['image_path'] = str(main_image_path)
-        else:
+        elif style_name != 'style_multi_1':
             raise HTTPException(status_code=400, detail=f"未知的样式名称: {style_name}")
-
-        # 使用关键字参数解包来调用函数
-        res = create_function(**kwargs)
-        
-        if not res:
-            logger.error(f"样式函数 {style_name} 返回失败。")
-            raise HTTPException(status_code=500, detail=f"封面生成函数 {style_name} 内部错误。")
-
-        # --- 4. 解码、转换并以虚拟库ID为名保存图片 ---
-        image_data = base64.b64decode(res)
-        from PIL import Image
-        img = Image.open(BytesIO(image_data))
-
-        if img.mode != 'RGB':
-            img = img.convert('RGB')
 
         final_filename = f"{library_id}.jpg"
         output_path = os.path.join(OUTPUT_DIR, final_filename)
-        
-        img.save(output_path, "JPEG", quality=90)
-        
+        job = {
+            "style_name": style_name,
+            "title_zh": title_zh,
+            "title_en": title_en or "",
+            "zh_font_path": zh_font_path,
+            "en_font_path": en_font_path,
+            "library_dir": str(image_gen_dir),
+            "output_path": output_path,
+            "crop_16_9": False,
+        }
+        try:
+            await cover_subprocess.run_cover_worker_job(job)
+        except RuntimeError as e:
+            logger.error(f"封面生成子进程失败: {e}")
+            raise HTTPException(status_code=500, detail="封面生成失败，请稍后重试或查看服务端日志。")
+
         image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
-        
+
         logger.info(f"封面成功保存至: {output_path}, ImageTag: {image_tag}")
 
         return image_tag
