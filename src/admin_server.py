@@ -1016,8 +1016,11 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        # Populate cache only if not already present
+        # Proxy uses vlib_cache.db (table vlib_items), not rss/douban DBs. A row can
+        # exist with 0 items—or another db file was restored—so "exists" alone must not skip refresh.
         if not await _cache_exists_in_proxy(vlib.id):
+            await _notify_proxy_refresh_cache(vlib.id)
+        elif not await _get_cached_items_from_proxy(vlib.id):
             await _notify_proxy_refresh_cache(vlib.id)
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
