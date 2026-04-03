@@ -7,13 +7,13 @@ def start_admin():
     print("--- Starting Admin Server ---")
     print("Access the Web UI at http://127.0.0.1:8011 (or your host IP)")
     print("API documentation at http://127.0.0.1:8011/docs")
-    uvicorn.run("admin_server:admin_app", host="0.0.0.0", port=8001, reload=True)
+    uvicorn.run("admin_server:admin_app", host="0.0.0.0", port=8001, reload=False)
 
 def start_proxy():
     """启动代理服务器"""
     print("--- Starting Proxy Server ---")
     print("Proxy is listening on http://0.0.0.0:8999")
-    uvicorn.run("proxy_server:proxy_app", host="0.0.0.0", port=8999, reload=True)
+    uvicorn.run("proxy_server:proxy_app", host="0.0.0.0", port=8999, reload=False)
 
 
 if __name__ == "__main__":

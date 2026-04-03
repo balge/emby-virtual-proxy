@@ -48,9 +48,24 @@ def get_cache_key(request: Request, full_path: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.aiohttp_session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()); logger.info("Global AIOHTTP ClientSession created.")
+    app.state.aiohttp_session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+    logger.info("Global AIOHTTP ClientSession created.")
+
+    # Background warmup: populate caches for all virtual libraries
+    async def _warmup():
+        await asyncio.sleep(2)  # Wait for server to be ready
+        try:
+            from vlib_cache_manager import refresh_all_vlib_caches
+            cfg = config_manager.load_config()
+            results = await refresh_all_vlib_caches(cfg)
+            logger.info(f"Startup cache warmup complete: {results}")
+        except Exception as e:
+            logger.error(f"Startup cache warmup failed: {e}")
+    asyncio.create_task(_warmup())
+
     yield
-    await app.state.aiohttp_session.close(); logger.info("Global AIOHTTP ClientSession closed.")
+    await app.state.aiohttp_session.close()
+    logger.info("Global AIOHTTP ClientSession closed.")
 
 proxy_app = FastAPI(title="Emby Virtual Proxy - Core", lifespan=lifespan)
 
@@ -123,6 +138,25 @@ async def internal_cache_exists(library_id: str):
     """Check if a vlib cache entry exists in proxy memory."""
     exists = library_id in vlib_items_cache
     return JSONResponse(content={"exists": exists})
+
+
+@proxy_app.post("/api/internal/refresh-vlib-cache/{library_id}")
+async def internal_refresh_vlib_cache(request: Request, library_id: str):
+    """
+    Internal endpoint: fetch full data from Emby, slim, and store in proxy cache.
+    Called by admin process to trigger cache refresh without admin holding the data.
+    """
+    if not _allow_internal_cache_invalidate(request):
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    config = config_manager.load_config()
+    vlib = next((v for v in config.virtual_libraries if v.id == library_id), None)
+    if not vlib:
+        raise HTTPException(status_code=404, detail="Virtual library not found")
+
+    from vlib_cache_manager import refresh_vlib_cache
+    count = await refresh_vlib_cache(vlib, config)
+    return JSONResponse(content={"vlib_id": library_id, "count": count})
 
 # --- 【【【 核心修复：重写 WebSocket 代理 】】】 ---
 @proxy_app.websocket("/{full_path:path}")

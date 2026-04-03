@@ -95,6 +95,27 @@ async def _cache_exists_in_proxy(library_id: str) -> bool:
     except Exception:
         pass
     return False
+
+
+async def _notify_proxy_refresh_cache(library_id: str) -> None:
+    """通知 proxy 进程刷新指定虚拟库的缓存（proxy 自己从 Emby 拉取数据）。"""
+    try:
+        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        url = f"{base}/api/internal/refresh-vlib-cache/{library_id}"
+        token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
+        headers = {"X-Internal-Token": token} if token else {}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=120)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    logger.info(f"PROXY_REFRESH vlib={library_id} count={data.get('count', 0)}")
+                else:
+                    text = await resp.text()
+                    logger.warning(f"PROXY_REFRESH vlib={library_id} HTTP {resp.status}: {text[:300]}")
+    except Exception as e:
+        logger.warning(f"PROXY_REFRESH vlib={library_id} failed: {e}")
+
+
 _LOG_LEVEL_NAME = os.environ.get("LOG_LEVEL", "info").upper()
 _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -783,10 +804,8 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     if vlib.resource_type == "rsshub":
         await refresh_rss_library_internal(vlib)
     else:
-        # Refresh full cache via cache manager
-        from vlib_cache_manager import refresh_vlib_cache
-        config = config_manager.load_config()
-        await refresh_vlib_cache(vlib, config)
+        # Notify proxy to refresh cache (proxy fetches from Emby itself)
+        await _notify_proxy_refresh_cache(library_id)
 
     await _regenerate_cover_for_vlib(vlib)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
@@ -997,8 +1016,7 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
     try:
         # Populate cache only if not already present
         if not await _cache_exists_in_proxy(vlib.id):
-            from vlib_cache_manager import refresh_vlib_cache
-            await refresh_vlib_cache(vlib, config)
+            await _notify_proxy_refresh_cache(vlib.id)
 
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
@@ -1607,14 +1625,6 @@ async def startup_event():
     config = config_manager.load_config()
     update_rss_refresh_job(config)
     update_real_library_cover_cron(config)
-
-    # 启动时异步预热所有虚拟库缓存
-    async def _warmup():
-        from vlib_cache_manager import refresh_all_vlib_caches
-        cfg = config_manager.load_config()
-        results = await refresh_all_vlib_caches(cfg)
-        logger.info(f"Startup cache warmup complete: {results}")
-    asyncio.create_task(_warmup())
 
 @admin_app.on_event("shutdown")
 async def shutdown_event():
