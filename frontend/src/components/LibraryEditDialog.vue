@@ -220,6 +220,30 @@ const filteredResources = computed(() => {
 })
 
 const personResults = ref([])
+let personFetchSeq = 0
+
+function applyPersonResults(data) {
+  personResults.value = data || []
+  personResults.value.forEach((p) => {
+    if (p.id && !store.personNameCache[p.id]) store.personNameCache[p.id] = p.name
+  })
+}
+
+/** 有关键词走 Items 搜索；无关键词走 /Persons 首屏（与后端约定一致） */
+async function fetchPersonListForQuery(q) {
+  const seq = ++personFetchSeq
+  const trimmed = String(q ?? '').trim()
+  try {
+    const res = trimmed
+      ? await api.searchPersons(trimmed, 1)
+      : await api.searchPersons(undefined, 1)
+    if (seq !== personFetchSeq) return
+    applyPersonResults(res.data)
+  } catch {
+    if (seq !== personFetchSeq) return
+    personResults.value = []
+  }
+}
 
 function setResourceSearch(v) {
   resourceSearch.value = v
@@ -249,20 +273,15 @@ function onResourceTypeChange() {
   store.currentLibrary.resource_ids = []
   resourceSearch.value = ''
   personResults.value = []
+  if (store.currentLibrary.resource_type === 'person') {
+    void fetchPersonListForQuery('')
+  }
 }
 
 const onResourceSearch = async (query) => {
   if (store.currentLibrary.resource_type !== 'person') return
-  const q = String(query ?? resourceSearch.value ?? '').trim()
-  if (!q) {
-    personResults.value = []
-    return
-  }
-  try {
-    const res = await api.searchPersons(q, 1)
-    personResults.value = res.data || []
-    personResults.value.forEach(p => { if (p.id && !store.personNameCache[p.id]) store.personNameCache[p.id] = p.name })
-  } catch { personResults.value = [] }
+  const q = String(query ?? resourceSearch.value ?? '')
+  await fetchPersonListForQuery(q)
 }
 
 const handleFileUpload = async (e) => {
@@ -305,21 +324,16 @@ watch(() => store.dialogVisible, (val) => {
 
   resourceSearch.value = ''
 
-  if (rt === 'person' && ids.length) {
+  if (rt === 'person') {
     for (const pid of ids) {
-      const cached = store.personNameCache[pid]
-      if (cached && cached !== '...') {
-        personResults.value.push({ id: pid, name: cached })
-      } else {
+      if (!store.personNameCache[pid] || store.personNameCache[pid] === '...') {
         store.resolvePersonName(pid)
         api.resolveItem(pid).then((r) => {
-          if (!personResults.value.some((x) => String(x.id) === String(r.data.id))) {
-            personResults.value.push(r.data)
-          }
           store.personNameCache[r.data.id] = r.data.name
         }).catch(() => {})
       }
     }
+    void fetchPersonListForQuery('')
   }
 })
 </script>
