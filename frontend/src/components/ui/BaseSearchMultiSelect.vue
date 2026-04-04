@@ -36,9 +36,14 @@
           autocomplete="off"
           class="min-w-0 flex-1 border-0 bg-transparent py-1 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-100 dark:placeholder:text-gray-500"
           @keydown.escape.prevent.stop="closePanel"
+          @keydown.enter.prevent="onInputEnter"
           @input="onSearchInput"
         />
-        <MagnifyingGlassIcon class="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500" aria-hidden="true" />
+        <MagnifyingGlassIcon
+          v-if="!hideSearchIcon"
+          class="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500"
+          aria-hidden="true"
+        />
       </div>
     </div>
     <div
@@ -49,6 +54,15 @@
       @mousedown.prevent
       @scroll.passive="onListScroll"
     >
+      <button
+        v-if="allowManualEntry && manualEntryHint"
+        type="button"
+        role="option"
+        class="flex w-full items-center gap-2 border-b border-gray-200 px-3 py-2 text-left text-sm text-primary-700 hover:bg-primary-50/80 dark:border-gray-700 dark:text-primary-300 dark:hover:bg-primary-900/20"
+        @click="commitManualEntry"
+      >
+        <span class="min-w-0 truncate">{{ manualEntryActionLabel }}「{{ manualEntryHint }}」</span>
+      </button>
       <button
         v-for="item in options"
         :key="item.id"
@@ -71,7 +85,7 @@
           aria-hidden="true"
         />
       </button>
-      <p v-if="!options.length && !loadingMore" class="px-3 py-4 text-center text-xs text-gray-400">{{ emptyText }}</p>
+      <p v-if="!options.length && !loadingMore && !(allowManualEntry && manualEntryHint)" class="px-3 py-4 text-center text-xs text-gray-400">{{ emptyText }}</p>
       <p v-if="loadingMore" class="px-3 py-2 text-center text-xs text-gray-400 dark:text-gray-500">加载中…</p>
     </div>
     <p v-if="hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ hint }}</p>
@@ -99,6 +113,18 @@ const props = defineProps({
   /** 是否还有更多项（滚动到底触发 load-more） */
   hasMore: { type: Boolean, default: false },
   loadingMore: { type: Boolean, default: false },
+  /**
+   * 允许将输入框中的文本直接加入已选（Enter 或点「添加」），不依赖远程搜索接口。
+   * 仍可通过 update:search / search 在父组件内做本地 options 过滤。
+   */
+  allowManualEntry: { type: Boolean, default: false },
+  /** 与 allowManualEntry 搭配：隐藏搜索图标，表示仅本地筛选 / 手输 */
+  hideSearchIcon: { type: Boolean, default: false },
+  /**
+   * 最多可选几项；不设置或 ≤0 表示不限制。
+   * 为 1 时等价单选：再选一项会替换当前项；手动输入也会替换。
+   */
+  maxSelections: { type: Number, default: null },
 })
 
 const emit = defineEmits(['update:modelValue', 'update:search', 'search', 'load-more'])
@@ -111,6 +137,11 @@ let focusOutTimer = null
 
 const loadMoreArmed = ref(true)
 const SCROLL_LOAD_THRESHOLD_PX = 48
+
+const effectiveMaxSelections = computed(() => {
+  const m = props.maxSelections
+  return m != null && Number(m) > 0 ? Math.floor(Number(m)) : null
+})
 
 watch(
   () => props.disabled,
@@ -214,6 +245,27 @@ const normalizedIds = computed(() =>
   (props.modelValue || []).map((x) => String(x)).filter(Boolean),
 )
 
+const manualEntryHint = computed(() => {
+  if (!props.allowManualEntry) return ''
+  const raw = String(props.search || '').trim()
+  if (!raw) return ''
+  const lower = raw.toLowerCase()
+  const taken = new Set(normalizedIds.value.map((id) => id.toLowerCase()))
+  if (taken.has(lower)) return ''
+  const dupOption = props.options.some(
+    (item) => String(labelOf(item)).trim().toLowerCase() === lower,
+  )
+  if (dupOption) return ''
+  return raw
+})
+
+const manualEntryActionLabel = computed(() => {
+  if (effectiveMaxSelections.value === 1 && normalizedIds.value.length >= 1) {
+    return '改用'
+  }
+  return '添加'
+})
+
 function labelOf(item) {
   if (props.itemLabel) return props.itemLabel(item) ?? ''
   return item?.name ?? String(item?.id ?? '')
@@ -235,14 +287,45 @@ function onSearchInput(e) {
   emit('search', v)
 }
 
+function onInputEnter() {
+  if (props.allowManualEntry) commitManualEntry()
+}
+
+function commitManualEntry() {
+  if (!props.allowManualEntry || props.disabled) return
+  const raw = String(props.search || '').trim()
+  if (!raw) return
+  const lower = raw.toLowerCase()
+  const cur = [...normalizedIds.value]
+  if (cur.some((id) => id.toLowerCase() === lower)) return
+  const max = effectiveMaxSelections.value
+  if (max === 1) {
+    emit('update:modelValue', [raw])
+  } else {
+    if (max != null && cur.length >= max) return
+    cur.push(raw)
+    emit('update:modelValue', cur)
+  }
+  emit('update:search', '')
+  emit('search', '')
+}
+
 function toggle(item) {
   if (props.disabled) return
   const id = String(item.id)
   const cur = [...normalizedIds.value]
   const i = cur.indexOf(id)
-  if (i >= 0) cur.splice(i, 1)
-  else cur.push(id)
-  emit('update:modelValue', cur)
+  const max = effectiveMaxSelections.value
+  if (i >= 0) {
+    cur.splice(i, 1)
+    emit('update:modelValue', cur)
+  } else if (max === 1) {
+    emit('update:modelValue', [id])
+  } else {
+    if (max != null && cur.length >= max) return
+    cur.push(id)
+    emit('update:modelValue', cur)
+  }
   emit('update:search', '')
   emit('search', '')
 }

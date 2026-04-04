@@ -17,19 +17,11 @@
 
       <BaseSelect
         v-model="store.currentLibrary.resource_type"
+        :options="resourceTypeOptions"
         label="资源类型"
         required
         @update:model-value="onResourceTypeChange"
-      >
-        <option value="all">全库 (All)</option>
-        <option value="collection">合集 (Collection)</option>
-        <option value="tag">标签 (Tag)</option>
-        <option value="genre">类型 (Genre)</option>
-        <option value="studio">工作室 (Studio)</option>
-        <option value="person">人员 (Person)</option>
-        <option value="rsshub">RSSHUB</option>
-        <option value="random">偏好推荐 (Random)</option>
-      </BaseSelect>
+      />
 
       <!-- RSS fields -->
       <template v-if="store.currentLibrary.resource_type === 'rsshub'">
@@ -41,12 +33,10 @@
         />
         <BaseSelect
           v-model="store.currentLibrary.rss_type"
+          :options="rssTypeOptions"
           label="RSS 类型"
           required
-        >
-          <option value="douban">豆瓣</option>
-          <option value="bangumi">Bangumi</option>
-        </BaseSelect>
+        />
         <div class="flex items-center gap-3">
           <label class="text-sm font-medium text-gray-700 dark:text-gray-300"
             >开启数据保留</label
@@ -74,11 +64,9 @@
         <BaseSelect
           v-if="store.currentLibrary.fallback_tmdb_id"
           v-model="store.currentLibrary.fallback_tmdb_type"
+          :options="fallbackTmdbTypeOptions"
           label="追加类型"
-        >
-          <option value="Movie">电影</option>
-          <option value="TV">电视剧</option>
-        </BaseSelect>
+        />
       </template>
 
       <BaseSearchMultiSelect
@@ -122,18 +110,11 @@
       <!-- Advanced filter -->
       <BaseSelect
         v-model="store.currentLibrary.advanced_filter_id"
+        :options="advancedFilterOptions"
         label="高级筛选器"
         hint="留空表示不使用。"
-      >
-        <option :value="null">无</option>
-        <option
-          v-for="f in store.config.advanced_filters"
-          :key="f.id"
-          :value="f.id"
-        >
-          {{ f.name }}
-        </option>
-      </BaseSelect>
+        placeholder="无"
+      />
 
       <!-- TMDB merge -->
       <div class="flex items-center gap-3">
@@ -205,11 +186,11 @@
           />
         </div>
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-3">
-          <BaseSelect v-model="selectedStyle" label="封面样式">
-            <option value="style_multi_1">样式一 (多图)</option>
-            <option value="style_single_1">样式二 (单图)</option>
-            <option value="style_single_2">样式三 (单图)</option>
-          </BaseSelect>
+          <BaseSelect
+            v-model="selectedStyle"
+            :options="coverStyleOptions"
+            label="封面样式"
+          />
           <BaseInput
             v-model="store.currentLibrary.cover_custom_image_path"
             label="自定义图片目录"
@@ -277,9 +258,6 @@
 
 <script setup>
 import { ref, computed, watch } from "vue";
-
-/** 本地分类（合集/标签/类型/工作室）下拉分页大小，与人员接口每页 100 对齐量级 */
-const LOCAL_RESOURCE_PAGE_SIZE = 80;
 import { useMainStore } from "@/stores/main";
 import api from "@/api";
 import BaseDialog from "@/components/ui/BaseDialog.vue";
@@ -290,10 +268,44 @@ import BaseButton from "@/components/ui/BaseButton.vue";
 import BaseSwitch from "@/components/ui/BaseSwitch.vue";
 import BaseTag from "@/components/ui/BaseTag.vue";
 
+/** 本地分类（合集/标签/类型/工作室）下拉分页大小，与人员接口每页 100 对齐量级 */
+const LOCAL_RESOURCE_PAGE_SIZE = 80;
+
 const store = useMainStore();
 const resourceSearch = ref("");
 const selectedStyle = ref("style_multi_1");
 const uploadedPaths = ref([]);
+
+const resourceTypeOptions = [
+  { value: "all", label: "全库 (All)" },
+  { value: "collection", label: "合集 (Collection)" },
+  { value: "tag", label: "标签 (Tag)" },
+  { value: "genre", label: "类型 (Genre)" },
+  { value: "studio", label: "工作室 (Studio)" },
+  { value: "person", label: "人员 (Person)" },
+  { value: "rsshub", label: "RSSHUB" },
+  { value: "random", label: "偏好推荐 (Random)" },
+];
+const rssTypeOptions = [
+  { value: "douban", label: "豆瓣" },
+  { value: "bangumi", label: "Bangumi" },
+];
+const fallbackTmdbTypeOptions = [
+  { value: "Movie", label: "电影" },
+  { value: "TV", label: "电视剧" },
+];
+const coverStyleOptions = [
+  { value: "style_multi_1", label: "样式一 (多图)" },
+  { value: "style_single_1", label: "样式二 (单图)" },
+  { value: "style_single_2", label: "样式三 (单图)" },
+];
+const advancedFilterOptions = computed(() => [
+  { value: null, label: "无" },
+  ...(store.config.advanced_filters || []).map((f) => ({
+    value: f.id,
+    label: f.name,
+  })),
+]);
 
 const realLibrariesList = computed(() => {
   const rlConfigs = store.config.real_libraries || [];

@@ -43,11 +43,12 @@
       <section class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-5">
         <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100 mb-4">封面生成</h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <BaseSelect v-model="store.config.default_cover_style" label="默认封面样式" hint="自动生成封面时使用的样式。">
-            <option value="style_multi_1">样式一 (多图)</option>
-            <option value="style_single_1">样式二 (单图)</option>
-            <option value="style_single_2">样式三 (单图)</option>
-          </BaseSelect>
+          <BaseSelect
+            v-model="store.config.default_cover_style"
+            :options="coverStyleOptions"
+            label="默认封面样式"
+            hint="自动生成封面时使用的样式。"
+          />
           <BaseInput v-model="store.config.custom_zh_font_path" label="自定义中文字体路径" placeholder="/config/fonts/myfont.ttf" hint="留空使用默认字体。" />
           <BaseInput v-model="store.config.custom_en_font_path" label="自定义英文字体路径" placeholder="/config/fonts/myfont.otf" hint="留空使用默认字体。" />
           <BaseInput v-model="store.config.custom_image_path" label="全局自定义图片目录" placeholder="/config/images/custom" hint="留空则从虚拟库内容下载封面。" />
@@ -127,6 +128,12 @@ import ConfirmPopover from '@/components/ui/ConfirmPopover.vue'
 import SwitchCard from '@/components/SwitchCard.vue'
 
 const store = useMainStore()
+
+const coverStyleOptions = [
+  { value: 'style_multi_1', label: '样式一 (多图)' },
+  { value: 'style_single_1', label: '样式二 (单图)' },
+  { value: 'style_single_2', label: '样式三 (单图)' },
+]
 
 const webhookCallbackUrl = computed(() => typeof window !== 'undefined' ? `${window.location.origin}/api/webhook/emby` : '')
 

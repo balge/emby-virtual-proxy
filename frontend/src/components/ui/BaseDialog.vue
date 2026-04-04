@@ -15,7 +15,7 @@
             leave="ease-in duration-150" leave-from="opacity-100 scale-100" leave-to="opacity-0 scale-95"
           >
             <DialogPanel
-              class="w-full rounded-2xl bg-white shadow-xl dark:bg-gray-800 overflow-hidden"
+              class="w-[90vw] max-w-[90vw] min-w-0 sm:w-full rounded-2xl bg-white shadow-xl dark:bg-gray-800 overflow-hidden"
               :class="widthClass"
             >
               <div v-if="title" class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
@@ -51,10 +51,10 @@ const props = defineProps({
 defineEmits(['close'])
 
 const widthClass = computed(() => ({
-  sm: 'max-w-md',
-  md: 'max-w-lg',
-  lg: 'max-w-2xl',
-  xl: 'max-w-4xl',
-  full: 'max-w-6xl',
-}[props.size] || 'max-w-lg'))
+  sm: 'sm:max-w-md',
+  md: 'sm:max-w-lg',
+  lg: 'sm:max-w-2xl',
+  xl: 'sm:max-w-4xl',
+  full: 'sm:max-w-6xl',
+}[props.size] || 'sm:max-w-lg'))
 </script>
