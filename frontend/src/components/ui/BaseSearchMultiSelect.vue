@@ -47,6 +47,7 @@
       role="listbox"
       class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900"
       @mousedown.prevent
+      @scroll.passive="onListScroll"
     >
       <button
         v-for="item in options"
@@ -70,14 +71,15 @@
           aria-hidden="true"
         />
       </button>
-      <p v-if="!options.length" class="px-3 py-4 text-center text-xs text-gray-400">{{ emptyText }}</p>
+      <p v-if="!options.length && !loadingMore" class="px-3 py-4 text-center text-xs text-gray-400">{{ emptyText }}</p>
+      <p v-if="loadingMore" class="px-3 py-2 text-center text-xs text-gray-400 dark:text-gray-500">加载中…</p>
     </div>
     <p v-if="hint" class="mt-1 text-xs text-gray-500 dark:text-gray-400">{{ hint }}</p>
   </div>
 </template>
 
 <script setup>
-import { computed, ref, watch, onBeforeUnmount } from 'vue'
+import { computed, ref, watch, nextTick, onBeforeUnmount } from 'vue'
 import { MagnifyingGlassIcon, CheckIcon, XMarkIcon } from '@heroicons/vue/20/solid'
 
 const props = defineProps({
@@ -94,9 +96,12 @@ const props = defineProps({
   hint: String,
   required: Boolean,
   disabled: Boolean,
+  /** 是否还有更多项（滚动到底触发 load-more） */
+  hasMore: { type: Boolean, default: false },
+  loadingMore: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['update:modelValue', 'update:search', 'search'])
+const emit = defineEmits(['update:modelValue', 'update:search', 'search', 'load-more'])
 
 const rootRef = ref(null)
 const inputRef = ref(null)
@@ -104,10 +109,41 @@ const listRef = ref(null)
 const panelOpen = ref(false)
 let focusOutTimer = null
 
+const loadMoreArmed = ref(true)
+const SCROLL_LOAD_THRESHOLD_PX = 48
+
 watch(
   () => props.disabled,
   (d) => {
     if (d) panelOpen.value = false
+  },
+)
+
+watch(
+  () => props.loadingMore,
+  (loading, wasLoading) => {
+    if (wasLoading && !loading) loadMoreArmed.value = true
+  },
+)
+
+watch(panelOpen, (open) => {
+  if (open) loadMoreArmed.value = true
+})
+
+watch(
+  () => props.options.length,
+  async () => {
+    loadMoreArmed.value = true
+    await nextTick()
+    const el = listRef.value
+    if (!el || !props.hasMore || props.loadingMore || props.disabled) return
+    if (
+      el.scrollHeight <= el.clientHeight ||
+      el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD_PX
+    ) {
+      loadMoreArmed.value = false
+      emit('load-more')
+    }
   },
 )
 
@@ -157,6 +193,21 @@ function closePanel() {
     focusOutTimer = null
   }
   panelOpen.value = false
+}
+
+function onListScroll(e) {
+  const el = e.target
+  if (!el || props.disabled) return
+  const nearBottom =
+    el.scrollTop + el.clientHeight >= el.scrollHeight - SCROLL_LOAD_THRESHOLD_PX
+  if (!nearBottom) {
+    loadMoreArmed.value = true
+    return
+  }
+  if (!loadMoreArmed.value) return
+  if (!props.hasMore || props.loadingMore) return
+  loadMoreArmed.value = false
+  emit('load-more')
 }
 
 const normalizedIds = computed(() =>

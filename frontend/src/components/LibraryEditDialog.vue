@@ -92,11 +92,14 @@
         :options="filteredResources"
         :item-label="resourceItemLabel"
         :resolve-label="resourceChipLabel"
+        :has-more="resourceHasMore"
+        :loading-more="personLoadingMore"
         label="选择资源"
         required
         placeholder="搜索..."
         @update:search="setResourceSearch"
         @search="onResourceSearch"
+        @load-more="onResourceLoadMore"
       />
 
       <!-- Refresh interval -->
@@ -274,6 +277,9 @@
 
 <script setup>
 import { ref, computed, watch } from "vue";
+
+/** 本地分类（合集/标签/类型/工作室）下拉分页大小，与人员接口每页 100 对齐量级 */
+const LOCAL_RESOURCE_PAGE_SIZE = 80;
 import { useMainStore } from "@/stores/main";
 import api from "@/api";
 import BaseDialog from "@/components/ui/BaseDialog.vue";
@@ -324,6 +330,28 @@ const selectedResourceIdSet = computed(
     new Set((store.currentLibrary.resource_ids || []).map((x) => String(x))),
 );
 
+const localResourceVisibleEnd = ref(LOCAL_RESOURCE_PAGE_SIZE);
+const personPage = ref(1);
+const personHasMore = ref(false);
+const personLoadingMore = ref(false);
+
+const classificationKeyMap = {
+  collection: "collections",
+  tag: "tags",
+  genre: "genres",
+  studio: "studios",
+};
+
+/** 当前类型下、按搜索词过滤后的完整列表（数据仍来自已加载的 classifications） */
+const classificationFilteredList = computed(() => {
+  const type = store.currentLibrary.resource_type;
+  if (!classificationKeyMap[type]) return [];
+  const all = store.classifications[classificationKeyMap[type]] || [];
+  const q = resourceSearch.value.trim().toLowerCase();
+  if (!q) return all;
+  return all.filter((i) => i.name.toLowerCase().includes(q));
+});
+
 const filteredResources = computed(() => {
   const type = store.currentLibrary.resource_type;
   if (!type) return [];
@@ -340,28 +368,58 @@ const filteredResources = computed(() => {
     }
     let list = Array.from(merged.values());
     const q = resourceSearch.value.trim().toLowerCase();
-    if (q)
+    if (q) {
       list = list.filter((p) =>
         String(p.name || "")
           .toLowerCase()
           .includes(q),
       );
-    return list.slice(0, 100);
+    }
+    return list;
   }
-  const keyMap = {
-    collection: "collections",
-    tag: "tags",
-    genre: "genres",
-    studio: "studios",
-  };
-  const all = store.classifications[keyMap[type]] || [];
-  if (!resourceSearch.value.trim()) return all.slice(0, 100);
-  const q = resourceSearch.value.toLowerCase();
-  return all.filter((i) => i.name.toLowerCase().includes(q)).slice(0, 100);
+  if (!classificationKeyMap[type]) return [];
+  const slice = classificationFilteredList.value.slice(
+    0,
+    localResourceVisibleEnd.value,
+  );
+  const merged = new Map();
+  for (const i of slice) {
+    merged.set(String(i.id), i);
+  }
+  const allRaw =
+    store.classifications[classificationKeyMap[type]] || [];
+  for (const id of selectedResourceIdSet.value) {
+    if (!merged.has(id)) {
+      const found = allRaw.find((x) => String(x.id) === id);
+      if (found) merged.set(id, found);
+    }
+  }
+  return Array.from(merged.values());
+});
+
+const resourceHasMore = computed(() => {
+  const type = store.currentLibrary.resource_type;
+  if (type === "person") return personHasMore.value;
+  if (classificationKeyMap[type]) {
+    return (
+      localResourceVisibleEnd.value < classificationFilteredList.value.length
+    );
+  }
+  return false;
 });
 
 const personResults = ref([]);
 let personFetchSeq = 0;
+
+function resetClassificationPaging() {
+  localResourceVisibleEnd.value = LOCAL_RESOURCE_PAGE_SIZE;
+}
+
+function resetPersonPaging() {
+  personPage.value = 1;
+  personHasMore.value = false;
+  personLoadingMore.value = false;
+}
 
 function applyPersonResults(data) {
   personResults.value = data || [];
@@ -371,9 +429,12 @@ function applyPersonResults(data) {
   });
 }
 
-/** 有关键词走 Items 搜索；无关键词走 /Persons 首屏（与后端约定一致） */
+const PERSON_PAGE_SIZE = 100;
+
+/** 有关键词走 Items 搜索；无关键词走 /Persons 分页（与后端约定一致） */
 async function fetchPersonListForQuery(q) {
   const seq = ++personFetchSeq;
+  resetPersonPaging();
   const trimmed = String(q ?? "").trim();
   try {
     const res = trimmed
@@ -381,9 +442,58 @@ async function fetchPersonListForQuery(q) {
       : await api.searchPersons(undefined, 1);
     if (seq !== personFetchSeq) return;
     applyPersonResults(res.data);
+    const batch = res.data || [];
+    personHasMore.value = batch.length >= PERSON_PAGE_SIZE;
   } catch {
     if (seq !== personFetchSeq) return;
     personResults.value = [];
+    personHasMore.value = false;
+  }
+}
+
+async function fetchPersonNextPage() {
+  if (!personHasMore.value || personLoadingMore.value) return;
+  const listGen = personFetchSeq;
+  personLoadingMore.value = true;
+  const nextPage = personPage.value + 1;
+  const trimmed = resourceSearch.value.trim();
+  try {
+    const res = trimmed
+      ? await api.searchPersons(trimmed, nextPage)
+      : await api.searchPersons(undefined, nextPage);
+    if (listGen !== personFetchSeq) return;
+    const batch = res.data || [];
+    if (batch.length < PERSON_PAGE_SIZE) personHasMore.value = false;
+    const map = new Map(
+      personResults.value.map((p) => [String(p.id), p]),
+    );
+    for (const p of batch) {
+      map.set(String(p.id), p);
+      if (p.id && !store.personNameCache[p.id])
+        store.personNameCache[p.id] = p.name;
+    }
+    personResults.value = Array.from(map.values());
+    personPage.value = nextPage;
+  } catch {
+    if (listGen === personFetchSeq) personHasMore.value = false;
+  } finally {
+    personLoadingMore.value = false;
+  }
+}
+
+function onResourceLoadMore() {
+  const rt = store.currentLibrary.resource_type;
+  if (rt === "person") {
+    void fetchPersonNextPage();
+    return;
+  }
+  if (classificationKeyMap[rt]) {
+    const full = classificationFilteredList.value.length;
+    if (localResourceVisibleEnd.value >= full) return;
+    localResourceVisibleEnd.value = Math.min(
+      localResourceVisibleEnd.value + LOCAL_RESOURCE_PAGE_SIZE,
+      full,
+    );
   }
 }
 
@@ -420,15 +530,19 @@ function onResourceTypeChange() {
   store.currentLibrary.resource_ids = [];
   resourceSearch.value = "";
   personResults.value = [];
+  resetClassificationPaging();
+  resetPersonPaging();
   if (store.currentLibrary.resource_type === "person") {
     void fetchPersonListForQuery("");
   }
 }
 
 const onResourceSearch = async (query) => {
-  if (store.currentLibrary.resource_type !== "person") return;
-  const q = String(query ?? resourceSearch.value ?? "");
-  await fetchPersonListForQuery(q);
+  const rt = store.currentLibrary.resource_type;
+  if (rt === "person") {
+    const q = String(query ?? resourceSearch.value ?? "");
+    await fetchPersonListForQuery(q);
+  }
 };
 
 const handleFileUpload = async (e) => {
@@ -466,6 +580,13 @@ const handleGenerateCover = async () => {
   );
 };
 
+watch(resourceSearch, () => {
+  const rt = store.currentLibrary.resource_type;
+  if (classificationKeyMap[rt]) {
+    resetClassificationPaging();
+  }
+});
+
 watch(
   () => store.dialogVisible,
   (val) => {
@@ -473,6 +594,8 @@ watch(
     selectedStyle.value = "style_multi_1";
     uploadedPaths.value = [];
     personResults.value = [];
+    resetClassificationPaging();
+    resetPersonPaging();
     const lib = store.currentLibrary;
     const rt = lib.resource_type;
     const ids =
