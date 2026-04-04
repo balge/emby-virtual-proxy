@@ -1,5 +1,5 @@
 <template>
-  <div class="w-full">
+  <div ref="rootRef" class="w-full" @focusin="onRootFocusIn" @focusout="onRootFocusOut">
     <label v-if="label" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
       {{ label }}
       <span v-if="required" class="text-red-500">*</span>
@@ -26,6 +26,7 @@
       </span>
       <div class="relative flex min-w-[6rem] flex-1 items-center gap-1">
         <input
+          ref="inputRef"
           type="text"
           :value="search"
           :placeholder="placeholder"
@@ -34,8 +35,6 @@
           aria-haspopup="listbox"
           autocomplete="off"
           class="min-w-0 flex-1 border-0 bg-transparent py-1 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-100 dark:placeholder:text-gray-500"
-          @focus="onInputFocus"
-          @blur="onInputBlur"
           @keydown.escape.prevent.stop="closePanel"
           @input="onSearchInput"
         />
@@ -44,6 +43,7 @@
     </div>
     <div
       v-if="panelOpen"
+      ref="listRef"
       role="listbox"
       class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900"
       @mousedown.prevent
@@ -98,8 +98,11 @@ const props = defineProps({
 
 const emit = defineEmits(['update:modelValue', 'update:search', 'search'])
 
+const rootRef = ref(null)
+const inputRef = ref(null)
+const listRef = ref(null)
 const panelOpen = ref(false)
-let blurCloseTimer = null
+let focusOutTimer = null
 
 watch(
   () => props.disabled,
@@ -109,30 +112,49 @@ watch(
 )
 
 onBeforeUnmount(() => {
-  if (blurCloseTimer) clearTimeout(blurCloseTimer)
+  if (focusOutTimer) clearTimeout(focusOutTimer)
 })
 
-function onInputFocus() {
+/** 仅搜索框获得焦点时展开 */
+function onRootFocusIn(e) {
   if (props.disabled) return
-  if (blurCloseTimer) {
-    clearTimeout(blurCloseTimer)
-    blurCloseTimer = null
+  if (focusOutTimer) {
+    clearTimeout(focusOutTimer)
+    focusOutTimer = null
   }
-  panelOpen.value = true
+  if (inputRef.value && e.target === inputRef.value) {
+    panelOpen.value = true
+  }
 }
 
-function onInputBlur() {
+/**
+ * 焦点离开组件，或移到标签删除按钮等区域时收起。
+ * 用 microtask 读取 document.activeElement：点击选项时焦点可能先落到按钮上，仍在 listRef 内，不应误关。
+ */
+function onRootFocusOut() {
   if (props.disabled) return
-  blurCloseTimer = setTimeout(() => {
+  if (focusOutTimer) clearTimeout(focusOutTimer)
+  focusOutTimer = window.setTimeout(() => {
+    focusOutTimer = null
+    const root = rootRef.value
+    const inputEl = inputRef.value
+    const listEl = listRef.value
+    const ae = document.activeElement
+    if (!root) return
+    if (!ae || !root.contains(ae)) {
+      panelOpen.value = false
+      return
+    }
+    if (ae === inputEl) return
+    if (listEl && listEl.contains(ae)) return
     panelOpen.value = false
-    blurCloseTimer = null
-  }, 100)
+  }, 0)
 }
 
 function closePanel() {
-  if (blurCloseTimer) {
-    clearTimeout(blurCloseTimer)
-    blurCloseTimer = null
+  if (focusOutTimer) {
+    clearTimeout(focusOutTimer)
+    focusOutTimer = null
   }
   panelOpen.value = false
 }
