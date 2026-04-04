@@ -1,5 +1,5 @@
 <template>
-  <div class="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 px-4">
+  <div class="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-950 px-4 pt-[env(safe-area-inset-top,0px)] pb-[env(safe-area-inset-bottom,0px)]">
     <div class="w-full max-w-sm">
       <div class="bg-white dark:bg-gray-800 rounded-2xl shadow-lg p-8">
         <div class="text-center mb-8">

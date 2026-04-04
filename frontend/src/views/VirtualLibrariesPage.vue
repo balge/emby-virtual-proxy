@@ -5,11 +5,11 @@
         <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">虚拟媒体库</h1>
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-0.5">创建、编辑和管理虚拟库</p>
       </div>
-      <div class="flex flex-wrap gap-2">
-        <BaseButton @click="store.refreshAllCovers()">刷新所有封面</BaseButton>
-        <BaseButton @click="store.fetchAllEmbyData" :loading="store.dataLoading">刷新Emby数据</BaseButton>
-        <BaseButton @click="store.openLayoutManager">调整布局</BaseButton>
-        <BaseButton variant="primary" @click="store.openAddDialog">添加虚拟库</BaseButton>
+      <div class="grid grid-cols-2 gap-2 w-full sm:w-auto sm:flex sm:flex-wrap sm:justify-end">
+        <BaseButton class="min-w-0" @click="store.refreshAllCovers()">刷新所有封面</BaseButton>
+        <BaseButton class="min-w-0" @click="store.fetchAllEmbyData" :loading="store.dataLoading">刷新Emby数据</BaseButton>
+        <BaseButton class="min-w-0" @click="store.openLayoutManager">调整布局</BaseButton>
+        <BaseButton class="min-w-0" variant="primary" @click="store.openAddDialog">添加虚拟库</BaseButton>
       </div>
     </div>
 

@@ -1,22 +1,24 @@
 <template>
-  <!-- Top bar -->
-  <div class="lg:hidden fixed top-0 inset-x-0 h-14 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800 z-30 flex items-center justify-between px-4">
-    <div class="flex items-center gap-2">
-      <img src="/favicon.png" alt="Logo" class="w-7 h-7 rounded-md" />
-      <span class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Emby Proxy</span>
-    </div>
-    <div class="flex items-center gap-2">
-      <button @click="toggleDark" class="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800">
-        <MoonIcon v-if="!isDark" class="w-5 h-5" />
-        <SunIcon v-else class="w-5 h-5" />
-      </button>
-      <button
-        v-if="authEnabled"
-        @click="$emit('logout')"
-        class="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
-      >
-        <ArrowRightStartOnRectangleIcon class="w-5 h-5" />
-      </button>
+  <!-- Top bar: pad for notch / status bar in standalone (PWA) -->
+  <div class="lg:hidden fixed top-0 inset-x-0 z-30 bg-white/80 dark:bg-gray-900/80 backdrop-blur-md border-b border-gray-200 dark:border-gray-800 safe-top-bar">
+    <div class="h-14 flex items-center justify-between px-4">
+      <div class="flex items-center gap-2">
+        <img src="/favicon.png" alt="Logo" class="w-7 h-7 rounded-md" />
+        <span class="font-semibold text-gray-900 dark:text-gray-100 text-sm">Emby Proxy</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button @click="toggleDark" class="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800">
+          <MoonIcon v-if="!isDark" class="w-5 h-5" />
+          <SunIcon v-else class="w-5 h-5" />
+        </button>
+        <button
+          v-if="authEnabled"
+          @click="$emit('logout')"
+          class="p-2 rounded-lg text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-800"
+        >
+          <ArrowRightStartOnRectangleIcon class="w-5 h-5" />
+        </button>
+      </div>
     </div>
   </div>
 
@@ -79,7 +81,10 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.safe-top-bar {
+  padding-top: env(safe-area-inset-top, 0px);
+}
 .safe-bottom {
-  padding-bottom: max(0.25rem, env(safe-area-inset-bottom));
+  padding-bottom: max(0.25rem, env(safe-area-inset-bottom, 0px));
 }
 </style>
