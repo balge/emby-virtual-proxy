@@ -30,19 +30,30 @@
           :value="search"
           :placeholder="placeholder"
           :disabled="disabled"
+          :aria-expanded="panelOpen"
+          aria-haspopup="listbox"
+          autocomplete="off"
           class="min-w-0 flex-1 border-0 bg-transparent py-1 text-sm text-gray-900 placeholder:text-gray-400 focus:outline-none focus:ring-0 dark:text-gray-100 dark:placeholder:text-gray-500"
+          @focus="onInputFocus"
+          @blur="onInputBlur"
+          @keydown.escape.prevent.stop="closePanel"
           @input="onSearchInput"
         />
         <MagnifyingGlassIcon class="h-4 w-4 shrink-0 text-gray-400 dark:text-gray-500" aria-hidden="true" />
       </div>
     </div>
     <div
+      v-if="panelOpen"
+      role="listbox"
       class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900"
+      @mousedown.prevent
     >
       <button
         v-for="item in options"
         :key="item.id"
         type="button"
+        role="option"
+        :aria-selected="isSelected(item)"
         :disabled="disabled"
         class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm transition-colors disabled:opacity-50 disabled:pointer-events-none"
         :class="
@@ -66,7 +77,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch, onBeforeUnmount } from 'vue'
 import { MagnifyingGlassIcon, CheckIcon, XMarkIcon } from '@heroicons/vue/20/solid'
 
 const props = defineProps({
@@ -86,6 +97,45 @@ const props = defineProps({
 })
 
 const emit = defineEmits(['update:modelValue', 'update:search', 'search'])
+
+const panelOpen = ref(false)
+let blurCloseTimer = null
+
+watch(
+  () => props.disabled,
+  (d) => {
+    if (d) panelOpen.value = false
+  },
+)
+
+onBeforeUnmount(() => {
+  if (blurCloseTimer) clearTimeout(blurCloseTimer)
+})
+
+function onInputFocus() {
+  if (props.disabled) return
+  if (blurCloseTimer) {
+    clearTimeout(blurCloseTimer)
+    blurCloseTimer = null
+  }
+  panelOpen.value = true
+}
+
+function onInputBlur() {
+  if (props.disabled) return
+  blurCloseTimer = setTimeout(() => {
+    panelOpen.value = false
+    blurCloseTimer = null
+  }, 100)
+}
+
+function closePanel() {
+  if (blurCloseTimer) {
+    clearTimeout(blurCloseTimer)
+    blurCloseTimer = null
+  }
+  panelOpen.value = false
+}
 
 const normalizedIds = computed(() =>
   (props.modelValue || []).map((x) => String(x)).filter(Boolean),
