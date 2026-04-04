@@ -41,10 +41,29 @@
           </tr>
         </thead>
         <tbody class="divide-y divide-gray-100 dark:divide-gray-700/50">
-          <tr v-for="row in store.virtualLibraries" :key="row.id" class="hover:bg-gray-50 dark:hover:bg-gray-700/30 transition-colors" :class="{ 'opacity-50': row.hidden }">
+          <tr
+            v-for="row in store.virtualLibraries"
+            :key="row.id"
+            class="transition-colors"
+            :class="[
+              row.hidden && !rowSyncing(row.id) ? 'opacity-50' : '',
+              rowSyncing(row.id)
+                ? 'relative bg-primary-50/40 dark:bg-primary-950/25 pointer-events-none'
+                : 'hover:bg-gray-50 dark:hover:bg-gray-700/30',
+            ]"
+          >
             <td class="px-4 py-3">
-              <div class="flex items-center gap-2">
-                <span class="font-medium text-gray-900 dark:text-gray-100">{{ row.name }}</span>
+              <div class="flex items-center gap-2 min-w-0">
+                <template v-if="rowSyncing(row.id)">
+                  <span class="inline-flex shrink-0 text-primary-600 dark:text-primary-400" aria-hidden="true">
+                    <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
+                      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+                      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                    </svg>
+                  </span>
+                  <span class="text-xs font-medium text-primary-700 dark:text-primary-300 shrink-0">生成中</span>
+                </template>
+                <span class="font-medium text-gray-900 dark:text-gray-100 truncate">{{ row.name }}</span>
                 <BaseTag v-if="row.hidden" variant="default">已隐藏</BaseTag>
               </div>
             </td>
@@ -111,9 +130,25 @@
 
     <!-- Mobile cards -->
     <div class="md:hidden space-y-3">
-      <div v-for="row in store.virtualLibraries" :key="row.id"
-        class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden"
-        :class="{ 'opacity-50': row.hidden }">
+      <div
+        v-for="row in store.virtualLibraries"
+        :key="row.id"
+        class="relative bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 overflow-hidden"
+        :class="[
+          row.hidden && !rowSyncing(row.id) ? 'opacity-50' : '',
+          rowSyncing(row.id) ? 'ring-2 ring-primary-500/40 ring-inset' : '',
+        ]"
+      >
+        <div
+          v-if="rowSyncing(row.id)"
+          class="absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-white/85 dark:bg-gray-900/85 backdrop-blur-[2px]"
+        >
+          <svg class="animate-spin h-8 w-8 text-primary-600 dark:text-primary-400" viewBox="0 0 24 24" fill="none">
+            <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" />
+            <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          <span class="text-xs font-medium text-primary-800 dark:text-primary-200">正在生成数据与封面…</span>
+        </div>
         <!-- 16:9 cover banner -->
         <div v-if="row.image_tag" class="w-full aspect-video bg-gray-100 dark:bg-gray-700">
           <img :src="`/covers/${row.id}.jpg?t=${row.image_tag}`" class="w-full h-full object-cover" />
@@ -174,6 +209,8 @@ import LibraryEditDialog from '@/components/LibraryEditDialog.vue'
 import DisplayOrderManager from '@/components/DisplayOrderManager.vue'
 
 const store = useMainStore()
+
+const rowSyncing = (id) => !!store.libraryRowSyncing[String(id)]
 
 const typeMap = { collection: '合集', tag: '标签', genre: '类型', studio: '工作室', person: '人员', rsshub: 'RSS', random: '推荐', all: '全库' }
 const getTypeLabel = (t) => typeMap[t] || '未知'

@@ -4,7 +4,7 @@
       <!-- Basic -->
       <BaseInput v-model="store.currentLibrary.name" label="虚拟库名称" placeholder="例如：豆瓣高分电影" required />
 
-      <BaseSelect v-model="store.currentLibrary.resource_type" label="资源类型" required @update:model-value="store.currentLibrary.resource_id = ''">
+      <BaseSelect v-model="store.currentLibrary.resource_type" label="资源类型" required @update:model-value="onResourceTypeChange">
         <option value="all">全库 (All)</option>
         <option value="collection">合集 (Collection)</option>
         <option value="tag">标签 (Tag)</option>
@@ -39,30 +39,18 @@
         </BaseSelect>
       </template>
 
-      <!-- Resource selector -->
-      <div v-if="!['all', 'rsshub', 'random'].includes(store.currentLibrary.resource_type)">
-        <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">选择资源 <span class="text-red-500">*</span></label>
-        <input
-          type="text"
-          v-model="resourceSearch"
-          placeholder="搜索..."
-          class="block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800 dark:text-gray-100 focus:border-primary-500 focus:ring-2 focus:ring-primary-500/20 focus:outline-none mb-2"
-          @input="onResourceSearch"
-        />
-        <div class="max-h-40 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900">
-          <button
-            v-for="item in filteredResources"
-            :key="item.id"
-            type="button"
-            class="w-full text-left px-3 py-2 text-sm hover:bg-primary-50 dark:hover:bg-primary-900/20 transition-colors"
-            :class="store.currentLibrary.resource_id === item.id ? 'bg-primary-50 text-primary-700 dark:bg-primary-900/30 dark:text-primary-300' : 'text-gray-700 dark:text-gray-300'"
-            @click="store.currentLibrary.resource_id = item.id"
-          >
-            {{ store.currentLibrary.resource_type === 'person' ? (store.personNameCache[item.id] || item.name) : item.name }}
-          </button>
-          <p v-if="!filteredResources.length" class="px-3 py-4 text-center text-xs text-gray-400">无结果</p>
-        </div>
-      </div>
+      <BaseSearchSelect
+        v-if="!['all', 'rsshub', 'random'].includes(store.currentLibrary.resource_type)"
+        v-model="store.currentLibrary.resource_id"
+        :search="resourceSearch"
+        :options="filteredResources"
+        :item-label="resourceItemLabel"
+        label="选择资源"
+        required
+        placeholder="搜索..."
+        @update:search="setResourceSearch"
+        @search="onResourceSearch"
+      />
 
       <!-- Refresh interval -->
       <div>
@@ -88,15 +76,28 @@
       <!-- Source libraries -->
       <div v-if="store.currentLibrary.resource_type !== 'rsshub'">
         <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">源库范围</label>
-        <div class="max-h-32 overflow-y-auto rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900 p-2 space-y-1">
-          <label v-for="lib in realLibrariesList" :key="lib.id" class="flex items-center gap-2 px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-800 cursor-pointer">
-            <input type="checkbox" :value="lib.id" v-model="store.currentLibrary.source_libraries"
-              class="rounded border-gray-300 text-primary-600 focus:ring-primary-500 dark:border-gray-600 dark:bg-gray-800" />
-            <span class="text-sm text-gray-700 dark:text-gray-300">{{ lib.name }}</span>
-          </label>
-          <p v-if="!realLibrariesList.length" class="text-xs text-gray-400 text-center py-2">无可用真实库</p>
+        <p class="text-xs text-gray-500 dark:text-gray-400 mb-2">点击标签切换选中；不选则搜索全部真实库。</p>
+        <div
+          class="max-h-36 overflow-y-auto rounded-xl border border-gray-200/80 dark:border-gray-600/80 bg-gradient-to-b from-gray-50 to-white dark:from-gray-900/80 dark:to-gray-950 p-3 shadow-sm"
+        >
+          <div v-if="realLibrariesList.length" class="flex flex-wrap gap-2">
+            <button
+              v-for="lib in realLibrariesList"
+              :key="lib.id"
+              type="button"
+              class="inline-flex max-w-full items-center rounded-full border px-3 py-1.5 text-sm font-medium transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500/40 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-gray-950"
+              :class="
+                isSourceLibSelected(lib.id)
+                  ? 'border-primary-500/30 bg-primary-600 text-white shadow-sm hover:bg-primary-700 dark:bg-primary-600 dark:hover:bg-primary-500'
+                  : 'border-gray-200 bg-white/90 text-gray-600 hover:border-primary-300/50 hover:bg-primary-50/80 hover:text-primary-800 dark:border-gray-600 dark:bg-gray-800/90 dark:text-gray-300 dark:hover:border-primary-500/40 dark:hover:bg-primary-950/40 dark:hover:text-primary-200'
+              "
+              @click="toggleSourceLibrary(lib.id)"
+            >
+              <span class="truncate">{{ lib.name }}</span>
+            </button>
+          </div>
+          <p v-else class="py-6 text-center text-xs text-gray-400 dark:text-gray-500">无可用真实库</p>
         </div>
-        <p class="mt-1 text-xs text-gray-500">不选则搜索全部真实库。</p>
       </div>
 
       <!-- Cover section -->
@@ -154,6 +155,7 @@ import api from '@/api'
 import BaseDialog from '@/components/ui/BaseDialog.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
+import BaseSearchSelect from '@/components/ui/BaseSearchSelect.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import BaseTag from '@/components/ui/BaseTag.vue'
@@ -169,6 +171,22 @@ const realLibrariesList = computed(() => {
   const enabledIds = new Set(rlConfigs.filter(r => r.enabled).map(r => r.id))
   return (store.allLibrariesForSorting || []).filter(l => l.type === 'real' && enabledIds.has(l.id))
 })
+
+function isSourceLibSelected(libId) {
+  const arr = store.currentLibrary.source_libraries
+  if (!Array.isArray(arr)) return false
+  return arr.some((x) => String(x) === String(libId))
+}
+
+function toggleSourceLibrary(libId) {
+  if (!Array.isArray(store.currentLibrary.source_libraries)) {
+    store.currentLibrary.source_libraries = []
+  }
+  const arr = store.currentLibrary.source_libraries
+  const i = arr.findIndex((x) => String(x) === String(libId))
+  if (i >= 0) arr.splice(i, 1)
+  else arr.push(libId)
+}
 
 const filteredResources = computed(() => {
   const type = store.currentLibrary.resource_type
@@ -186,14 +204,29 @@ const filteredResources = computed(() => {
 
 const personResults = ref([])
 
-const onResourceSearch = async () => {
-  if (store.currentLibrary.resource_type === 'person') {
-    try {
-      const res = await api.searchPersons(resourceSearch.value, 1)
-      personResults.value = res.data || []
-      personResults.value.forEach(p => { if (p.id && !store.personNameCache[p.id]) store.personNameCache[p.id] = p.name })
-    } catch { personResults.value = [] }
-  }
+function setResourceSearch(v) {
+  resourceSearch.value = v
+}
+
+function resourceItemLabel(item) {
+  return store.currentLibrary.resource_type === 'person'
+    ? (store.personNameCache[item.id] || item.name)
+    : item.name
+}
+
+function onResourceTypeChange() {
+  store.currentLibrary.resource_id = ''
+  resourceSearch.value = ''
+  personResults.value = []
+}
+
+const onResourceSearch = async (query) => {
+  if (store.currentLibrary.resource_type !== 'person') return
+  try {
+    const res = await api.searchPersons(query ?? resourceSearch.value, 1)
+    personResults.value = res.data || []
+    personResults.value.forEach(p => { if (p.id && !store.personNameCache[p.id]) store.personNameCache[p.id] = p.name })
+  } catch { personResults.value = [] }
 }
 
 const handleFileUpload = async (e) => {
@@ -219,17 +252,36 @@ const handleGenerateCover = async () => {
 }
 
 watch(() => store.dialogVisible, (val) => {
-  if (val) {
-    selectedStyle.value = 'style_multi_1'
-    uploadedPaths.value = []
+  if (!val) return
+  selectedStyle.value = 'style_multi_1'
+  uploadedPaths.value = []
+  personResults.value = []
+  const lib = store.currentLibrary
+  const rt = lib.resource_type
+  if (['all', 'rsshub', 'random'].includes(rt)) {
     resourceSearch.value = ''
-    personResults.value = []
-    // Pre-populate person results for editing
-    if (store.isEditing && store.currentLibrary.resource_type === 'person' && store.currentLibrary.resource_id) {
-      const name = store.personNameCache[store.currentLibrary.resource_id]
-      if (name) personResults.value = [{ id: store.currentLibrary.resource_id, name }]
-      else api.resolveItem(store.currentLibrary.resource_id).then(r => { personResults.value = [r.data]; store.personNameCache[r.data.id] = r.data.name })
+  } else if (lib.resource_id) {
+    if (rt === 'person') {
+      const cached = store.personNameCache[lib.resource_id]
+      if (cached && cached !== '...') {
+        resourceSearch.value = cached
+        personResults.value = [{ id: lib.resource_id, name: cached }]
+      } else {
+        resourceSearch.value = ''
+        api.resolveItem(lib.resource_id).then((r) => {
+          personResults.value = [r.data]
+          store.personNameCache[r.data.id] = r.data.name
+          resourceSearch.value = r.data.name
+        }).catch(() => {})
+      }
+    } else {
+      const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
+      const all = store.classifications[keyMap[rt]] || []
+      const found = all.find((i) => i.id === lib.resource_id)
+      resourceSearch.value = found ? found.name : ''
     }
+  } else {
+    resourceSearch.value = ''
   }
 })
 </script>

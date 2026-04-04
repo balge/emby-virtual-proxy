@@ -30,6 +30,8 @@ export const useMainStore = defineStore('main', {
     layoutManagerVisible: false,
     coverGenerating: false,
     personNameCache: {},
+    /** 虚拟库行后台任务进行中（保存后刷新数据 / 点「数据」「封面」等），key 为 library id 字符串 */
+    libraryRowSyncing: {},
   }),
 
   getters: {
@@ -101,6 +103,33 @@ export const useMainStore = defineStore('main', {
       }
     },
 
+    _sleep(ms) {
+      return new Promise((resolve) => setTimeout(resolve, ms))
+    },
+
+    /**
+     * 后台 refresh 完成后会把新的 image_tag 写入配置；轮询 /config 直到 tag 变化或超时。
+     * @returns {Promise<boolean>} true 表示检测到更新，false 为超时
+     */
+    async _pollLibraryDataReady(libraryId, previousImageTag, { maxMs = 120000, intervalMs = 2000 } = {}) {
+      const idStr = String(libraryId)
+      const normalizedPrev = previousImageTag ?? null
+      const deadline = Date.now() + maxMs
+      while (Date.now() < deadline) {
+        await this._sleep(intervalMs)
+        try {
+          const cfgRes = await api.getConfig()
+          const lib = cfgRes.data?.library?.find((l) => String(l.id) === idStr)
+          if (!lib) continue
+          const tag = lib.image_tag ?? null
+          if (tag && tag !== normalizedPrev) return true
+        } catch {
+          /* 单次轮询失败则继续 */
+        }
+      }
+      return false
+    },
+
     async saveAdvancedFilters(filters) {
       this.saving = true
       try {
@@ -144,12 +173,34 @@ export const useMainStore = defineStore('main', {
       }
 
       this.saving = true
-      const action = this.isEditing ? api.updateLibrary(lib.id, lib) : api.addLibrary(lib)
       try {
-        await action
+        const res = await (this.isEditing ? api.updateLibrary(lib.id, lib) : api.addLibrary(lib))
+        const savedId = this.isEditing ? lib.id : res.data?.id
+        if (!savedId) {
+          toast.error('保存失败：未返回虚拟库 ID')
+          return
+        }
         toast.success(this.isEditing ? '虚拟库已更新' : '虚拟库已添加')
         this.dialogVisible = false
         await this._reloadConfigAndAllLibs()
+
+        const row = this.config.library?.find((l) => String(l.id) === String(savedId))
+        const prevImageTag = row?.image_tag ?? null
+        const idStr = String(savedId)
+        this.libraryRowSyncing[idStr] = true
+        try {
+          await api.refreshLibraryData(savedId)
+          const ok = await this._pollLibraryDataReady(savedId, prevImageTag)
+          if (!ok) {
+            toast.warning('后台仍在生成数据或封面，请稍后查看，或点击「数据」手动刷新')
+          }
+        } catch (e) {
+          this._handleApiError(e, '触发数据与封面刷新失败')
+        } finally {
+          await this._reloadConfigAndAllLibs()
+          delete this.libraryRowSyncing[idStr]
+          this.resolveVisiblePersonNames()
+        }
       } catch (error) {
         this._handleApiError(error, '保存虚拟库失败')
       } finally {
@@ -218,13 +269,49 @@ export const useMainStore = defineStore('main', {
     },
 
     async refreshRssLibrary(id) {
-      try { await api.refreshRssLibrary(id); toast.success('RSS 库刷新请求已发送') } catch (e) { this._handleApiError(e, '刷新 RSS 库失败') }
+      try {
+        await api.refreshRssLibrary(id)
+        toast.info('RSS 刷新已提交。拉取与入库较慢，可能要等几分钟，请稍后在客户端或刷新本页查看。')
+        await this._reloadConfigAndAllLibs()
+      } catch (e) {
+        this._handleApiError(e, '刷新 RSS 库失败')
+      }
     },
     async refreshLibraryCover(id) {
-      try { await api.refreshLibraryCover(id); toast.success('封面刷新已启动') } catch (e) { this._handleApiError(e, '刷新封面失败') }
+      const idStr = String(id)
+      const lib = this.config.library?.find((l) => String(l.id) === idStr)
+      const prevImageTag = lib?.image_tag ?? null
+      this.libraryRowSyncing[idStr] = true
+      try {
+        await api.refreshLibraryCover(id)
+        const ok = await this._pollLibraryDataReady(idStr, prevImageTag)
+        if (ok) toast.success('封面已更新')
+        else toast.warning('封面仍在生成，请稍后查看')
+      } catch (e) {
+        this._handleApiError(e, '刷新封面失败')
+      } finally {
+        await this._reloadConfigAndAllLibs()
+        delete this.libraryRowSyncing[idStr]
+        this.resolveVisiblePersonNames()
+      }
     },
     async refreshLibraryData(id) {
-      try { await api.refreshLibraryData(id); toast.success('数据和封面刷新已启动') } catch (e) { this._handleApiError(e, '刷新数据失败') }
+      const idStr = String(id)
+      const lib = this.config.library?.find((l) => String(l.id) === idStr)
+      const prevImageTag = lib?.image_tag ?? null
+      this.libraryRowSyncing[idStr] = true
+      try {
+        await api.refreshLibraryData(id)
+        const ok = await this._pollLibraryDataReady(idStr, prevImageTag)
+        if (ok) toast.success('数据与封面已更新')
+        else toast.warning('后台仍在处理，请稍后查看或再次点击「数据」')
+      } catch (e) {
+        this._handleApiError(e, '刷新数据失败')
+      } finally {
+        await this._reloadConfigAndAllLibs()
+        delete this.libraryRowSyncing[idStr]
+        this.resolveVisiblePersonNames()
+      }
     },
     async refreshAllCovers() {
       try { await api.refreshAllCovers(); toast.success('所有虚拟库封面刷新已启动') } catch (e) { this._handleApiError(e, '刷新所有封面失败') }
