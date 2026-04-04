@@ -397,11 +397,15 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
         "collection": "CollectionIds", "tag": "TagIds",
         "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds"
     }
-    if vlib.resource_type in resource_map:
-        params[resource_map[vlib.resource_type]] = vlib.resource_id
-    elif vlib.resource_type in ("rsshub",):
-        # RSS libraries don't need Emby item fetching for covers
-        logger.info(f"Skipping cache population for RSS library '{vlib.name}'.")
+    res_ids = vlib.resolved_resource_ids() if vlib.resource_type in resource_map else []
+    rp_name = resource_map.get(vlib.resource_type)
+    if rp_name and len(res_ids) == 1:
+        params[rp_name] = res_ids[0]
+    elif rp_name and len(res_ids) == 0:
+        logger.warning(f"Skipping cache population for '{vlib.name}': no resource ids.")
+        return
+    elif vlib.resource_type in ("rsshub", "random"):
+        logger.info(f"Skipping cache population for '{vlib.resource_type}' library '{vlib.name}'.")
         return
 
     # Apply advanced filter if configured
@@ -440,7 +444,20 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
                             break
                 return items
 
-            if source_libs:
+            if rp_name and len(res_ids) > 1:
+                if source_libs:
+                    for pid in source_libs:
+                        for rid in res_ids:
+                            p = dict(params)
+                            p["ParentId"] = pid
+                            p[rp_name] = rid
+                            all_items.extend(await _fetch_all_pages(p))
+                else:
+                    for rid in res_ids:
+                        p = dict(params)
+                        p[rp_name] = rid
+                        all_items.extend(await _fetch_all_pages(p))
+            elif source_libs:
                 for pid in source_libs:
                     p = dict(params)
                     p["ParentId"] = pid

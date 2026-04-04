@@ -396,8 +396,13 @@ async def refresh_vlib_cache(
             "collection": "CollectionIds", "tag": "TagIds",
             "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds",
         }
-        if vlib.resource_type in resource_map:
-            base_params[resource_map[vlib.resource_type]] = vlib.resource_id
+        res_ids = vlib.resolved_resource_ids() if vlib.resource_type in resource_map else []
+        rp_name = resource_map.get(vlib.resource_type)
+        if rp_name and len(res_ids) == 1:
+            base_params[rp_name] = res_ids[0]
+        elif rp_name and len(res_ids) == 0:
+            logger.warning(f"No resource ids for '{vlib.name}' type={vlib.resource_type}; skip cache refresh.")
+            return 0
 
         post_filter_rules = []
         filter_match_all = True
@@ -429,7 +434,11 @@ async def refresh_vlib_cache(
             and getattr(r, "operator", None) == "greater_than"
             and getattr(r, "value", None)
         ]
-        if len(dla_rules) == 1 and (filter_match_all or len(post_filter_rules) == 1):
+        if (
+            len(dla_rules) == 1
+            and (filter_match_all or len(post_filter_rules) == 1)
+            and len(res_ids) <= 1
+        ):
             threshold_dt = _parse_iso_dt(dla_rules[0].value)
             if threshold_dt:
                 all_items = await _do_dla_fetch(
@@ -453,7 +462,23 @@ async def refresh_vlib_cache(
 
         # --- Standard full fetch ---
         all_items: List[Dict] = []
-        if source_libs:
+        if rp_name and len(res_ids) > 1:
+            if source_libs:
+                tasks = [
+                    _fetch_all_pages(session, base_url, dict(base_params, ParentId=pid, **{rp_name: rid}), headers)
+                    for pid in source_libs
+                    for rid in res_ids
+                ]
+                results = await asyncio.gather(*tasks)
+                for items in results:
+                    all_items.extend(items)
+            else:
+                for rid in res_ids:
+                    p = dict(base_params)
+                    p[rp_name] = rid
+                    all_items.extend(await _fetch_all_pages(session, base_url, p, headers))
+            all_items = _deduplicate(all_items)
+        elif source_libs:
             tasks = [
                 _fetch_all_pages(session, base_url, dict(base_params, ParentId=pid), headers)
                 for pid in source_libs

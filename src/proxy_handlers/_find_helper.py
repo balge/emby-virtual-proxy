@@ -55,40 +55,34 @@ async def is_item_in_a_merge_enabled_vlib(
 
     for vlib in merge_vlibs:
         resource_type = vlib.resource_type
-        # --- 核心修正：将虚拟库的目标ID也转换为字符串，用于后续比较 ---
-        resource_id_str = str(vlib.resource_id)
+        target_ids = {str(x) for x in vlib.resolved_resource_ids()}
         match_found = False
-        
+
         try:
             if resource_type == "collection":
-                # 将项目的所有收藏夹ID转换为字符串列表
-                item_collection_ids = [str(col_id) for col_id in item.get("CollectionIds", [])]
-                if resource_id_str in item_collection_ids:
+                item_collection_ids = {str(col_id) for col_id in item.get("CollectionIds", [])}
+                if target_ids & item_collection_ids:
                     match_found = True
-            
+
             elif resource_type == "tag":
-                # 将项目的所有标签ID转换为字符串列表
-                item_tag_ids = [str(tag.get("Id")) for tag in item.get("TagItems", []) if tag.get("Id")]
-                if resource_id_str in item_tag_ids:
+                item_tag_ids = {str(tag.get("Id")) for tag in item.get("TagItems", []) if tag.get("Id")}
+                if target_ids & item_tag_ids:
                     match_found = True
 
             elif resource_type == "genre":
-                # 将项目的所有类型ID转换为字符串列表
-                item_genre_ids = [str(genre.get("Id")) for genre in item.get("GenreItems", []) if genre.get("Id")]
-                if resource_id_str in item_genre_ids:
+                item_genre_ids = {str(genre.get("Id")) for genre in item.get("GenreItems", []) if genre.get("Id")}
+                if target_ids & item_genre_ids:
                     match_found = True
 
             elif resource_type == "studio":
-                # 将项目的所有工作室ID转换为字符串列表
-                item_studio_ids = [str(studio.get("Id")) for studio in item.get("Studios", []) if studio.get("Id")]
-                if resource_id_str in item_studio_ids:
+                item_studio_ids = {str(studio.get("Id")) for studio in item.get("Studios", []) if studio.get("Id")}
+                if target_ids & item_studio_ids:
                     match_found = True
 
             elif resource_type == "person":
-                # 将项目的所有人员ID转换为字符串列表
-                item_person_ids = [str(person.get("Id")) for person in item.get("People", []) if person.get("Id")]
-                if resource_id_str in item_person_ids:
-                     match_found = True
+                item_person_ids = {str(person.get("Id")) for person in item.get("People", []) if person.get("Id")}
+                if target_ids & item_person_ids:
+                    match_found = True
 
         except Exception as e:
             logger.error(f"MERGE_CHECK: 在检查虚拟库 '{vlib.name}' 时发生内部错误: {e}")

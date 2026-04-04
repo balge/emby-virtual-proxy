@@ -12,7 +12,13 @@ from pathlib import Path
 from . import handler_merger
 from . import handler_autogen
 from ._filter_translator import translate_rules
-from .handler_items import _apply_post_filter, _apply_custom_sort, _build_headers_to_forward, _fetch_all_items_for_parent
+from .handler_items import (
+    _apply_post_filter,
+    _apply_custom_sort,
+    _build_headers_to_forward,
+    _fetch_all_items_for_parent,
+    _deduplicate_by_id,
+)
 from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
@@ -163,8 +169,10 @@ async def handle_home_latest_items(
         new_params["Fields"] = ",".join(sorted(list(current_fields)))
 
     resource_map = {"collection": "CollectionIds", "tag": "TagIds", "person": "PersonIds", "genre": "GenreIds", "studio": "StudioIds"}
-    if found_vlib.resource_type in resource_map:
-        new_params[resource_map[found_vlib.resource_type]] = found_vlib.resource_id
+    rm = resource_map.get(found_vlib.resource_type)
+    res_ids = found_vlib.resolved_resource_ids() if rm else []
+    if rm and len(res_ids) == 1:
+        new_params[rm] = res_ids[0]
     elif found_vlib.resource_type == 'all':
         if "ParentId" in new_params:
             del new_params["ParentId"]
@@ -192,26 +200,23 @@ async def handle_home_latest_items(
         new_params.pop("ParentId", None)
         client_limit_val = int(params.get("Limit", 20))
 
-        tasks = [
-            _fetch_all_items_for_parent(session, target_url, new_params, pid, headers_to_forward)
-            for pid in effective_source_libs
-        ]
+        if rm and len(res_ids) > 1:
+            tasks = [
+                _fetch_all_items_for_parent(session, target_url, dict(new_params, **{rm: rid}), pid, headers_to_forward)
+                for pid in effective_source_libs
+                for rid in res_ids
+            ]
+        else:
+            tasks = [
+                _fetch_all_items_for_parent(session, target_url, new_params, pid, headers_to_forward)
+                for pid in effective_source_libs
+            ]
         results = await asyncio.gather(*tasks)
         all_items = []
         for items in results:
             all_items.extend(items)
 
-        # Deduplicate by Id
-        seen_ids = set()
-        deduped = []
-        for item in all_items:
-            iid = item.get("Id")
-            if iid and iid not in seen_ids:
-                seen_ids.add(iid)
-                deduped.append(item)
-            elif not iid:
-                deduped.append(item)
-        all_items = deduped
+        all_items = _deduplicate_by_id(all_items)
 
         if post_filter_rules:
             all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
@@ -229,35 +234,49 @@ async def handle_home_latest_items(
         return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})
 
     # --- Standard path (no source library scoping) ---
-    logger.debug(f"HOME_LATEST_HANDLER: Forwarding to URL={target_url}, Params={new_params}")
+    if rm and len(res_ids) > 1:
 
-    async with session.get(target_url, params=new_params, headers=headers_to_forward) as resp:
-        if resp.status != 200 or "application/json" not in resp.headers.get("Content-Type", ""):
-            content = await resp.read()
-            return Response(content=content, status_code=resp.status, headers={"Content-Type": resp.headers.get("Content-Type")})
+        async def _fetch_one_latest(rid: str) -> List[Dict]:
+            p = dict(new_params)
+            p[rm] = rid
+            async with session.get(target_url, params=p, headers=headers_to_forward) as resp:
+                if resp.status != 200 or "application/json" not in resp.headers.get("Content-Type", ""):
+                    return []
+                data = await resp.json()
+                return data.get("Items", [])
 
-        data = await resp.json()
-        items_list = data.get("Items", [])
+        parts = await asyncio.gather(*[_fetch_one_latest(rid) for rid in res_ids])
+        items_list: List[Dict] = []
+        for part in parts:
+            items_list.extend(part)
+        items_list = _deduplicate_by_id(items_list)
+    else:
+        logger.debug(f"HOME_LATEST_HANDLER: Forwarding to URL={target_url}, Params={new_params}")
 
-        if post_filter_rules:
-            items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
+        async with session.get(target_url, params=new_params, headers=headers_to_forward) as resp:
+            if resp.status != 200 or "application/json" not in resp.headers.get("Content-Type", ""):
+                content = await resp.read()
+                return Response(content=content, status_code=resp.status, headers={"Content-Type": resp.headers.get("Content-Type")})
 
-        if is_tmdb_merge_enabled:
-            items_list = await handler_merger.merge_items_by_tmdb(items_list)
+            data = await resp.json()
+            items_list = data.get("Items", [])
 
-        # Apply custom sort from advanced filter
-        if custom_sort_field and custom_sort_order:
-            items_list = _apply_custom_sort(items_list, custom_sort_field, custom_sort_order)
+    if post_filter_rules:
+        items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
 
-        client_limit_str = params.get("Limit")
-        if client_limit_str:
-            try:
-                final_limit = int(client_limit_str)
-                items_list = items_list[:final_limit]
-            except (ValueError, TypeError): pass
+    if is_tmdb_merge_enabled:
+        items_list = await handler_merger.merge_items_by_tmdb(items_list)
 
-        # /Items/Latest endpoint returns a JSON array directly, not an object with "Items" key
-        content = json.dumps(items_list).encode('utf-8')
-        return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})
+    if custom_sort_field and custom_sort_order:
+        items_list = _apply_custom_sort(items_list, custom_sort_field, custom_sort_order)
 
-    return None
+    client_limit_str = params.get("Limit")
+    if client_limit_str:
+        try:
+            final_limit = int(client_limit_str)
+            items_list = items_list[:final_limit]
+        except (ValueError, TypeError):
+            pass
+
+    content = json.dumps(items_list).encode('utf-8')
+    return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})

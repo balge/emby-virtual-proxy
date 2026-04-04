@@ -239,6 +239,12 @@ const getRefreshText = (row) => {
   return Number.isFinite(h) && h > 0 ? `${h}h刷新` : ''
 }
 
+const effectiveResourceIds = (row) => {
+  if (Array.isArray(row.resource_ids) && row.resource_ids.length) return row.resource_ids.map(String)
+  if (row.resource_id) return [String(row.resource_id)]
+  return []
+}
+
 const getResourceDetail = (row) => {
   const type = row.resource_type
   if (type === 'rsshub') {
@@ -250,14 +256,20 @@ const getResourceDetail = (row) => {
   }
   if (type === 'random') return '基于播放记录的偏好推荐'
   if (type === 'all') return '全部媒体库'
+  const ids = effectiveResourceIds(row)
+  if (!ids.length) return '—'
   if (type === 'person') {
-    const name = store.personNameCache[row.resource_id]
-    return name && name !== '...' ? name : `ID: ${row.resource_id || '—'}`
+    return ids.map((id) => {
+      const name = store.personNameCache[id]
+      return name && name !== '...' ? name : `ID: ${id}`
+    }).join('、')
   }
   const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
   const list = store.classifications[keyMap[type]] || []
-  const found = list.find(r => r.id === row.resource_id)
-  return found ? found.name : `ID: ${row.resource_id || '—'}`
+  return ids.map((id) => {
+    const found = list.find((r) => String(r.id) === String(id))
+    return found ? found.name : `ID: ${id}`
+  }).join('、')
 }
 
 onMounted(() => { if (!store.dataStatus) store.fetchAllInitialData() })

@@ -4,6 +4,19 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Literal, Optional
 import uuid
 
+
+def _norm_id_list(ids: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    if not ids:
+        return out
+    for x in ids:
+        if x is None:
+            continue
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
 class AdvancedFilterRule(BaseModel):
     field: str
     operator: Literal[
@@ -28,6 +41,8 @@ class VirtualLibrary(BaseModel):
     name: str
     resource_type: Literal["collection", "tag", "genre", "studio", "person", "all", "rsshub", "random"]
     resource_id: Optional[str] = None
+    """兼容旧配置；新逻辑优先用 resource_ids。保存时仍可写入首项便于旧代码。"""
+    resource_ids: List[str] = Field(default_factory=list)
     # image: Optional[str] = None  <-- 我们不再需要这个字段了，可以删除或注释掉
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签
     rsshub_url: Optional[str] = None # <-- 【新增】RSSHUB链接
@@ -48,6 +63,15 @@ class VirtualLibrary(BaseModel):
     cover_title_zh: Optional[str] = Field(default=None) # 海报中文标题（留空用虚拟库名称）
     cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
     hidden: bool = Field(default=False) # True: 不参与 RSS 定时任务，且在 8999 代理上对 Items/Latest/视图隐藏
+
+    def resolved_resource_ids(self) -> List[str]:
+        """合集/标签/类型/工作室/人员 等可多项；并集语义。旧数据仅 resource_id 时视为单元素。"""
+        ids = _norm_id_list(self.resource_ids)
+        if ids:
+            return ids
+        if self.resource_id is not None and str(self.resource_id).strip():
+            return [str(self.resource_id).strip()]
+        return []
 
 class RealLibraryConfig(BaseModel):
     """真实媒体库配置：启用/禁用、封面标题"""

@@ -4,6 +4,13 @@ import api from '../api'
 
 const toast = useToast()
 
+function effectiveResourceIds(lib) {
+  const arr = lib?.resource_ids
+  if (Array.isArray(arr) && arr.length) return arr.map((x) => String(x))
+  if (lib?.resource_id != null && String(lib.resource_id).trim()) return [String(lib.resource_id).trim()]
+  return []
+}
+
 export const useMainStore = defineStore('main', {
   state: () => ({
     config: {
@@ -169,7 +176,15 @@ export const useMainStore = defineStore('main', {
       if (lib.resource_type === 'rsshub') {
         if (!lib.rsshub_url || !lib.rss_type) { toast.warning('请填写所有必填字段'); return }
       } else if (!['all', 'random'].includes(lib.resource_type)) {
-        if (!lib.resource_id) { toast.warning('请填写所有必填字段'); return }
+        const ids = effectiveResourceIds(lib)
+        if (!ids.length) { toast.warning('请填写所有必填字段'); return }
+      }
+
+      if (!Array.isArray(lib.resource_ids)) lib.resource_ids = []
+      if (lib.resource_ids.length) {
+        lib.resource_id = lib.resource_ids[0]
+      } else if (!lib.resource_id) {
+        lib.resource_id = null
       }
 
       this.saving = true
@@ -211,7 +226,9 @@ export const useMainStore = defineStore('main', {
     resolveVisiblePersonNames() {
       if (!this.config.library) return
       for (const lib of this.config.library.filter(l => l.resource_type === 'person')) {
-        if (lib.resource_id) this.resolvePersonName(lib.resource_id)
+        for (const pid of effectiveResourceIds(lib)) {
+          this.resolvePersonName(pid)
+        }
       }
     },
 
@@ -336,7 +353,7 @@ export const useMainStore = defineStore('main', {
     openAddDialog() {
       this.isEditing = false
       this.currentLibrary = {
-        name: '', resource_type: 'collection', resource_id: '',
+        name: '', resource_type: 'collection', resource_id: '', resource_ids: [],
         merge_by_tmdb_id: false, image_tag: null, fallback_tmdb_id: null,
         fallback_tmdb_type: null, cache_refresh_interval: null, source_libraries: [],
       }
@@ -346,7 +363,15 @@ export const useMainStore = defineStore('main', {
       this.isEditing = true
       this.currentLibrary = JSON.parse(JSON.stringify(library))
       if (this.currentLibrary.merge_by_tmdb_id === undefined) this.currentLibrary.merge_by_tmdb_id = false
-      if (library.resource_type === 'person' && library.resource_id) this.resolvePersonName(library.resource_id)
+      if (!Array.isArray(this.currentLibrary.resource_ids)) this.currentLibrary.resource_ids = []
+      if (!this.currentLibrary.resource_ids.length && this.currentLibrary.resource_id) {
+        this.currentLibrary.resource_ids = [this.currentLibrary.resource_id]
+      }
+      if (this.currentLibrary.resource_type === 'person') {
+        for (const pid of effectiveResourceIds(this.currentLibrary)) {
+          this.resolvePersonName(pid)
+        }
+      }
       this.dialogVisible = true
     },
 

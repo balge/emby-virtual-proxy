@@ -39,12 +39,13 @@
         </BaseSelect>
       </template>
 
-      <BaseSearchSelect
+      <BaseSearchMultiSelect
         v-if="!['all', 'rsshub', 'random'].includes(store.currentLibrary.resource_type)"
-        v-model="store.currentLibrary.resource_id"
+        v-model="store.currentLibrary.resource_ids"
         :search="resourceSearch"
         :options="filteredResources"
         :item-label="resourceItemLabel"
+        :resolve-label="resourceChipLabel"
         label="选择资源"
         required
         placeholder="搜索..."
@@ -155,7 +156,7 @@ import api from '@/api'
 import BaseDialog from '@/components/ui/BaseDialog.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 import BaseSelect from '@/components/ui/BaseSelect.vue'
-import BaseSearchSelect from '@/components/ui/BaseSearchSelect.vue'
+import BaseSearchMultiSelect from '@/components/ui/BaseSearchMultiSelect.vue'
 import BaseButton from '@/components/ui/BaseButton.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import BaseTag from '@/components/ui/BaseTag.vue'
@@ -188,16 +189,32 @@ function toggleSourceLibrary(libId) {
   else arr.push(libId)
 }
 
+const selectedResourceIdSet = computed(() =>
+  new Set((store.currentLibrary.resource_ids || []).map((x) => String(x))),
+)
+
 const filteredResources = computed(() => {
   const type = store.currentLibrary.resource_type
   if (!type) return []
   if (type === 'person') {
-    // For person, we use the search results from API
-    return personResults.value
+    const merged = new Map()
+    for (const p of personResults.value) {
+      merged.set(String(p.id), p)
+    }
+    for (const id of selectedResourceIdSet.value) {
+      if (!merged.has(id)) {
+        const n = store.personNameCache[id]
+        merged.set(id, { id, name: n && n !== '...' ? n : `ID:${id}` })
+      }
+    }
+    let list = Array.from(merged.values())
+    const q = resourceSearch.value.trim().toLowerCase()
+    if (q) list = list.filter((p) => String(p.name || '').toLowerCase().includes(q))
+    return list.slice(0, 100)
   }
   const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
   const all = store.classifications[keyMap[type]] || []
-  if (!resourceSearch.value) return all.slice(0, 100)
+  if (!resourceSearch.value.trim()) return all.slice(0, 100)
   const q = resourceSearch.value.toLowerCase()
   return all.filter(i => i.name.toLowerCase().includes(q)).slice(0, 100)
 })
@@ -214,16 +231,35 @@ function resourceItemLabel(item) {
     : item.name
 }
 
+function resourceChipLabel(id) {
+  const sid = String(id)
+  const type = store.currentLibrary.resource_type
+  if (type === 'person') {
+    return store.personNameCache[sid] && store.personNameCache[sid] !== '...'
+      ? store.personNameCache[sid]
+      : sid
+  }
+  const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
+  const all = store.classifications[keyMap[type]] || []
+  return all.find((i) => String(i.id) === sid)?.name || sid
+}
+
 function onResourceTypeChange() {
   store.currentLibrary.resource_id = ''
+  store.currentLibrary.resource_ids = []
   resourceSearch.value = ''
   personResults.value = []
 }
 
 const onResourceSearch = async (query) => {
   if (store.currentLibrary.resource_type !== 'person') return
+  const q = String(query ?? resourceSearch.value ?? '').trim()
+  if (!q) {
+    personResults.value = []
+    return
+  }
   try {
-    const res = await api.searchPersons(query ?? resourceSearch.value, 1)
+    const res = await api.searchPersons(q, 1)
     personResults.value = res.data || []
     personResults.value.forEach(p => { if (p.id && !store.personNameCache[p.id]) store.personNameCache[p.id] = p.name })
   } catch { personResults.value = [] }
@@ -258,30 +294,32 @@ watch(() => store.dialogVisible, (val) => {
   personResults.value = []
   const lib = store.currentLibrary
   const rt = lib.resource_type
+  const ids = Array.isArray(lib.resource_ids) && lib.resource_ids.length
+    ? lib.resource_ids
+    : (lib.resource_id ? [lib.resource_id] : [])
+
   if (['all', 'rsshub', 'random'].includes(rt)) {
     resourceSearch.value = ''
-  } else if (lib.resource_id) {
-    if (rt === 'person') {
-      const cached = store.personNameCache[lib.resource_id]
+    return
+  }
+
+  resourceSearch.value = ''
+
+  if (rt === 'person' && ids.length) {
+    for (const pid of ids) {
+      const cached = store.personNameCache[pid]
       if (cached && cached !== '...') {
-        resourceSearch.value = cached
-        personResults.value = [{ id: lib.resource_id, name: cached }]
+        personResults.value.push({ id: pid, name: cached })
       } else {
-        resourceSearch.value = ''
-        api.resolveItem(lib.resource_id).then((r) => {
-          personResults.value = [r.data]
+        store.resolvePersonName(pid)
+        api.resolveItem(pid).then((r) => {
+          if (!personResults.value.some((x) => String(x.id) === String(r.data.id))) {
+            personResults.value.push(r.data)
+          }
           store.personNameCache[r.data.id] = r.data.name
-          resourceSearch.value = r.data.name
         }).catch(() => {})
       }
-    } else {
-      const keyMap = { collection: 'collections', tag: 'tags', genre: 'genres', studio: 'studios' }
-      const all = store.classifications[keyMap[rt]] || []
-      const found = all.find((i) => i.id === lib.resource_id)
-      resourceSearch.value = found ? found.name : ''
     }
-  } else {
-    resourceSearch.value = ''
   }
 })
 </script>
