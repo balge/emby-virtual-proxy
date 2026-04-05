@@ -19,6 +19,7 @@ from .handler_items import (
     _fetch_all_items_for_parent,
     _deduplicate_by_id,
 )
+from vlib_cache_manager import effective_cache_ttl_seconds, populate_random_vlib_items
 from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
@@ -58,15 +59,27 @@ async def handle_home_latest_items(
         logger.info(f"HOME_LATEST: Virtual library '{found_vlib.name}' is hidden; returning empty latest.")
         return Response(content=json.dumps([]).encode("utf-8"), status_code=200, headers={"Content-Type": "application/json"})
 
-    # Random library branch: reuse cached random items for latest
+    # Random library branch: reuse cached random items for latest（与列表页相同 TTL）
     if found_vlib.resource_type == 'random':
         from proxy_cache import vlib_items_cache
-        cached = vlib_items_cache.get_for_user(user_id, found_vlib.id)
-        if cached is not None:
-            limit = int(params.get("Limit", 20))
-            items = cached[:limit]
-        else:
-            items = []
+        ttl = effective_cache_ttl_seconds(found_vlib, config)
+        cached = vlib_items_cache.get_for_user(
+            user_id, found_vlib.id, max_age_seconds=ttl
+        )
+        if cached is None:
+            headers = _build_headers_to_forward(request)
+            token = params.get("X-Emby-Token")
+            cached = await populate_random_vlib_items(
+                found_vlib,
+                config,
+                session,
+                user_id,
+                real_emby_url.rstrip("/"),
+                headers=headers,
+                query_emby_token=token,
+            )
+        limit = int(params.get("Limit", 20))
+        items = (cached or [])[:limit]
         content = json.dumps(items).encode('utf-8')
         return Response(content=content, status_code=200, headers={"Content-Type": "application/json"})
 

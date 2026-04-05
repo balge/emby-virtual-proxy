@@ -899,7 +899,7 @@ async def get_config():
 async def update_config(config: AppConfig):
     config_manager.save_config(config)
     # 更新定时任务
-    update_rss_refresh_job(config)
+    update_virtual_library_refresh_jobs(config)
     update_real_library_cover_cron(config)
     return config
 
@@ -1515,34 +1515,42 @@ covers_dir.mkdir(exist_ok=True) # 确保目录存在
 admin_app.mount("/covers", StaticFiles(directory=str(covers_dir)), name="covers")
 
 
-def update_rss_refresh_job(config: AppConfig):
-    # Remove all existing rss refresh jobs (global + per-library)
+def update_virtual_library_refresh_jobs(config: AppConfig):
+    """
+    所有未隐藏虚拟库共用的定时入口：间隔为单库 cache_refresh_interval，否则全局；≤0 不注册。
+    触发时按 resource_type 分支：rsshub → 管理端 RSS 拉取；其余 → 通知 proxy 重填磁盘缓存。
+    """
+    _legacy_prefixes = ("rss_refresh:", "random_refresh:", "disk_refresh:")
     for job in list(scheduler.get_jobs()):
-        if job.id == "rss_refresh_job" or job.id.startswith("rss_refresh:"):
+        if job.id == "rss_refresh_job" or job.id.startswith("vlib_scheduled_refresh:"):
+            scheduler.remove_job(job.id)
+        elif any(job.id.startswith(p) for p in _legacy_prefixes):
             scheduler.remove_job(job.id)
 
     def _effective_hours(vlib: VirtualLibrary) -> int:
-        # Unified interval: vlib.cache_refresh_interval override, fallback to global cache_refresh_interval.
         if vlib.cache_refresh_interval is not None:
             return int(vlib.cache_refresh_interval)
         return int(config.cache_refresh_interval or 0)
 
-    # Schedule per-library refresh jobs
-    rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub" and not lib.hidden]
-    for vlib in rss_libraries:
+    for vlib in config.virtual_libraries:
+        if vlib.hidden:
+            continue
         hours = _effective_hours(vlib)
         if hours <= 0:
             continue
-        job_id = f"rss_refresh:{vlib.id}"
+        job_id = f"vlib_scheduled_refresh:{vlib.id}"
         scheduler.add_job(
-            refresh_rss_library_by_id,
+            scheduled_refresh_virtual_library,
             "interval",
             hours=hours,
             id=job_id,
             replace_existing=True,
             args=[vlib.id],
         )
-        logger.info(f"RSS refresh job scheduled: {vlib.name} ({vlib.id}) every {hours} hours.")
+        logger.info(
+            f"Scheduled virtual library refresh: '{vlib.name}' ({vlib.id}) "
+            f"type={vlib.resource_type} every {hours} hours"
+        )
 
 
 def update_real_library_cover_cron(config: AppConfig):
@@ -1572,13 +1580,16 @@ def update_real_library_cover_cron(config: AppConfig):
         logger.error(f"Invalid cron expression '{cron_expr}': {e}")
 
 
-async def refresh_rss_library_by_id(library_id: str):
-    """Refresh RSS library by ID (reloads config each run)."""
+async def scheduled_refresh_virtual_library(library_id: str):
+    """定时任务唯一入口：按虚拟库类型调用对应刷新实现。"""
     config = config_manager.load_config()
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
-    if not vlib or vlib.resource_type != "rsshub" or vlib.hidden:
+    if not vlib or vlib.hidden:
         return
-    await refresh_rss_library_internal(vlib)
+    if vlib.resource_type == "rsshub":
+        await refresh_rss_library_internal(vlib)
+        return
+    await _notify_proxy_refresh_cache(library_id)
 
 async def refresh_all_rss_libraries():
     """定时刷新所有 RSS 虚拟库"""
@@ -1598,7 +1609,7 @@ async def startup_event():
     scheduler.start()
     # 初始化定时任务
     config = config_manager.load_config()
-    update_rss_refresh_job(config)
+    update_virtual_library_refresh_jobs(config)
     update_real_library_cover_cron(config)
 
 @admin_app.on_event("shutdown")

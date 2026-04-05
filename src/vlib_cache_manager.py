@@ -14,6 +14,8 @@ Triggered by:
 
 import logging
 import asyncio
+import random as random_module
+from collections import Counter
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
@@ -25,6 +27,20 @@ from proxy_handlers.handler_merger import merge_items_by_tmdb
 from emby_api_client import get_real_libraries_hybrid_mode
 
 logger = logging.getLogger(__name__)
+
+
+def effective_cache_ttl_seconds(vlib: VirtualLibrary, config: AppConfig) -> Optional[float]:
+    """
+    磁盘缓存视为「新鲜」的最长秒数；None 表示不按时间过期（仅靠手动清空或定时任务覆盖）。
+    与定时刷新任务相同的小时数来源：单库 cache_refresh_interval，否则全局 cache_refresh_interval。
+    适用于所有走 vlib_items_cache 的虚拟库（random、collection、tag、genre 等；不含 RSS）。
+    """
+    h = vlib.cache_refresh_interval
+    if h is None:
+        h = config.cache_refresh_interval
+    if h is None or int(h) <= 0:
+        return None
+    return float(h) * 3600.0
 
 
 async def resolve_emby_user_id(
@@ -63,6 +79,172 @@ FETCH_FIELDS = ",".join([
     "ImageTags", "BackdropImageTags", "SortName", "PremiereDate",
     "CriticRating", "SeriesStatus", "RunTimeTicks",
 ])
+
+
+# ---------------------------------------------------------------------------
+# Random virtual library — single algorithm for browse + scheduled refresh
+# ---------------------------------------------------------------------------
+
+
+async def _fetch_user_genre_preferences(
+    session: aiohttp.ClientSession,
+    real_emby_url: str,
+    user_id: str,
+    headers: Dict[str, str],
+) -> List[str]:
+    url = f"{real_emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+    params = {
+        "IsPlayed": "true",
+        "SortBy": "DatePlayed",
+        "SortOrder": "Descending",
+        "Recursive": "true",
+        "IncludeItemTypes": "Movie,Series",
+        "Fields": "Genres",
+        "Limit": "200",
+    }
+    genre_counter: Counter = Counter()
+    try:
+        async with session.get(
+            url, params=params, headers=headers, timeout=aiohttp.ClientTimeout(total=30),
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                for item in data.get("Items", []):
+                    for genre in item.get("Genres", []):
+                        genre_counter[genre] += 1
+    except Exception as e:
+        logger.warning(f"Failed to fetch user play history: {e}")
+    return [g for g, _ in genre_counter.most_common(10)]
+
+
+def _weighted_random_select(items: List[Dict], preferred_genres: List[str], count: int) -> List[Dict]:
+    if not items:
+        return []
+    if not preferred_genres:
+        return random_module.sample(items, min(count, len(items)))
+    preferred_set = set(g.lower() for g in preferred_genres)
+    weighted = [
+        (
+            item,
+            1
+            + sum(
+                1 for g in [g.lower() for g in item.get("Genres", [])] if g in preferred_set
+            )
+            * 2,
+        )
+        for item in items
+    ]
+    selected = []
+    remaining = list(weighted)
+    for _ in range(min(count, len(remaining))):
+        if not remaining:
+            break
+        total_w = sum(w for _, w in remaining)
+        r = random_module.uniform(0, total_w)
+        cum = 0
+        for i, (item, w) in enumerate(remaining):
+            cum += w
+            if cum >= r:
+                selected.append(item)
+                remaining.pop(i)
+                break
+    return selected
+
+
+async def populate_random_vlib_items(
+    vlib: VirtualLibrary,
+    config: AppConfig,
+    session: aiohttp.ClientSession,
+    user_id: str,
+    real_emby_url: str,
+    *,
+    headers: Dict[str, str],
+    query_emby_token: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """
+    未播池 + 播放偏好加权 + 电影/剧集各 15 条共 30 条，slim 后写入磁盘缓存。
+    定时 refresh_vlib_cache 与用户点进库共用此实现。
+    """
+    base = real_emby_url.rstrip("/")
+    search_url = f"{base}/emby/Users/{user_id}/Items"
+
+    ignore_set = config.disabled_library_ids
+    source_libs = list(vlib.source_libraries) if vlib.source_libraries else []
+    if source_libs and ignore_set:
+        source_libs = [lid for lid in source_libs if lid not in ignore_set]
+    if not source_libs:
+        try:
+            real_libs = await get_real_libraries_hybrid_mode()
+            source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
+        except Exception as e:
+            logger.error(f"Random: failed to fetch real libraries: {e}")
+    if not source_libs:
+        return []
+
+    logger.info(f"Random '{vlib.name}': populate disk cache for user {user_id}")
+    preferred_genres = await _fetch_user_genre_preferences(session, base, user_id, headers)
+    has_prefs = len(preferred_genres) > 0
+
+    fetch_params: Dict[str, Any] = {
+        "Recursive": "true",
+        "IsPlayed": "false",
+        "Fields": FETCH_FIELDS,
+        "SortBy": "Random",
+        "SortOrder": "Ascending",
+    }
+    if query_emby_token:
+        fetch_params["X-Emby-Token"] = query_emby_token
+
+    all_movies: List[Dict] = []
+    all_series: List[Dict] = []
+    timeout = aiohttp.ClientTimeout(total=30)
+    for pid in source_libs:
+        for item_type, target in [("Movie", all_movies), ("Series", all_series)]:
+            p = dict(fetch_params, ParentId=pid, IncludeItemTypes=item_type, Limit="300")
+            try:
+                async with session.get(search_url, params=p, headers=headers, timeout=timeout) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        target.extend(data.get("Items", []))
+            except Exception as e:
+                logger.warning(f"Random fetch failed: {e}")
+
+    seen: set = set()
+    for lst in [all_movies, all_series]:
+        deduped = [
+            item for item in lst if not (item.get("Id") in seen or seen.add(item.get("Id")))
+        ]
+        lst.clear()
+        lst.extend(deduped)
+
+    target_per_type = 15
+    if has_prefs:
+        sel_m = _weighted_random_select(all_movies, preferred_genres, target_per_type)
+        sel_s = _weighted_random_select(all_series, preferred_genres, target_per_type)
+    else:
+        sel_m = random_module.sample(all_movies, min(target_per_type, len(all_movies)))
+        sel_s = random_module.sample(all_series, min(target_per_type, len(all_series)))
+
+    for sel, pool in [(sel_m, all_movies), (sel_s, all_series)]:
+        if len(sel) < target_per_type:
+            sel_ids = {it.get("Id") for it in sel}
+            rem = [x for x in pool if x.get("Id") not in sel_ids]
+            sel.extend(random_module.sample(rem, min(target_per_type - len(sel), len(rem))))
+
+    if len(sel_m) + len(sel_s) < 30:
+        all_sel_ids = {it.get("Id") for it in sel_m + sel_s}
+        rem_all = [i for i in all_movies + all_series if i.get("Id") not in all_sel_ids]
+        sel_m.extend(
+            random_module.sample(rem_all, min(30 - len(sel_m) - len(sel_s), len(rem_all)))
+        )
+
+    all_items = sel_m + sel_s
+    random_module.shuffle(all_items)
+
+    slimmed = slim_items(all_items)
+    if slimmed:
+        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
+    return slimmed
 
 
 # ---------------------------------------------------------------------------
@@ -286,65 +468,6 @@ async def _fetch_by_ids_chunked(session, url, headers, ids, fields):
 
 
 # ---------------------------------------------------------------------------
-# Random library refresh
-# ---------------------------------------------------------------------------
-
-async def _refresh_random_cache(
-    vlib: VirtualLibrary,
-    config: AppConfig,
-    session: aiohttp.ClientSession,
-    user_id: str,
-) -> int:
-    """Fetch unplayed items from source libraries, pick 30 randomly, store in cache."""
-    import random as random_module
-
-    headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
-    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
-
-    ignore_set = config.disabled_library_ids
-    source_libs = [lid for lid in (vlib.source_libraries or []) if lid not in ignore_set]
-    if not source_libs:
-        try:
-            real_libs = await get_real_libraries_hybrid_mode()
-            source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
-        except Exception as e:
-            logger.error(f"Random refresh: failed to fetch real libraries: {e}")
-            return 0
-
-    fetch_params = {
-        "Recursive": "true",
-        "IsPlayed": "false",
-        "Fields": FETCH_FIELDS,
-        "SortBy": "Random",
-        "SortOrder": "Ascending",
-        "IncludeItemTypes": "Movie,Series",
-        "Limit": "300",
-    }
-
-    all_items: List[Dict] = []
-    for pid in source_libs:
-        p = dict(fetch_params, ParentId=pid)
-        try:
-            async with session.get(base_url, params=p, headers=headers,
-                                   timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status == 200:
-                    data = await resp.json()
-                    all_items.extend(data.get("Items", []))
-        except Exception as e:
-            logger.warning(f"Random refresh fetch failed for {pid}: {e}")
-
-    all_items = _deduplicate(all_items)
-    selected = random_module.sample(all_items, min(30, len(all_items)))
-    random_module.shuffle(selected)
-
-    slimmed = slim_items(selected)
-    if slimmed:
-        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
-    logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
-    return len(slimmed)
-
-
-# ---------------------------------------------------------------------------
 # Core: refresh a single virtual library's full cache
 # ---------------------------------------------------------------------------
 
@@ -379,9 +502,13 @@ async def refresh_vlib_cache(
             logger.warning(f"Cannot refresh cache for '{vlib.name}': no Emby user id.")
             return 0
 
-        # --- Random library: fetch unplayed items, pick 30 randomly ---
         if vlib.resource_type == "random":
-            return await _refresh_random_cache(vlib, config, session, user_id)
+            base = config.emby_url.rstrip("/")
+            slimmed = await populate_random_vlib_items(
+                vlib, config, session, user_id, base, headers=dict(headers)
+            )
+            logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
+            return len(slimmed)
 
         base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
         base_params: Dict[str, Any] = {
