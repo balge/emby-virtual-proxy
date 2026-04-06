@@ -16,6 +16,10 @@ services:
       - PROXY_CORE_URL=http://localhost:8999
       # 日志级别：debug / info / warning / error（默认 info）
       - LOG_LEVEL=info
+      # aiohttp 连接池上限（admin / proxy 内 create_client_session 共用；默认 32）
+      - AIOHTTP_POOL_LIMIT=32
+      # 单主机最大并发连接数（通常指向 Emby；默认 8）
+      - AIOHTTP_POOL_PER_HOST=8
       # 管理面板登录认证（留空或不设置则不启用认证）
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=admin123

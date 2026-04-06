@@ -6,6 +6,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 import aiohttp
+from http_client import create_client_session
 # 【【【 修改这一行 】】】
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, HTTPException, Query
 from fastapi.responses import StreamingResponse, JSONResponse
@@ -54,7 +55,7 @@ def get_cache_key(request: Request, full_path: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.aiohttp_session = aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar())
+    app.state.aiohttp_session = create_client_session(cookie_jar=aiohttp.DummyCookieJar())
     logger.info("Global AIOHTTP ClientSession created.")
 
     yield

@@ -11,6 +11,7 @@ from pathlib import Path
 import aiohttp
 
 import config_manager
+from http_client import create_client_session
 import cover_subprocess
 
 logger = logging.getLogger(__name__)
@@ -66,7 +67,7 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
         items = []
         logger.info(f"后台任务：正在向内部代理 {internal_proxy_url} 请求项目...")
         try:
-            async with aiohttp.ClientSession() as session:
+            async with create_client_session() as session:
                 async with session.get(internal_proxy_url, params=params, headers=internal_headers, timeout=60) as response:
                     if response.status == 200:
                         items_dict = await response.json()
@@ -104,7 +105,7 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
             except Exception: return False
             return False
 
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
             results = await asyncio.gather(*tasks)
 

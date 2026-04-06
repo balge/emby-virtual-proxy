@@ -35,13 +35,11 @@ from emby_webhook import (
 )
 import config_manager
 from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
-import cover_subprocess
 from db_manager import DBManager, RSS_CACHE_DB
+from http_client import create_client_session
 
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
-from proxy_handlers._filter_translator import translate_rules
-from proxy_handlers.handler_items import _apply_custom_sort
 
 # 设置日志记录器
 logger = logging.getLogger(__name__)
@@ -58,7 +56,7 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
         url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
         token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
         headers = {"X-Internal-Token": token} if token else {}
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.post(url, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -77,7 +75,7 @@ async def _list_vlib_cache_user_ids_from_proxy(library_id: str) -> list[str]:
     try:
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/vlib-cache-user-ids/{library_id}"
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -113,7 +111,7 @@ async def _get_cached_items_from_proxy(
         base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         url = f"{base}/api/internal/get-cached-items/{library_id}"
         params = {"user_id": uid}
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -147,7 +145,7 @@ async def _notify_proxy_refresh_cache(
         post_kw: dict = {"timeout": aiohttp.ClientTimeout(total=600)}
         if user_ids is not None:
             post_kw["json"] = {"user_ids": user_ids}
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.post(url, headers=headers, **post_kw) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -412,6 +410,8 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     if vlib.advanced_filter_id:
         adv_filter = next((f for f in config.advanced_filters if f.id == vlib.advanced_filter_id), None)
         if adv_filter:
+            from proxy_handlers._filter_translator import translate_rules
+
             emby_native_params, _ = translate_rules(adv_filter.rules)
             params.update(emby_native_params)
 
@@ -421,7 +421,7 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
 
     all_items = []
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async def _fetch_all_pages(fetch_params):
                 """Fetch all pages from Emby."""
                 items = []
@@ -482,6 +482,8 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     if vlib.advanced_filter_id and deduped:
         adv_filter = next((f for f in config.advanced_filters if f.id == vlib.advanced_filter_id), None)
         if adv_filter and adv_filter.sort_field and adv_filter.sort_order:
+            from proxy_handlers.handler_items import _apply_custom_sort
+
             deduped = _apply_custom_sort(
                 list(deduped), adv_filter.sort_field, adv_filter.sort_order
             )
@@ -534,7 +536,7 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
         except Exception:
             return False
 
-    async with aiohttp.ClientSession() as session:
+    async with create_client_session() as session:
         tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
         results = await asyncio.gather(*tasks)
 
@@ -597,7 +599,7 @@ async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> 
     headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
     url = f"{config.emby_url.rstrip('/')}/emby{endpoint}"
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(url, headers=headers, params=params or {}, timeout=20) as resp:
                 if resp.status != 200:
                     return None
@@ -631,7 +633,7 @@ async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path
     }
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
                     logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: {resp.status}")
@@ -660,7 +662,7 @@ async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path
         except Exception:
             return False
 
-    async with aiohttp.ClientSession() as session:
+    async with create_client_session() as session:
         tasks = [download_image(session, item, i + 1) for i, item in enumerate(items_with_images)]
         await asyncio.gather(*tasks)
 
@@ -677,7 +679,7 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         'Content-Type': 'image/jpeg',
     }
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.post(url, data=image_b64, headers=headers, timeout=30) as resp:
                 if resp.status in (200, 204):
                     logger.info(f"Uploaded cover to Emby for item {item_id}")
@@ -708,6 +710,8 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
 
         zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
         en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
+
+        import cover_subprocess
 
         if style_name not in cover_subprocess.ALLOWED_COVER_STYLES:
             logger.warning(f"Unknown cover style: {style_name}")
@@ -1183,6 +1187,8 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
             "crop_16_9": False,
         }
         try:
+            import cover_subprocess
+
             await cover_subprocess.run_cover_worker_job(job)
         except RuntimeError as e:
             logger.error(f"封面生成子进程失败: {e}")
@@ -1423,7 +1429,7 @@ async def proxy_emby_image(item_id: str):
     url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
     headers = {"X-Emby-Token": config.emby_api_key}
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(url, headers=headers, timeout=15) as resp:
                 if resp.status != 200:
                     raise HTTPException(status_code=resp.status, detail="Failed to fetch image from Emby")

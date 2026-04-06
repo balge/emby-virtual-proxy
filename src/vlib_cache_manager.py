@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
 
 import aiohttp
+from http_client import create_client_session
 from models import AppConfig, VirtualLibrary
 from proxy_cache import vlib_items_cache, slim_items
 from proxy_handlers._filter_translator import translate_rules
@@ -492,7 +493,7 @@ async def refresh_vlib_cache(
 
     own_session = session is None
     if own_session:
-        session = aiohttp.ClientSession()
+        session = create_client_session()
 
     try:
         headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
@@ -682,7 +683,7 @@ async def _do_dla_fetch(session, url, headers, base_params, threshold_dt, source
 async def refresh_all_vlib_caches(config: AppConfig) -> Dict[str, int]:
     """Refresh on-disk cache for all non-hidden, non-RSS vlibs (first Emby user only)."""
     results: Dict[str, int] = {}
-    async with aiohttp.ClientSession() as session:
+    async with create_client_session() as session:
         user_id = await resolve_emby_user_id(session, config, None)
         if not user_id:
             logger.warning("Cannot refresh caches: no Emby user found.")
