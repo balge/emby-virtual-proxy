@@ -21,6 +21,8 @@ COPY src/ /app/src/
 
 # 关键改动：将 PYTHONPATH 设置为源码目录
 ENV PYTHONPATH=/app/src
+# 限制 glibc malloc arena 数量，降低多线程/高并发下 RSS 虚高（对容器统计可见内存有帮助）
+ENV MALLOC_ARENA_MAX=2
 
 # 将依赖文件复制到工作目录根部并安装
 COPY src/requirements.txt .
