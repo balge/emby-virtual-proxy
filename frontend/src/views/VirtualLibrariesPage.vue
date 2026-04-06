@@ -150,7 +150,7 @@
                   </span>
                   <span
                     class="text-xs font-medium text-primary-700 dark:text-primary-300 shrink-0"
-                    >生成中</span
+                    >{{ rowSyncingLabel(row.id) }}</span
                   >
                 </template>
                 <span
@@ -322,7 +322,7 @@
           </svg>
           <span
             class="text-xs font-medium text-primary-800 dark:text-primary-200"
-            >正在生成数据与封面…</span
+            >{{ rowSyncingLabel(row.id) }}</span
           >
         </div>
         <!-- 16:9 cover banner -->
@@ -468,6 +468,13 @@ import DisplayOrderManager from "@/components/DisplayOrderManager.vue";
 const store = useMainStore();
 
 const rowSyncing = (id) => !!store.libraryRowSyncing[String(id)];
+
+const rowSyncingLabel = (id) => {
+  const mode = store.libraryRowSyncing[String(id)];
+  if (mode === "cover") return "正在生成封面…";
+  if (mode === "data") return "正在生成数据与封面…";
+  return "正在生成数据与封面…";
+};
 
 const typeMap = {
   collection: "合集",

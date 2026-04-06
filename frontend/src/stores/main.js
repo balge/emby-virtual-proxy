@@ -37,7 +37,7 @@ export const useMainStore = defineStore('main', {
     layoutManagerVisible: false,
     coverGenerating: false,
     personNameCache: {},
-    /** 虚拟库行后台任务进行中（保存后刷新数据 / 点「数据」「封面」等），key 为 library id 字符串 */
+    /** 虚拟库行后台任务：'cover' | 'data'，key 为 library id 字符串 */
     libraryRowSyncing: {},
   }),
 
@@ -202,7 +202,7 @@ export const useMainStore = defineStore('main', {
         const row = this.config.library?.find((l) => String(l.id) === String(savedId))
         const prevImageTag = row?.image_tag ?? null
         const idStr = String(savedId)
-        this.libraryRowSyncing[idStr] = true
+        this.libraryRowSyncing[idStr] = "data"
         try {
           await api.refreshLibraryData(savedId)
           const ok = await this._pollLibraryDataReady(savedId, prevImageTag)
@@ -298,7 +298,7 @@ export const useMainStore = defineStore('main', {
       const idStr = String(id)
       const lib = this.config.library?.find((l) => String(l.id) === idStr)
       const prevImageTag = lib?.image_tag ?? null
-      this.libraryRowSyncing[idStr] = true
+      this.libraryRowSyncing[idStr] = "cover"
       try {
         await api.refreshLibraryCover(id)
         const ok = await this._pollLibraryDataReady(idStr, prevImageTag)
@@ -316,7 +316,7 @@ export const useMainStore = defineStore('main', {
       const idStr = String(id)
       const lib = this.config.library?.find((l) => String(l.id) === idStr)
       const prevImageTag = lib?.image_tag ?? null
-      this.libraryRowSyncing[idStr] = true
+      this.libraryRowSyncing[idStr] = "data"
       try {
         await api.refreshLibraryData(id)
         const ok = await this._pollLibraryDataReady(idStr, prevImageTag)
