@@ -37,6 +37,7 @@ import config_manager
 from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
 from db_manager import DBManager, RSS_CACHE_DB
 from http_client import create_client_session
+from rss_subprocess import run_rss_refresh_job
 
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
@@ -791,7 +792,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     )
 
     if vlib.resource_type == "rsshub":
-        await refresh_rss_library_internal(vlib)
+        await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
     else:
         # 仅对「此前已有磁盘缓存」的用户重拉；从未访问过该库的用户不建缓存
         await _notify_proxy_refresh_cache(library_id, user_ids=had_users)
@@ -966,19 +967,77 @@ async def refresh_rss_library_internal(vlib: VirtualLibrary):
         keys_to_remove = [k for k in api_cache if vlib.id in str(k)]
         for k in keys_to_remove:
             api_cache.pop(k, None)
-        if vlib.rss_type == "douban":
-            from rss_processor.douban import DoubanProcessor
-            processor = DoubanProcessor(vlib)
-            processor.process()
-        elif vlib.rss_type == "bangumi":
-            from rss_processor.bangumi import BangumiProcessor
-            processor = BangumiProcessor(vlib)
-            processor.process()
+        if vlib.rss_type in ("douban", "bangumi"):
+            await run_rss_refresh_job(vlib)
         else:
             logger.warning(f"Unknown RSS type: {vlib.rss_type} for library {vlib.id}")
         logger.info(f"RSS_REFRESH DONE vlib={vlib.id} name='{vlib.name}'")
     except Exception as e:
         logger.error(f"Error refreshing RSS library {vlib.id}: {e}", exc_info=True)
+
+
+# --- RSS 刷新全局串行队列：同一时间只跑一个子进程任务；手动请求在已有排队/执行时返回 409 ---
+_rss_refresh_queue: asyncio.Queue[
+    tuple[VirtualLibrary, Optional[asyncio.Future[None]]]
+] = asyncio.Queue()
+_rss_refresh_processing: bool = False
+_rss_refresh_worker_task: Optional[asyncio.Task[None]] = None
+_rss_state_lock = asyncio.Lock()
+
+
+def _ensure_rss_refresh_worker() -> None:
+    global _rss_refresh_worker_task
+    if _rss_refresh_worker_task is None or _rss_refresh_worker_task.done():
+        _rss_refresh_worker_task = asyncio.create_task(
+            _rss_refresh_worker_loop(),
+            name="rss_refresh_worker",
+        )
+
+
+async def _rss_refresh_worker_loop() -> None:
+    global _rss_refresh_processing
+    while True:
+        vlib, fut = await _rss_refresh_queue.get()
+        _rss_refresh_processing = True
+        try:
+            await refresh_rss_library_internal(vlib)
+            if fut is not None and not fut.done():
+                fut.set_result(None)
+        except Exception as e:
+            if fut is not None and not fut.done():
+                fut.set_exception(e)
+            logger.error("RSS queue worker: %s", e, exc_info=True)
+        finally:
+            _rss_refresh_processing = False
+            _rss_refresh_queue.task_done()
+
+
+async def enqueue_rss_refresh(
+    vlib: VirtualLibrary,
+    *,
+    manual: bool = False,
+    wait_for_completion: bool = False,
+) -> None:
+    """
+    将 RSS 刷新加入全局队列，FIFO 串行执行。
+    manual=True：若当前正在执行或队列非空则 HTTP 409（仅用于「仅 RSS 刷新」接口）。
+    wait_for_completion=True：阻塞直到该条任务执行完毕（如「刷新数据」需先 RSS 再封面）。
+    """
+    _ensure_rss_refresh_worker()
+    fut: Optional[asyncio.Future[None]] = asyncio.Future() if wait_for_completion else None
+    if manual:
+        async with _rss_state_lock:
+            if _rss_refresh_processing or _rss_refresh_queue.qsize() > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="已有 RSS 刷新任务在执行或排队，请稍后再试。",
+                )
+            await _rss_refresh_queue.put((vlib, fut))
+    else:
+        await _rss_refresh_queue.put((vlib, fut))
+    if fut is not None:
+        await fut
+
 
 @api_router.post("/libraries/{library_id}/refresh", status_code=202, tags=["Libraries"])
 async def refresh_rss_library(library_id: str, request: Request):
@@ -991,9 +1050,8 @@ async def refresh_rss_library(library_id: str, request: Request):
     if vlib.resource_type != "rsshub":
         raise HTTPException(status_code=400, detail="This library is not an RSSHUB library")
 
-    # 在后台任务中运行刷新，避免阻塞 API
-    asyncio.create_task(refresh_rss_library_internal(vlib))
-    
+    await enqueue_rss_refresh(vlib, manual=True, wait_for_completion=False)
+
     return {"message": "RSS library refresh process has been started."}
 
 
@@ -1582,7 +1640,7 @@ async def scheduled_refresh_virtual_library(library_id: str):
     if not vlib or vlib.hidden:
         return
     if vlib.resource_type == "rsshub":
-        await refresh_rss_library_internal(vlib)
+        await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
         return
     await _notify_proxy_refresh_cache(library_id)
 
@@ -1593,9 +1651,9 @@ async def refresh_all_rss_libraries():
     rss_libraries = [lib for lib in config.virtual_libraries if lib.resource_type == "rsshub" and not lib.hidden]
     
     for vlib in rss_libraries:
-        logger.info(f"Refreshing RSS library: {vlib.name} ({vlib.id})")
-        await refresh_rss_library_internal(vlib)
-    
+        logger.info(f"Queue RSS refresh: {vlib.name} ({vlib.id})")
+        await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=False)
+    await _rss_refresh_queue.join()
     logger.info("Scheduled RSS library refresh finished.")
 
 @admin_app.on_event("startup")

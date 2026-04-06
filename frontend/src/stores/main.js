@@ -376,7 +376,17 @@ export const useMainStore = defineStore('main', {
     },
 
     _handleApiError(error, messagePrefix) {
+      const status = error.response?.status
       const detail = error.response?.data?.detail
+      // 409：资源冲突（如 RSS 已有任务），用提示而非「失败」口吻
+      if (status === 409) {
+        const msg =
+          typeof detail === 'string' && detail.trim()
+            ? detail
+            : '当前已有任务在执行，请稍后再试。'
+        toast.info(msg)
+        return
+      }
       toast.error(`${messagePrefix}: ${detail || '请检查网络或联系管理员'}`)
     },
 
