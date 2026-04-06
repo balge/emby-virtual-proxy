@@ -34,27 +34,24 @@ async def run_rss_refresh_job(vlib: VirtualLibrary, *, timeout_sec: float = DEFA
     job_path = Path(raw_path)
     try:
         job_path.write_text(json.dumps(job, ensure_ascii=False), encoding="utf-8")
+        # 继承父进程 stdout/stderr，子进程内 rss_processor 的 info 日志才会出现在容器/终端日志里；
+        # 若用 PIPE 且成功路径不转发，豆瓣/TMDB 等日志会被吞掉。
         proc = await asyncio.create_subprocess_exec(
             sys.executable,
             "-m",
             "rss_worker",
             str(job_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
             env=os.environ.copy(),
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+            await asyncio.wait_for(proc.wait(), timeout=timeout_sec)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             raise RuntimeError("rss worker timed out") from None
         if proc.returncode != 0:
-            err = (stderr or b"").decode("utf-8", errors="replace").strip()
-            out = (stdout or b"").decode("utf-8", errors="replace").strip()
-            msg = err or out or f"exit code {proc.returncode}"
-            logger.error("rss_worker failed: %s", msg)
-            raise RuntimeError(f"rss worker failed: {msg}")
+            logger.error("rss_worker exited with code %s (see logs above from child process)", proc.returncode)
+            raise RuntimeError(f"rss worker failed with exit code {proc.returncode}")
     finally:
         try:
             job_path.unlink(missing_ok=True)
