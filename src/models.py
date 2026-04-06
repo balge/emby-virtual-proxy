@@ -4,6 +4,19 @@ from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Literal, Optional
 import uuid
 
+
+def _norm_id_list(ids: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    if not ids:
+        return out
+    for x in ids:
+        if x is None:
+            continue
+        s = str(x).strip()
+        if s and s not in out:
+            out.append(s)
+    return out
+
 class AdvancedFilterRule(BaseModel):
     field: str
     operator: Literal[
@@ -28,11 +41,15 @@ class VirtualLibrary(BaseModel):
     name: str
     resource_type: Literal["collection", "tag", "genre", "studio", "person", "all", "rsshub", "random"]
     resource_id: Optional[str] = None
+    """兼容旧配置；新逻辑优先用 resource_ids。保存时仍可写入首项便于旧代码。"""
+    resource_ids: List[str] = Field(default_factory=list)
     # image: Optional[str] = None  <-- 我们不再需要这个字段了，可以删除或注释掉
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签
     rsshub_url: Optional[str] = None # <-- 【新增】RSSHUB链接
     rss_type: Optional[Literal["douban", "bangumi"]] = None # <-- 【新增】RSS类型
-    cache_refresh_interval: Optional[int] = Field(default=None) # 统一刷新间隔（小时）；留空走全局
+    cache_refresh_interval: Optional[int] = Field(
+        default=None,
+    )  # 小时；留空走全局。控制磁盘列表缓存 TTL 与定时重拉（非 RSS）
     fallback_tmdb_id: Optional[str] = None # <-- 【新增】RSS库的兜底TMDB ID
     fallback_tmdb_type: Optional[Literal["Movie", "TV"]] = None # <-- 【新增】RSS库的兜底TMDB类型
     enable_retention: bool = Field(default=False) # <-- 【新增】是否开启数据保留功能
@@ -48,6 +65,15 @@ class VirtualLibrary(BaseModel):
     cover_title_zh: Optional[str] = Field(default=None) # 海报中文标题（留空用虚拟库名称）
     cover_title_en: Optional[str] = Field(default=None) # 海报英文标题
     hidden: bool = Field(default=False) # True: 不参与 RSS 定时任务，且在 8999 代理上对 Items/Latest/视图隐藏
+
+    def resolved_resource_ids(self) -> List[str]:
+        """合集/标签/类型/工作室/人员 等可多项；并集语义。旧数据仅 resource_id 时视为单元素。"""
+        ids = _norm_id_list(self.resource_ids)
+        if ids:
+            return ids
+        if self.resource_id is not None and str(self.resource_id).strip():
+            return [str(self.resource_id).strip()]
+        return []
 
 class RealLibraryConfig(BaseModel):
     """真实媒体库配置：启用/禁用、封面标题"""
@@ -108,7 +134,7 @@ class AppConfig(BaseModel):
     # 新增：TMDB HTTP 代理
     tmdb_proxy: Optional[str] = Field(default="")
 
-    # 统一刷新间隔（小时）；用于 RSS 定时调度，也作为 random/分页缓存默认 TTL
+    # 统一刷新间隔（小时）：RSS 定时；其它走磁盘缓存的虚拟库的 TTL 与 disk_refresh 定时
     cache_refresh_interval: Optional[int] = Field(default=12)
 
     # Emby Webhook（管理 API /api/webhook/emby，需加入 Emby Premiere Webhook 目标 URL）

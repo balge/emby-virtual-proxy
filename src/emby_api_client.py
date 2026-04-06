@@ -13,6 +13,7 @@ import aiohttp
 from fastapi import HTTPException
 
 import config_manager
+from http_client import create_client_session
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ async def fetch_from_emby(endpoint: str, params: Optional[Dict[str, Any]] = None
     url = f"{config.emby_url.rstrip('/')}/emby{endpoint}"
 
     try:
-        async with aiohttp.ClientSession() as session:
+        async with create_client_session() as session:
             async with session.get(url, headers=headers, params=params, timeout=15) as response:
                 if response.status != 200:
                     error_text = await response.text()

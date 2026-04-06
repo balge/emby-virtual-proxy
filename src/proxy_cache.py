@@ -17,7 +17,7 @@ import shutil
 import sqlite3
 import threading
 import zlib
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -117,7 +117,13 @@ class VLibUserItemsCache:
     Reads/writes do not keep connections open.
     """
 
-    def get_for_user(self, user_id: str, vlib_id: str) -> Optional[List[Dict[str, Any]]]:
+    def get_for_user(
+        self,
+        user_id: str,
+        vlib_id: str,
+        *,
+        max_age_seconds: Optional[float] = None,
+    ) -> Optional[List[Dict[str, Any]]]:
         path = _items_db_path(user_id, vlib_id)
         if not path.is_file():
             return None
@@ -126,11 +132,40 @@ class VLibUserItemsCache:
             try:
                 _init_items_db(conn)
                 row = conn.execute(
-                    "SELECT items_z FROM items_payload WHERE id = 1"
+                    "SELECT items_z, updated_at FROM items_payload WHERE id = 1"
                 ).fetchone()
                 if not row or row[0] is None:
                     return None
-                return json.loads(zlib.decompress(row[0]))
+                items_z, updated_at_str = row[0], row[1]
+                if max_age_seconds is not None and max_age_seconds > 0:
+                    if not updated_at_str:
+                        return None
+                    try:
+                        s = str(updated_at_str).replace("Z", "+00:00")
+                        u = datetime.fromisoformat(s)
+                        if u.tzinfo is None:
+                            u = u.replace(tzinfo=timezone.utc)
+                        else:
+                            u = u.astimezone(timezone.utc)
+                        age = (datetime.now(timezone.utc) - u).total_seconds()
+                        if age > max_age_seconds:
+                            logger.debug(
+                                "VLibUserItemsCache stale user=%s vlib=%s age=%.0fs max=%.0fs",
+                                user_id,
+                                vlib_id,
+                                age,
+                                max_age_seconds,
+                            )
+                            return None
+                    except Exception as ex:
+                        logger.warning(
+                            "VLibUserItemsCache bad updated_at user=%s vlib=%s: %s",
+                            user_id,
+                            vlib_id,
+                            ex,
+                        )
+                        return None
+                return json.loads(zlib.decompress(items_z))
             finally:
                 conn.close()
         except Exception as e:
