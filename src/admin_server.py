@@ -994,26 +994,15 @@ async def refresh_rss_library(library_id: str, request: Request):
 
 
 async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
-    """刷新代表用户的列表缓存后重生成封面（非全用户；代表用户 = 磁盘上该库第一个缓存用户）。"""
+    """
+    仅重生成封面图：不触发虚拟库列表缓存刷新（避免 random 等库只更新「代表用户」、其它用户推荐仍旧）。
+    素材来自现有磁盘缓存（_resolve_cover_cache_user_id）；无缓存时需先「刷新数据」。
+    """
     config = config_manager.load_config()
     style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        uids = await _list_vlib_cache_user_ids_from_proxy(vlib.id)
-        if uids:
-            rep = uids[0]
-            logger.info(f"Cover refresh: refresh cache for representative user={rep} vlib={vlib.id}")
-            await _notify_proxy_refresh_cache(vlib.id, user_ids=[rep])
-        else:
-            users = await fetch_from_emby("/Users")
-            uid0 = users[0].get("Id") if users else None
-            if uid0:
-                logger.info(
-                    f"Cover refresh: no prior vlib cache; fallback refresh Emby-first user={uid0} vlib={vlib.id}"
-                )
-                await _notify_proxy_refresh_cache(vlib.id, user_ids=[uid0])
-
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
             current_config = config_manager.load_config()
