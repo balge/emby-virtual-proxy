@@ -7,7 +7,7 @@ ARG USE_CN_MIRROR=true
 RUN if [ "$USE_CN_MIRROR" = "true" ]; then npm config set registry https://registry.npmmirror.com; fi && npm install
 COPY frontend/ .
 RUN npm run build
-RUN if [ ! -d "dist" ] || [ -z "$(ls -A dist)" ]; then echo "Frontend build failed: dist directory is empty or does not exist." && exit 1; fi
+RUN if [ ! -d "dist" ] || [ -z "$(ls -A dist)" ]; then echo "Frontend build failed: dist directory is empty or not found." && exit 1; fi
 
 
 # --- STAGE 2: Build Final Image (这一阶段结构调整) ---
@@ -26,13 +26,9 @@ ENV MALLOC_ARENA_MAX=2
 
 # 将依赖文件复制到工作目录根部并安装
 COPY src/requirements.txt .
-# 使用 debian 清华源和阿里云 pip 镜像加速（本地构建加速，CI 中可通过 ARG 跳过）
+# 使用阿里云 pip 镜像加速（本地构建加速，CI 中可通过 ARG 跳过）
 ARG USE_CN_MIRROR=true
 RUN if [ "$USE_CN_MIRROR" = "true" ]; then \
-      sed -i 's/deb.debian.org/mirrors.tuna.tsinghua.edu.cn/g' /etc/apt/sources.list.d/debian.sources; \
-    fi && \
-    apt-get update && apt-get install -y supervisor && \
-    if [ "$USE_CN_MIRROR" = "true" ]; then \
       pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ -r requirements.txt; \
     else \
       pip install --no-cache-dir -r requirements.txt; \
@@ -45,8 +41,5 @@ COPY --from=frontend-builder /app/frontend/dist /app/static
 EXPOSE 8001
 EXPOSE 8999
 
-# 新增：复制 supervisord 配置文件
-COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
-# 修改：使用 supervisord 启动服务
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# 单进程 admin(8001)+proxy(8999)，PID 1 为 Python；由 Docker restart 策略负责崩溃重启
+CMD ["python", "src/main.py", "both"]
