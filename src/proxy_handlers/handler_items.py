@@ -246,6 +246,15 @@ def _apply_client_sort(items: List[Dict[str, Any]], request: Request):
     sort_order = request.query_params.get("SortOrder", "Ascending")
     primary_sort = sort_by.split(",")[0] if sort_by else "SortName"
     reverse = sort_order.startswith("Descending")
+    if primary_sort == "DateLastContentAdded":
+        # Keep behavior consistent with rule filtering/sorting:
+        # Series use DateLastMediaAdded (fallback DateCreated), movies use DateCreated.
+        items.sort(
+            key=lambda x: (_get_value_for_rule(x, "DateLastMediaAdded") or ""),
+            reverse=reverse,
+        )
+        return
+
     emby_field = SORT_FIELD_MAP.get(primary_sort, "SortName")
     items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
 
