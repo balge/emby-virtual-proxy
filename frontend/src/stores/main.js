@@ -16,6 +16,7 @@ export const useMainStore = defineStore('main', {
     config: {
       emby_url: '',
       emby_api_key: '',
+      enable_cache: true,
       cache_refresh_interval: 12,
       hide: [],
       ignore_libraries: [],

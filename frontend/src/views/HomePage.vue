@@ -108,7 +108,7 @@ const quickLinks = [
   {
     to: "/settings",
     label: "核心设置",
-    desc: "Emby 连接、封面配置、Webhook",
+    desc: "Emby连接、缓存、Webhook",
     icon: Cog6ToothIcon,
     iconBg: "bg-blue-100 dark:bg-blue-900/30",
     iconColor: "text-blue-600 dark:text-blue-400",

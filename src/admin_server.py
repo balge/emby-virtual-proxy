@@ -903,6 +903,9 @@ async def get_config():
 @api_router.post("/config", response_model=AppConfig, response_model_by_alias=True, tags=["Configuration"])
 async def update_config(config: AppConfig):
     config_manager.save_config(config)
+    if not config.enable_cache:
+        api_cache.clear()
+        logger.info("enable_cache=false: cleared api_cache")
     # 更新定时任务
     update_virtual_library_refresh_jobs(config)
     update_real_library_cover_cron(config)

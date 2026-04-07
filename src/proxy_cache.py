@@ -22,10 +22,37 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from cachetools import TTLCache
+from starlette.requests import Request
 
 logger = logging.getLogger(__name__)
 
-api_cache = TTLCache(maxsize=500, ttl=7200)
+api_cache = TTLCache(maxsize=500, ttl=300)
+
+
+def get_api_cache_key(request: Request, full_path: str) -> Optional[str]:
+    """
+    用于代理内存缓存的键：仅 GET、排除图片等二进制路径。
+    与 UserId + path + 查询参数（脱敏 token）相关。
+    """
+    if request.method != "GET":
+        return None
+    if "/Images/" in full_path or full_path.endswith((".jpg", ".jpeg", ".png", ".webp", ".gif")):
+        return None
+    if request.headers.get("Range"):
+        return None
+    params = dict(request.query_params)
+    params.pop("X-Emby-Token", None)
+    params.pop("api_key", None)
+    sorted_params = tuple(sorted(params.items()))
+    user_id_from_path = "public"
+    if "/Users/" in full_path:
+        try:
+            parts = full_path.split("/")
+            user_id_from_path = parts[parts.index("Users") + 1]
+        except (ValueError, IndexError):
+            pass
+    user_id = params.get("UserId", user_id_from_path)
+    return f"user:{user_id}:path:{full_path}:params:{sorted_params}"
 
 # ---------------------------------------------------------------------------
 # Field slimming

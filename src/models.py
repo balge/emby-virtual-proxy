@@ -99,6 +99,8 @@ class AppConfig(BaseModel):
     emby_api_key: Optional[str] = Field(default="")
     emby_server_id: Optional[str] = Field(default=None) # 新增：用于TMDB缓存占位符的备用服务器ID
     log_level: Literal["debug", "info", "warn", "error"] = Field(default="info")
+    # 代理是否缓存部分 Emby JSON（GET）；关闭后直连 Emby、不写入 api_cache
+    enable_cache: bool = Field(default=True)
     display_order: List[str] = Field(default_factory=list)
     # Global ignore libraries list (deprecated, migrated to real_libraries.enabled)
     ignore_libraries: List[str] = Field(default_factory=list)
@@ -151,7 +153,7 @@ class AppConfig(BaseModel):
     class Config:
         # 允许从别名填充模型
         populate_by_name = True
-        # 兼容旧配置文件：旧版可能包含 enable_cache 等字段
+        # 兼容旧配置文件中的未知字段
         extra = "ignore"
 
     @property

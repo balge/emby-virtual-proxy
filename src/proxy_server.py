@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, 
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
-from typing import Tuple, Dict
+from typing import Dict
 
 # 【【【 同时修改这一行，从 proxy_cache 导入缓存与失效函数 】】】
 from proxy_cache import (
@@ -39,19 +39,6 @@ _LOG_LEVEL = getattr(logging, _LOG_LEVEL_NAME, logging.INFO)
 logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 logger.info(f"Proxy logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
-
-def get_cache_key(request: Request, full_path: str) -> str:
-    if request.method != "GET": return None
-    # Skip non-JSON/static-like routes from API cache keying to avoid noisy MISS logs.
-    if "/Images/" in full_path or full_path.endswith(".jpg") or full_path.endswith(".png") or full_path.endswith(".webp"):
-        return None
-    params = dict(request.query_params); params.pop("X-Emby-Token", None); params.pop("api_key", None)
-    sorted_params = tuple(sorted(params.items())); user_id_from_path = "public"
-    if "/Users/" in full_path:
-        try: parts = full_path.split("/"); user_id_from_path = parts[parts.index("Users") + 1]
-        except (ValueError, IndexError): pass
-    user_id = params.get("UserId", user_id_from_path)
-    return f"user:{user_id}:path:{full_path}:params:{sorted_params}"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -316,6 +303,14 @@ async def reverse_proxy(request: Request, full_path: str):
     if not response: response = await handler_seasons.handle_seasons_merge(request, full_path, session, real_emby_url)
     if not response: response = await handler_items.handle_virtual_library_items(request, full_path, request.method, real_emby_url, session, config)
     if not response: response = await handler_views.handle_view_injection(request, full_path, request.method, real_emby_url, session, config)
-    if not response: response = await handler_default.forward_request(request, full_path, request.method, real_emby_url, session)
+    if not response:
+        response = await handler_default.forward_request(
+            request,
+            full_path,
+            request.method,
+            real_emby_url,
+            session,
+            enable_api_cache=config.enable_cache,
+        )
 
     return response
