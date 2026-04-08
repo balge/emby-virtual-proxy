@@ -1644,8 +1644,10 @@ async def scheduled_refresh_virtual_library(library_id: str):
         return
     if vlib.resource_type == "rsshub":
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
-        return
-    await _notify_proxy_refresh_cache(library_id)
+    else:
+        await _notify_proxy_refresh_cache(library_id)
+    # 与「刷新数据」API 一致：数据刷新完成后根据磁盘缓存重生成封面（含 random 等）
+    await _regenerate_cover_for_vlib(vlib)
 
 async def refresh_all_rss_libraries():
     """定时刷新所有 RSS 虚拟库"""
