@@ -1642,12 +1642,19 @@ async def scheduled_refresh_virtual_library(library_id: str):
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
     if not vlib or vlib.hidden:
         return
+    logger.info(
+        f"SCHEDULED_VLIB_REFRESH START vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
+    )
     if vlib.resource_type == "rsshub":
+        # RSS 库仍走 RSS 队列刷新；随后重生成封面
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
+        await _regenerate_cover_for_vlib(vlib)
     else:
-        await _notify_proxy_refresh_cache(library_id)
-    # 与「刷新数据」API 一致：数据刷新完成后根据磁盘缓存重生成封面（含 random 等）
-    await _regenerate_cover_for_vlib(vlib)
+        # 非 RSS：与手动「刷新数据」保持完全一致的语义（刷新磁盘缓存 + 刷新封面）
+        await refresh_virtual_library_data_and_cover(vlib)
+    logger.info(
+        f"SCHEDULED_VLIB_REFRESH DONE vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
+    )
 
 async def refresh_all_rss_libraries():
     """定时刷新所有 RSS 虚拟库"""
