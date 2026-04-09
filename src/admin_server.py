@@ -107,10 +107,11 @@ async def _resolve_cover_cache_user_id(library_id: str) -> Optional[str]:
     避免 Emby /Users 顺序第一个与缓存所有者不一致导致 404。
     若尚无任何缓存，再退回 Emby 首个用户（与旧行为一致，便于无访问记录时的兜底刷新）。
     """
-    uids = await _list_vlib_cache_user_ids_from_proxy(library_id)
+    scoped, sid = _load_server_scoped_config()
+    uids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=sid)
     if uids:
         return uids[0]
-    users = await fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users", config=scoped)
     if users:
         return users[0].get("Id")
     return None
@@ -447,7 +448,7 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
 
     # Get a reference user ID for the query
-    users = await fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users", config=config)
     if not users:
         logger.warning("Cannot populate cache: no Emby users found.")
         return
@@ -694,7 +695,7 @@ async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path
         return
 
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
-    users = await fetch_from_emby("/Users")
+    users = await fetch_from_emby("/Users", config=config)
     if not users:
         return
     user_id = users[0].get("Id")
@@ -1241,15 +1242,26 @@ async def refresh_library_data(library_id: str):
     """Refresh data for a single virtual library, then regenerate its cover."""
     logger.info(f"API refresh_library_data called for library_id={library_id}")
     config = config_manager.load_config()
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    resolved_sid = sid
+    if not vlib:
+        # Fallback: search all server profiles to avoid false 404 caused by context lag.
+        for s in raw.servers:
+            p = raw.get_server_profile(str(s.id))
+            libs = p.get("library") or []
+            found = next((x for x in libs if str(x.get("id")) == str(library_id)), None)
+            if found:
+                vlib = VirtualLibrary.model_validate(found)
+                resolved_sid = str(s.id)
+                break
     if not vlib:
         logger.warning(f"refresh_library_data: 虚拟库 {library_id} 不存在")
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
     logger.info(f"refresh_library_data: 开始刷新虚拟库 '{vlib.name}' ({vlib.id}) type={vlib.resource_type}")
-    cfg = config_manager.load_config(apply_active_profile=False)
-    sid = str(cfg.admin_active_server_id or "")
-    asyncio.create_task(refresh_virtual_library_data_and_cover(vlib, server_id=sid))
+    asyncio.create_task(refresh_virtual_library_data_and_cover(vlib, server_id=resolved_sid))
     return {"message": f"Data and cover refresh started for '{vlib.name}'."}
 
 
@@ -1422,8 +1434,9 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
 @api_router.get("/all-libraries", tags=["Display Management"])
 async def get_all_libraries():
     all_libs = []
+    scoped, _sid = _load_server_scoped_config()
     try:
-        real_libs_from_emby = await get_real_libraries_hybrid_mode()
+        real_libs_from_emby = await get_real_libraries_hybrid_mode(config=scoped)
         for lib in real_libs_from_emby:
             all_libs.append({
                 "id": lib.get("Id"), "name": lib.get("Name"), "type": "real",
@@ -1432,8 +1445,7 @@ async def get_all_libraries():
     except HTTPException as e:
         raise e
 
-    config = config_manager.load_config()
-    for lib in config.virtual_libraries:
+    for lib in scoped.virtual_libraries:
         all_libs.append({
             "id": lib.id, "name": lib.name, "type": "virtual",
         })
@@ -1449,16 +1461,22 @@ async def save_display_order(ordered_ids: List[str]):
 
 @api_router.post("/libraries", response_model=VirtualLibrary, tags=["Libraries"])
 async def create_library(library: VirtualLibrary):
-    config = config_manager.load_config()
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    if not sid:
+        raise HTTPException(status_code=400, detail="No active server selected")
+    profile = raw.get_server_profile(sid)
+    libs_raw = list(profile.get("library") or [])
+    display_order = list(profile.get("display_order") or [])
+
     library.id = str(uuid.uuid4())
-    if not hasattr(config, 'virtual_libraries'):
-        config.virtual_libraries = []
-    
-    config.virtual_libraries.append(library)
-    if library.id not in config.display_order:
-        config.display_order.append(library.id)
-        
-    config_manager.save_config(config)
+    libs_raw.append(library.model_dump())
+    if library.id not in display_order:
+        display_order.append(library.id)
+    profile["library"] = libs_raw
+    profile["display_order"] = display_order
+    raw.set_server_profile(sid, profile)
+    config_manager.save_config(raw, sync_active_profile=False)
     return library
 
 @api_router.put("/libraries/{library_id}", response_model=VirtualLibrary, tags=["Libraries"])
@@ -1492,7 +1510,17 @@ async def update_library(library_id: str, updated_library_data: VirtualLibrary):
             config.virtual_libraries[i] = updated_lib
             break
             
-    config_manager.save_config(config)
+    # Persist to current active server profile explicitly (avoid projection mismatch)
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    if sid:
+        profile = raw.get_server_profile(sid)
+        profile["library"] = [v.model_dump() for v in config.virtual_libraries]
+        profile["display_order"] = list(config.display_order or [])
+        raw.set_server_profile(sid, profile)
+        config_manager.save_config(raw, sync_active_profile=False)
+    else:
+        config_manager.save_config(config)
     return updated_lib
 
 @api_router.patch("/libraries/{library_id}/toggle-hidden", tags=["Libraries"])
@@ -1502,7 +1530,16 @@ async def toggle_library_hidden(library_id: str):
     for lib in config.virtual_libraries:
         if lib.id == library_id:
             lib.hidden = not lib.hidden
-            config_manager.save_config(config)
+            raw = config_manager.load_config(apply_active_profile=False)
+            sid = str(raw.admin_active_server_id or "")
+            if sid:
+                profile = raw.get_server_profile(sid)
+                profile["library"] = [v.model_dump() for v in config.virtual_libraries]
+                profile["display_order"] = list(config.display_order or [])
+                raw.set_server_profile(sid, profile)
+                config_manager.save_config(raw, sync_active_profile=False)
+            else:
+                config_manager.save_config(config)
             # 避免 api_cache 仍返回隐藏前的列表
             keys_to_remove = [k for k in api_cache if library_id in str(k)]
             for k in keys_to_remove:
@@ -1554,7 +1591,16 @@ async def delete_library(library_id: str):
         config.display_order.remove(library_id)
     await _notify_proxy_invalidate_cache(library_id)
 
-    config_manager.save_config(config)
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    if sid:
+        profile = raw.get_server_profile(sid)
+        profile["library"] = [v.model_dump() for v in config.virtual_libraries]
+        profile["display_order"] = list(config.display_order or [])
+        raw.set_server_profile(sid, profile)
+        config_manager.save_config(raw, sync_active_profile=False)
+    else:
+        config_manager.save_config(config)
     return Response(status_code=204)
 
 # --- Real Library Management ---
@@ -1562,10 +1608,12 @@ async def delete_library(library_id: str):
 @api_router.get("/real-libraries/sync", tags=["Real Libraries"])
 async def sync_real_libraries():
     """从 Emby 同步真实库列表，合并到配置中（保留已有配置，新增默认启用）。"""
-    emby_libs = await get_real_libraries_hybrid_mode()
-    config = config_manager.load_config()
+    scoped, sid = _load_server_scoped_config()
+    if not sid:
+        raise HTTPException(status_code=400, detail="No active server selected")
+    emby_libs = await get_real_libraries_hybrid_mode(config=scoped)
 
-    existing_map = {rl.id: rl for rl in config.real_libraries}
+    existing_map = {rl.id: rl for rl in scoped.real_libraries}
     synced: List[RealLibraryConfig] = []
 
     for lib in emby_libs:
@@ -1578,9 +1626,12 @@ async def sync_real_libraries():
         else:
             synced.append(RealLibraryConfig(id=lib_id, name=lib_name, enabled=True))
 
-    config.real_libraries = synced
-    config_manager.save_config(config)
-    logger.info(f"Synced {len(synced)} real libraries from Emby.")
+    raw = config_manager.load_config(apply_active_profile=False)
+    profile = raw.get_server_profile(sid)
+    profile["real_libraries"] = [rl.model_dump() for rl in synced]
+    raw.set_server_profile(sid, profile)
+    config_manager.save_config(raw, sync_active_profile=False)
+    logger.info(f"Synced {len(synced)} real libraries from Emby. server={sid}")
     return [rl.model_dump() for rl in synced]
 
 
@@ -1591,18 +1642,23 @@ class SaveRealLibrariesRequest(BaseModel):
 @api_router.post("/real-libraries", tags=["Real Libraries"])
 async def save_real_libraries(body: SaveRealLibrariesRequest):
     """保存真实库配置列表及封面 cron。"""
-    config = config_manager.load_config()
-    config.real_libraries = body.libraries
-    config.real_library_cover_cron = body.cover_cron
-    config_manager.save_config(config)
-    update_real_library_cover_cron(config)
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    if not sid:
+        raise HTTPException(status_code=400, detail="No active server selected")
+    profile = raw.get_server_profile(sid)
+    profile["real_libraries"] = [rl.model_dump() for rl in body.libraries]
+    profile["real_library_cover_cron"] = body.cover_cron
+    raw.set_server_profile(sid, profile)
+    config_manager.save_config(raw, sync_active_profile=False)
+    update_real_library_cover_cron(config_manager.load_config())
     return {"ok": True}
 
 
 @api_router.post("/real-libraries/{library_id}/refresh-cover", tags=["Real Libraries"])
 async def refresh_real_library_cover(library_id: str):
     """手动刷新单个真实库封面。"""
-    config = config_manager.load_config()
+    config, sid = _load_server_scoped_config()
     rl = next((r for r in config.real_libraries if r.id == library_id), None)
     if not rl:
         raise HTTPException(status_code=404, detail="Real library config not found")
@@ -1610,12 +1666,17 @@ async def refresh_real_library_cover(library_id: str):
     logger.info(f"Manual refresh cover for real lib '{rl.name}' ({rl.id})")
     tag = await _generate_real_library_cover(rl, config)
     if tag:
-        current_config = config_manager.load_config()
-        for r in current_config.real_libraries:
-            if r.id == library_id:
-                r.image_tag = tag
+        raw = config_manager.load_config(apply_active_profile=False)
+        profile = raw.get_server_profile(str(sid or ""))
+        libs = list(profile.get("real_libraries") or [])
+        for r in libs:
+            if str(r.get("id")) == str(library_id):
+                r["image_tag"] = tag
                 break
-        config_manager.save_config(current_config)
+        profile["real_libraries"] = libs
+        if sid:
+            raw.set_server_profile(str(sid), profile)
+            config_manager.save_config(raw, sync_active_profile=False)
         return {"ok": True, "image_tag": tag}
     return {"ok": False, "detail": "Cover generation failed"}
 
@@ -1623,14 +1684,16 @@ async def refresh_real_library_cover(library_id: str):
 @api_router.post("/real-libraries/refresh-all-covers", tags=["Real Libraries"])
 async def refresh_all_real_library_covers_api():
     """手动刷新所有启用的真实库封面。"""
-    asyncio.create_task(refresh_all_real_library_covers())
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    asyncio.create_task(refresh_all_real_library_covers(server_id=sid))
     return {"ok": True, "message": "All real library cover refresh started."}
 
 
 @api_router.get("/emby/image-proxy/{item_id}", tags=["Emby Helper"])
 async def proxy_emby_image(item_id: str):
     """代理 Emby 项目封面图片，避免前端跨域问题。"""
-    config = config_manager.load_config()
+    config, _sid = _load_server_scoped_config()
     if not config.emby_url or not config.emby_api_key:
         raise HTTPException(status_code=400, detail="Emby URL or API key not configured")
     url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
@@ -1652,12 +1715,13 @@ async def get_emby_classifications():
     def format_items(items_list: List) -> List:
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
+    scoped, _sid = _load_server_scoped_config()
     try:
         tasks = {
-            "collections": fetch_from_emby("/Items", params={"IncludeItemTypes": "BoxSet", "Recursive": "true"}),
-            "genres": fetch_from_emby("/Genres"),
-            "tags": fetch_from_emby("/Tags"),
-            "studios": fetch_from_emby("/Studios"),
+            "collections": fetch_from_emby("/Items", params={"IncludeItemTypes": "BoxSet", "Recursive": "true"}, config=scoped),
+            "genres": fetch_from_emby("/Genres", config=scoped),
+            "tags": fetch_from_emby("/Tags", config=scoped),
+            "studios": fetch_from_emby("/Studios", config=scoped),
         }
         results_list = await asyncio.gather(*tasks.values())
         results_dict = dict(zip(tasks.keys(), results_list))
@@ -1670,26 +1734,28 @@ async def get_emby_classifications():
 async def search_emby_persons(query: str = Query(None), page: int = Query(1)):
     PAGE_SIZE = 100
     start_index = (page - 1) * PAGE_SIZE
+    scoped, _sid = _load_server_scoped_config()
     try:
         if query:
             params = { "SearchTerm": query, "IncludeItemTypes": "Person", "Recursive": "true", "StartIndex": start_index, "Limit": PAGE_SIZE }
-            persons = await fetch_from_emby("/Items", params=params)
+            persons = await fetch_from_emby("/Items", params=params, config=scoped)
         else:
             params = { "StartIndex": start_index, "Limit": PAGE_SIZE }
-            persons = await fetch_from_emby("/Persons", params=params)
+            persons = await fetch_from_emby("/Persons", params=params, config=scoped)
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in persons]
     except HTTPException as e:
         raise e
 
 @api_router.get("/emby/resolve-item/{item_id}", tags=["Emby Helper"])
 async def resolve_emby_item(item_id: str):
+    scoped, _sid = _load_server_scoped_config()
     try:
-        users = await fetch_from_emby("/Users")
+        users = await fetch_from_emby("/Users", config=scoped)
         if not users:
             raise HTTPException(status_code=500, detail="无法获取任何Emby用户用于查询")
         
         ref_user_id = users[0]['Id']
-        item_details = await fetch_from_emby(f"/Users/{ref_user_id}/Items/{item_id}")
+        item_details = await fetch_from_emby(f"/Users/{ref_user_id}/Items/{item_id}", config=scoped)
         
         if not item_details:
              raise HTTPException(status_code=404, detail="在Emby中未找到指定的项目ID")
