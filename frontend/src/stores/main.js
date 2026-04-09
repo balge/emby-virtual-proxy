@@ -85,6 +85,23 @@ export const useMainStore = defineStore('main', {
   },
 
   actions: {
+    _defaultServerProfile() {
+      return {
+        enable_cache: true,
+        display_order: [],
+        ignore_libraries: [],
+        real_libraries: [],
+        real_library_cover_cron: null,
+        hide: [],
+        library: [],
+        default_cover_style: 'style_multi_1',
+        show_missing_episodes: false,
+        cache_refresh_interval: 12,
+        webhook: { enabled: false, secret: null, delay_seconds: 0 },
+        force_merge_by_tmdb_id: false,
+      }
+    },
+
     _ensureServersShape() {
       // Backend should already migrate, but keep frontend resilient.
       if (!Array.isArray(this.config.servers)) this.config.servers = []
@@ -103,6 +120,7 @@ export const useMainStore = defineStore('main', {
       }
       for (const s of this.config.servers) {
         if (!s.profile || typeof s.profile !== 'object') s.profile = {}
+        s.profile = { ...this._defaultServerProfile(), ...s.profile }
       }
     },
 
@@ -124,7 +142,7 @@ export const useMainStore = defineStore('main', {
     },
 
     _applyServerProfileToLegacy(server) {
-      const p = server?.profile || {}
+      const p = { ...this._defaultServerProfile(), ...(server?.profile || {}) }
       this.config.enable_cache = p.enable_cache ?? this.config.enable_cache
       this.config.display_order = Array.isArray(p.display_order) ? [...p.display_order] : (this.config.display_order || [])
       this.config.ignore_libraries = Array.isArray(p.ignore_libraries) ? [...p.ignore_libraries] : (this.config.ignore_libraries || [])
@@ -173,7 +191,7 @@ export const useMainStore = defineStore('main', {
         throw new Error(`代理端口重复：${proxy_port}`)
       }
 
-      const created = { id, name, emby_url, emby_api_key, enabled, proxy_port, profile: {} }
+      const created = { id, name, emby_url, emby_api_key, enabled, proxy_port, profile: this._defaultServerProfile() }
       this.config.servers.push(created)
 
       if (switchToNew) {
@@ -218,6 +236,16 @@ export const useMainStore = defineStore('main', {
       // Persist selected admin context so backend APIs run against same server immediately.
       try {
         await api.updateConfig(this.config)
+        const [classificationsRes, allLibsRes, configRes] = await Promise.all([
+          api.getClassifications(),
+          api.getAllLibraries(),
+          api.getConfig(),
+        ])
+        this.config = configRes.data
+        this._ensureServersShape()
+        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
+        this.classifications = classificationsRes.data
+        this.allLibrariesForSorting = allLibsRes.data
       } catch (error) {
         this._handleApiError(error, '切换服务器失败')
       }

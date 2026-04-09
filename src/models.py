@@ -249,8 +249,24 @@ class AppConfig(BaseModel):
             "force_merge_by_tmdb_id": self.force_merge_by_tmdb_id,
         }
 
+    def _default_profile_template(self) -> dict:
+        return {
+            "enable_cache": True,
+            "display_order": [],
+            "ignore_libraries": [],
+            "real_libraries": [],
+            "real_library_cover_cron": None,
+            "hide": [],
+            "library": [],
+            "default_cover_style": "style_multi_1",
+            "show_missing_episodes": False,
+            "cache_refresh_interval": 12,
+            "webhook": WebhookSettings().model_dump(),
+            "force_merge_by_tmdb_id": False,
+        }
+
     def _ensure_server_profiles_initialized(self) -> None:
-        base = self._profile_snapshot_from_legacy()
+        base = self._default_profile_template()
         for s in self.servers:
             if not isinstance(s.profile, dict):
                 s.profile = {}
@@ -268,7 +284,7 @@ class AppConfig(BaseModel):
             active = self._select_active_server_no_ensure()
         if not active or not isinstance(active.profile, dict):
             return
-        p = active.profile
+        p = {**self._default_profile_template(), **active.profile}
         self.enable_cache = bool(p.get("enable_cache", self.enable_cache))
         self.display_order = list(p.get("display_order", self.display_order or []))
         self.ignore_libraries = list(p.get("ignore_libraries", self.ignore_libraries or []))
