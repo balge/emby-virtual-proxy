@@ -66,6 +66,9 @@
             >
               设为当前
             </BaseButton>
+            <BaseButton size="sm" variant="secondary" @click="openEditServerDialog(srv)">
+              编辑
+            </BaseButton>
             <BaseButton
               size="sm"
               variant="danger-outline"
@@ -208,6 +211,41 @@
         >
       </template>
     </BaseDialog>
+
+    <BaseDialog
+      :open="editServerDialogOpen"
+      title="编辑服务器"
+      @close="editServerDialogOpen = false"
+    >
+      <div class="space-y-3">
+        <BaseInput v-model="editServer.name" label="名称" />
+        <BaseInput
+          v-model="editServer.emby_url"
+          label="Emby 服务器地址"
+          placeholder="http://192.168.1.10:8096"
+        />
+        <BaseInput
+          v-model="editServer.emby_api_key"
+          label="Emby API 密钥"
+          type="password"
+          placeholder="API Key"
+        />
+        <BaseInput
+          v-model.number="editServer.proxy_port"
+          label="代理端口"
+          type="number"
+          placeholder="9000"
+        />
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" @click="editServerDialogOpen = false"
+          >取消</BaseButton
+        >
+        <BaseButton :loading="editingServer" @click="onEditServer"
+          >保存</BaseButton
+        >
+      </template>
+    </BaseDialog>
   </div>
 </template>
 
@@ -229,7 +267,16 @@ const store = useMainStore();
 const toast = useToast();
 const createServerDialogOpen = ref(false);
 const creatingServer = ref(false);
+const editServerDialogOpen = ref(false);
+const editingServer = ref(false);
+const editingServerId = ref("");
 const newServer = reactive({
+  name: "",
+  emby_url: "",
+  emby_api_key: "",
+  proxy_port: 9000,
+});
+const editServer = reactive({
   name: "",
   emby_url: "",
   emby_api_key: "",
@@ -284,6 +331,34 @@ async function onDeleteServer(serverId) {
     toast.success("服务器已删除");
   } catch (e) {
     toast.error("删除服务器失败");
+  }
+}
+
+function openEditServerDialog(srv) {
+  editingServerId.value = String(srv.id);
+  editServer.name = srv.name || "";
+  editServer.emby_url = srv.emby_url || "";
+  editServer.emby_api_key = srv.emby_api_key || "";
+  editServer.proxy_port = Number(srv.proxy_port || 8999);
+  editServerDialogOpen.value = true;
+}
+
+async function onEditServer() {
+  if (!editingServerId.value) return;
+  editingServer.value = true;
+  try {
+    await store.updateServer(editingServerId.value, {
+      name: editServer.name,
+      emby_url: editServer.emby_url,
+      emby_api_key: editServer.emby_api_key,
+      proxy_port: editServer.proxy_port,
+    });
+    toast.success("服务器已更新");
+    editServerDialogOpen.value = false;
+  } catch (e) {
+    toast.error(e?.message || "更新服务器失败");
+  } finally {
+    editingServer.value = false;
   }
 }
 

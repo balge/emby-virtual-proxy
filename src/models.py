@@ -321,6 +321,26 @@ class AppConfig(BaseModel):
         self.ensure_servers_migrated()
         return next((s for s in self.servers if int(s.proxy_port) == int(port) and s.enabled), None)
 
+    def get_server_by_id(self, server_id: str) -> Optional[EmbyServerConfig]:
+        self.ensure_servers_migrated()
+        sid = str(server_id)
+        return next((s for s in self.servers if str(s.id) == sid), None)
+
+    def get_server_profile(self, server_id: str) -> dict:
+        server = self.get_server_by_id(server_id)
+        if not server:
+            return self._default_profile_template()
+        p = server.profile if isinstance(server.profile, dict) else {}
+        return {**self._default_profile_template(), **p}
+
+    def set_server_profile(self, server_id: str, profile: dict) -> bool:
+        server = self.get_server_by_id(server_id)
+        if not server:
+            return False
+        merged = {**self._default_profile_template(), **(profile or {})}
+        server.profile = merged
+        return True
+
     def list_enabled_proxy_ports(self) -> List[int]:
         self.ensure_servers_migrated()
         ports: List[int] = []

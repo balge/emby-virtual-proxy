@@ -8,7 +8,7 @@ from models import AppConfig # <--- 修正这里
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 CONFIG_FILE_PATH = CONFIG_DIR / "config.json"
 
-def load_config() -> AppConfig:
+def load_config(apply_active_profile: bool = True) -> AppConfig:
     """
     加载配置文件。如果目录或文件不存在，则使用默认值自动创建。
     """
@@ -45,22 +45,27 @@ def load_config() -> AppConfig:
             cfg = AppConfig.model_validate(data)
             # Migrate legacy single-server config into servers[] in memory.
             cfg.ensure_servers_migrated()
+            if apply_active_profile:
+                cfg.sync_active_profile_to_legacy()
             return cfg
             
     except (json.JSONDecodeError, Exception) as e:
         print(f"Error loading or parsing config file: {e}. Returning a temporary default config.")
         cfg = AppConfig()
         cfg.ensure_servers_migrated()
+        if apply_active_profile:
+            cfg.sync_active_profile_to_legacy()
         return cfg
 
-def save_config(config: AppConfig):
+def save_config(config: AppConfig, sync_active_profile: bool = True):
     """
     将配置对象安全地保存到文件。
     """
     try:
         CONFIG_DIR.mkdir(exist_ok=True)
         # Persist current edited top-level settings into selected server profile.
-        config.sync_legacy_to_active_profile()
+        if sync_active_profile:
+            config.sync_legacy_to_active_profile()
 
         # Write a canonical config format:
         # - servers[].profile is the source of truth for per-server settings

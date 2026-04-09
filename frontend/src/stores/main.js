@@ -157,6 +157,20 @@ export const useMainStore = defineStore('main', {
       this.config.force_merge_by_tmdb_id = p.force_merge_by_tmdb_id ?? this.config.force_merge_by_tmdb_id
     },
 
+    async _loadAndApplyActiveServerProfile() {
+      const sid = this.config.admin_active_server_id
+      if (!sid) return
+      try {
+        const res = await api.getServerProfile(sid)
+        const profile = res?.data || {}
+        const server = (this.config.servers || []).find((s) => String(s.id) === String(sid))
+        if (server) server.profile = { ...this._defaultServerProfile(), ...profile }
+        this._applyServerProfileToLegacy({ profile })
+      } catch (e) {
+        this._handleApiError(e, '加载服务器配置失败')
+      }
+    },
+
     addServer() {
       this._ensureServersShape()
       const id = crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())
@@ -202,6 +216,31 @@ export const useMainStore = defineStore('main', {
       return created
     },
 
+    async updateServer(serverId, patch) {
+      this._ensureServersShape()
+      const list = this.config.servers || []
+      const idx = list.findIndex((s) => String(s.id) === String(serverId))
+      if (idx < 0) throw new Error('服务器不存在')
+      const current = list[idx]
+      const next = {
+        ...current,
+        ...patch,
+        name: String((patch?.name ?? current.name) || '').trim() || current.name || 'Emby',
+        emby_url: String((patch?.emby_url ?? current.emby_url) || '').trim(),
+        emby_api_key: String((patch?.emby_api_key ?? current.emby_api_key) || '').trim(),
+        proxy_port: Number(patch?.proxy_port ?? current.proxy_port),
+      }
+      if (!next.emby_url || !next.emby_api_key || !Number.isInteger(next.proxy_port) || next.proxy_port < 1 || next.proxy_port > 65535) {
+        throw new Error('服务器参数不完整或端口无效')
+      }
+      if (list.some((s, i) => i !== idx && Number(s.proxy_port) === Number(next.proxy_port))) {
+        throw new Error(`代理端口重复：${next.proxy_port}`)
+      }
+      list[idx] = next
+      await api.updateConfig(this.config)
+      return next
+    },
+
     removeServer(serverId) {
       this._ensureServersShape()
       const list = this.config.servers || []
@@ -229,10 +268,13 @@ export const useMainStore = defineStore('main', {
       const current = (this.config.servers || []).find((s) => String(s.id) === String(this.config.admin_active_server_id))
       if (current) {
         current.profile = this._legacySnapshotForServerProfile()
+        try {
+          await api.updateServerProfile(current.id, current.profile)
+        } catch (e) {
+          this._handleApiError(e, '保存当前服务器配置失败')
+        }
       }
       this.config.admin_active_server_id = serverId
-      const next = (this.config.servers || []).find((s) => String(s.id) === String(serverId))
-      if (next) this._applyServerProfileToLegacy(next)
       // Persist selected admin context so backend APIs run against same server immediately.
       try {
         await api.updateConfig(this.config)
@@ -243,9 +285,13 @@ export const useMainStore = defineStore('main', {
         ])
         this.config = configRes.data
         this._ensureServersShape()
-        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
+        await this._loadAndApplyActiveServerProfile()
         this.classifications = classificationsRes.data
         this.allLibrariesForSorting = allLibsRes.data
+        this.personNameCache = {}
+        this.currentLibrary = {}
+        this.resolveVisiblePersonNames()
+        this.dataStatus = { type: 'success', text: '已切换服务器并刷新数据' }
       } catch (error) {
         this._handleApiError(error, '切换服务器失败')
       }
@@ -260,7 +306,7 @@ export const useMainStore = defineStore('main', {
         ])
         this.config = configRes.data
         this._ensureServersShape()
-        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
+        await this._loadAndApplyActiveServerProfile()
         if (!this.config.advanced_filters) this.config.advanced_filters = []
         if (!this.config.library) this.config.library = []
         if (!this.config.real_libraries) this.config.real_libraries = []
@@ -289,7 +335,7 @@ export const useMainStore = defineStore('main', {
         const [configRes, allLibsRes] = await Promise.all([api.getConfig(), api.getAllLibraries()])
         this.config = configRes.data
         this._ensureServersShape()
-        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
+        await this._loadAndApplyActiveServerProfile()
         if (!this.config.advanced_filters) this.config.advanced_filters = []
         if (!this.config.library) this.config.library = []
         this.originalConfigForComparison = JSON.parse(JSON.stringify(configRes.data))
@@ -439,6 +485,15 @@ export const useMainStore = defineStore('main', {
       }
     },
 
+    async refreshClassificationsOnly() {
+      try {
+        const res = await api.getClassifications()
+        this.classifications = res.data
+      } catch (error) {
+        this._handleApiError(error, '刷新分类数据失败')
+      }
+    },
+
     async saveDisplayOrder(orderedIds) {
       this.saving = true
       try {
@@ -552,6 +607,9 @@ export const useMainStore = defineStore('main', {
           ports.add(p)
         }
         await api.updateConfig(this.config)
+        if (current) {
+          await api.updateServerProfile(current.id, current.profile)
+        }
         toast.success('系统设置已保存')
         this.originalConfigForComparison = JSON.parse(JSON.stringify(this.config))
       } catch (e) { this._handleApiError(e, '保存设置失败') } finally { this.saving = false }

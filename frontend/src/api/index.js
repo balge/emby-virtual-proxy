@@ -38,6 +38,8 @@ export default {
   // System
   getConfig: () => apiClient.get("/config"),
   updateConfig: (config) => apiClient.post("/config", config),
+  getServerProfile: (id) => apiClient.get(`/servers/${id}/profile`),
+  updateServerProfile: (id, profile) => apiClient.put(`/servers/${id}/profile`, profile),
   restartProxy: () => apiClient.post("/proxy/restart"),
 
   // Libraries

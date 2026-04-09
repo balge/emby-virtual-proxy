@@ -926,12 +926,15 @@ async def _webhook_delayed_flush(delay_seconds: int):
 
 
 # --- API ---
-@api_router.get("/config", response_model=AppConfig, response_model_by_alias=True, tags=["Configuration"])
+@api_router.get("/config", tags=["Configuration"])
 async def get_config():
-    return config_manager.load_config()
+    # Return global + servers metadata/profile containers; do NOT project active profile
+    # into top-level legacy fields to avoid frontend confusion.
+    cfg = config_manager.load_config(apply_active_profile=False)
+    return cfg.model_dump(by_alias=True)
 
 # 修改 update_config
-@api_router.post("/config", response_model=AppConfig, response_model_by_alias=True, tags=["Configuration"])
+@api_router.post("/config", tags=["Configuration"])
 async def update_config(config: AppConfig):
     config.ensure_servers_migrated()
     # Basic validation: proxy ports must be unique for enabled servers.
@@ -946,7 +949,9 @@ async def update_config(config: AppConfig):
     if config.admin_active_server_id and not any(s.id == config.admin_active_server_id for s in config.servers):
         config.admin_active_server_id = config.servers[0].id if config.servers else None
 
-    config_manager.save_config(config)
+    # /config is treated as global + servers metadata update; do not overwrite
+    # active server profile from top-level legacy fields.
+    config_manager.save_config(config, sync_active_profile=False)
     # Re-load saved config so return value + schedulers match on-disk state
     saved = config_manager.load_config()
     if not saved.enable_cache:
@@ -955,7 +960,29 @@ async def update_config(config: AppConfig):
     # 更新定时任务
     update_virtual_library_refresh_jobs(saved)
     update_real_library_cover_cron(saved)
-    return saved
+    return config_manager.load_config(apply_active_profile=False).model_dump(by_alias=True)
+
+
+@api_router.get("/servers/{server_id}/profile", tags=["Configuration"])
+async def get_server_profile(server_id: str):
+    cfg = config_manager.load_config(apply_active_profile=False)
+    server = cfg.get_server_by_id(server_id)
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    return cfg.get_server_profile(server_id)
+
+
+@api_router.put("/servers/{server_id}/profile", tags=["Configuration"])
+async def update_server_profile(server_id: str, profile: Dict[str, Any]):
+    cfg = config_manager.load_config(apply_active_profile=False)
+    if not cfg.set_server_profile(server_id, profile):
+        raise HTTPException(status_code=404, detail="Server not found")
+    config_manager.save_config(cfg, sync_active_profile=False)
+    # Schedulers depend on active top-level projection; re-load with projection for safety.
+    saved = config_manager.load_config()
+    update_virtual_library_refresh_jobs(saved)
+    update_real_library_cover_cron(saved)
+    return cfg.get_server_profile(server_id)
 
 # 将 /cache/clear 路径改为 /proxy/restart，功能也彻底改变
 @api_router.post("/proxy/restart", status_code=204, tags=["System Management"])
