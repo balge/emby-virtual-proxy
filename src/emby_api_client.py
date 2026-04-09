@@ -18,9 +18,15 @@ from http_client import create_client_session
 logger = logging.getLogger(__name__)
 
 
-async def fetch_from_emby(endpoint: str, params: Optional[Dict[str, Any]] = None) -> List:
+async def fetch_from_emby(
+    endpoint: str,
+    params: Optional[Dict[str, Any]] = None,
+    *,
+    config=None,
+) -> List:
     """GET /emby{endpoint}; returns Items list, or list body, or []. Raises HTTPException on failure."""
-    config = config_manager.load_config()
+    if config is None:
+        config = config_manager.load_config()
     if not config.emby_url or not config.emby_api_key:
         raise HTTPException(status_code=400, detail="请在系统设置中配置Emby服务器地址和API密钥。")
 
@@ -56,14 +62,14 @@ async def fetch_from_emby(endpoint: str, params: Optional[Dict[str, Any]] = None
         raise HTTPException(status_code=500, detail=logger_msg) from e
 
 
-async def get_real_libraries_hybrid_mode() -> List[Dict[str, Any]]:
+async def get_real_libraries_hybrid_mode(*, config=None) -> List[Dict[str, Any]]:
     """
     Merge MediaFolders + first user's Views into a deduplicated list of
     {Id, Name, CollectionType} (used when source_libraries is empty but ignore filters apply).
     """
     all_real_libs: Dict[str, Dict[str, Any]] = {}
     try:
-        media_folders = await fetch_from_emby("/Library/MediaFolders")
+        media_folders = await fetch_from_emby("/Library/MediaFolders", config=config)
         for lib in media_folders:
             lib_id = lib.get("Id")
             if lib_id:
@@ -76,11 +82,11 @@ async def get_real_libraries_hybrid_mode() -> List[Dict[str, Any]]:
         logger.warning("从 /Library/MediaFolders 获取数据失败: %s", e.detail)
 
     try:
-        user_items = await fetch_from_emby("/Users")
+        user_items = await fetch_from_emby("/Users", config=config)
         if user_items:
             ref_user_id = user_items[0].get("Id")
             if ref_user_id:
-                views = await fetch_from_emby(f"/Users/{ref_user_id}/Views")
+                views = await fetch_from_emby(f"/Users/{ref_user_id}/Views", config=config)
                 for lib in views:
                     lib_id = lib.get("Id")
                     if lib_id and lib_id not in all_real_libs:

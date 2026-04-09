@@ -9,6 +9,7 @@ import hashlib
 import time
 from pathlib import Path
 import aiohttp
+from urllib.parse import urlparse
 
 import config_manager
 from http_client import create_client_session
@@ -19,7 +20,12 @@ logger = logging.getLogger(__name__)
 GENERATION_IN_PROGRESS = set()
 
 # 【【【 核心修正1：函数签名改变，接收用户ID和Token 】】】
-async def generate_poster_in_background(library_id: str, user_id: str, api_key: str):
+async def generate_poster_in_background(
+    library_id: str,
+    user_id: str,
+    api_key: str,
+    server_id: str | None = None,
+):
     """
     在后台异步生成海报。此版本使用触发时传入的身份信息来确保权限正确。
     """
@@ -33,7 +39,19 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
     temp_dir = None
     
     try:
-        config = config_manager.load_config()
+        raw_config = config_manager.load_config(apply_active_profile=False)
+        active_server = raw_config.get_server_by_id(server_id) if server_id else raw_config.get_admin_active_server()
+        if not active_server:
+            logger.error(f"后台任务：无法确定 server 上下文，server_id={server_id}")
+            return
+
+        # 将目标 server 的 profile 显式投影到本次任务的 config 视图，避免多服务器串库
+        config = raw_config.model_copy(deep=False)
+        config.sync_active_profile_to_legacy(active_server)
+        config.emby_url = active_server.emby_url
+        config.emby_api_key = active_server.emby_api_key
+        config.emby_server_id = active_server.emby_server_id or config.emby_server_id
+
         vlib = next((v for v in config.virtual_libraries if v.id == library_id), None)
         if not vlib:
             logger.error(f"后台任务：配置中未找到 vlib {library_id}。")
@@ -42,7 +60,12 @@ async def generate_poster_in_background(library_id: str, user_id: str, api_key: 
         # --- 不再需要自己获取用户ID，直接使用传入的 ---
         
         # --- 2. 通过内部请求调用 proxy-core 自身来获取项目 ---
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        parsed = urlparse(base_raw)
+        host = parsed.hostname or "localhost"
+        scheme = parsed.scheme or "http"
+        target_port = int(active_server.proxy_port or 8999)
+        base = f"{scheme}://{host}:{target_port}"
         internal_proxy_url = f"{base}/emby/Users/{user_id}/Items"
         
         # 使用传入的、保证正确的 api_key

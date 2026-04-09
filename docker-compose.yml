@@ -8,6 +8,9 @@ services:
     ports:
       - "8011:8001"
       - "8999:8999"
+      # 多 Emby：按需手动追加更多端口映射（需与 WebUI 中每台服务器的 proxy_port 一致）
+      # - "9000:9000"
+      # - "9001:9001"
     volumes:
       - ./config:/app/config
       - /var/run/docker.sock:/var/run/docker.sock

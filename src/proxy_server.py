@@ -43,12 +43,19 @@ logger.info(f"Proxy logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.aiohttp_session = create_client_session(cookie_jar=aiohttp.DummyCookieJar())
-    logger.info("Global AIOHTTP ClientSession created.")
+    # This app may be mounted by multiple uvicorn.Server instances (multi-port).
+    # Make lifespan idempotent so we don't double-close the shared session.
+    refcnt = getattr(app.state, "_lifespan_refcnt", 0)
+    if refcnt == 0 or not hasattr(app.state, "aiohttp_session"):
+        app.state.aiohttp_session = create_client_session(cookie_jar=aiohttp.DummyCookieJar())
+        logger.info("Global AIOHTTP ClientSession created.")
+    app.state._lifespan_refcnt = refcnt + 1
 
     yield
-    await app.state.aiohttp_session.close()
-    logger.info("Global AIOHTTP ClientSession closed.")
+    app.state._lifespan_refcnt = max(0, getattr(app.state, "_lifespan_refcnt", 1) - 1)
+    if app.state._lifespan_refcnt == 0 and hasattr(app.state, "aiohttp_session"):
+        await app.state.aiohttp_session.close()
+        logger.info("Global AIOHTTP ClientSession closed.")
 
 proxy_app = FastAPI(title="Emby Virtual Proxy - Core", lifespan=lifespan)
 
@@ -59,6 +66,49 @@ if covers_dir.is_dir():
 else:
     logger.warning(f"Generated covers directory not found at {covers_dir}, skipping mount.")
 
+
+def _local_listen_port_from_scope(scope: dict) -> int | None:
+    """
+    Return local server listen port for the current connection.
+    Works for both HTTP and WebSocket.
+    """
+    try:
+        server = scope.get("server")
+        if server and isinstance(server, (list, tuple)) and len(server) >= 2:
+            return int(server[1])
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_server_for_listen_port(config: "config_manager.AppConfig", listen_port: int | None):
+    if listen_port is not None:
+        s = config.get_server_by_proxy_port(int(listen_port))
+        if s is not None:
+            return s
+    return config.get_admin_active_server()
+
+
+def _config_for_server(config: "config_manager.AppConfig", server):
+    """
+    Build a request-scoped AppConfig view whose emby_url/api_key points to the
+    server bound to current listen port.
+    """
+    cfg = config.model_copy(deep=False)
+    if server is None:
+        return cfg
+    # Apply server-scoped settings (virtual libs, real libs, cache settings, webhook, etc.)
+    # into the request-local config view, so proxy port truly isolates behavior per server.
+    try:
+        cfg.sync_active_profile_to_legacy(server)
+    except Exception:
+        # Keep proxy resilient even if profile is malformed; it will fallback to defaults/top-level.
+        pass
+    cfg.emby_url = server.emby_url
+    cfg.emby_api_key = server.emby_api_key
+    cfg.emby_server_id = server.emby_server_id or cfg.emby_server_id
+    return cfg
+
 @proxy_app.get("/api/internal/get-cached-items/{library_id}")
 async def get_cached_items_for_admin(
     request: Request,
@@ -68,14 +118,20 @@ async def get_cached_items_for_admin(
     """
     内部 API：按用户读取虚拟库全量缓存（config/vlib/users/{user}/{vlib}/items.db）。
     """
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
+    request.state.server_id = server.id if server else None
     session = request.app.state.aiohttp_session
     from vlib_cache_manager import resolve_emby_user_id
 
     uid = await resolve_emby_user_id(session, config, user_id)
     if not uid:
         raise HTTPException(status_code=400, detail="无法解析 Emby 用户，请传入 user_id 查询参数。")
-    cached_items = vlib_items_cache.get_for_user(uid, library_id)
+    if not server:
+        raise HTTPException(status_code=400, detail="Server not resolved for this proxy port.")
+    cached_items = vlib_items_cache.get_for_user(server.id, uid, library_id)
     if cached_items is None:
         logger.warning(f"Admin 请求缓存: 无 user={uid} vlib={library_id}")
         raise HTTPException(
@@ -88,12 +144,17 @@ async def get_cached_items_for_admin(
 
 
 @proxy_app.get("/api/internal/vlib-cache-user-ids/{library_id}")
-async def internal_list_vlib_cache_user_ids(library_id: str):
+async def internal_list_vlib_cache_user_ids(request: Request, library_id: str):
     """
     列出磁盘上对该虚拟库已有 items.db 的 Emby 用户 Id（目录名排序后顺序）。
     供 Admin 封面：用「第一个曾访问该库的用户」而非 Emby /Users 列表顺序的第一个。
     """
-    uids = list_user_ids_with_vlib_cache(library_id)
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    if not server:
+        return JSONResponse(content={"vlib_id": library_id, "user_ids": []})
+    uids = list_user_ids_with_vlib_cache(server.id, library_id)
     return JSONResponse(content={"vlib_id": library_id, "user_ids": uids})
 
 
@@ -142,7 +203,12 @@ async def internal_invalidate_vlib_cache(request: Request, library_id: str):
     if not _allow_internal_cache_invalidate(request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    items_stats = clear_vlib_items_cache(library_id)
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    if not server:
+        raise HTTPException(status_code=400, detail="Server not resolved for this proxy port.")
+    items_stats = clear_vlib_items_cache(server.id, library_id)
     clear_vlib_page_cache(library_id)
     return JSONResponse(content={"vlib_id": library_id, "items": items_stats})
 
@@ -158,14 +224,19 @@ async def internal_set_cached_items(request: Request, library_id: str):
 
     body = await request.json()
     items = body.get("Items", [])
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
     session = request.app.state.aiohttp_session
     from vlib_cache_manager import resolve_emby_user_id
 
     uid = await resolve_emby_user_id(session, config, body.get("UserId"))
     if not uid:
         raise HTTPException(status_code=400, detail="无法解析 Emby 用户，请在 Body 中提供 UserId。")
-    vlib_items_cache.set_for_user(uid, library_id, items)
+    if not server:
+        raise HTTPException(status_code=400, detail="Server not resolved for this proxy port.")
+    vlib_items_cache.set_for_user(server.id, uid, library_id, items)
     logger.info(f"Internal set-cached-items: user={uid} vlib={library_id} count={len(items)}")
     return JSONResponse(content={"vlib_id": library_id, "UserId": uid, "count": len(items)})
 
@@ -177,14 +248,19 @@ async def internal_cache_exists(
     user_id: str | None = Query(None),
 ):
     """Check if on-disk cache exists for user + virtual library."""
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
     session = request.app.state.aiohttp_session
     from vlib_cache_manager import resolve_emby_user_id
 
     uid = await resolve_emby_user_id(session, config, user_id)
     if not uid:
         return JSONResponse(content={"exists": False, "UserId": None})
-    exists = vlib_items_cache.has_for_user(uid, library_id)
+    if not server:
+        return JSONResponse(content={"exists": False, "UserId": uid})
+    exists = vlib_items_cache.has_for_user(server.id, uid, library_id)
     return JSONResponse(content={"exists": exists, "UserId": uid})
 
 
@@ -209,7 +285,10 @@ async def internal_refresh_vlib_cache(
     if not _allow_internal_cache_invalidate(request):
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
     vlib = next((v for v in config.virtual_libraries if v.id == library_id), None)
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
@@ -237,7 +316,10 @@ async def internal_refresh_vlib_cache(
     elif user_id:
         to_refresh = [user_id]
     else:
-        to_refresh = list_user_ids_with_vlib_cache(library_id)
+        if not server:
+            to_refresh = []
+        else:
+            to_refresh = list_user_ids_with_vlib_cache(server.id, library_id)
 
     if not to_refresh:
         logger.info(f"Internal refresh vlib={library_id}: no users to refresh")
@@ -248,7 +330,12 @@ async def internal_refresh_vlib_cache(
     counts: Dict[str, int] = {}
     for uid in to_refresh:
         try:
-            counts[uid] = await refresh_vlib_cache(vlib, config, session=session, user_id=uid)
+            if not server:
+                counts[uid] = 0
+            else:
+                counts[uid] = await refresh_vlib_cache(
+                    vlib, config, session=session, user_id=uid, server_id=server.id
+                )
         except Exception as e:
             logger.error(f"refresh_vlib_cache user={uid} vlib={library_id}: {e}", exc_info=True)
             counts[uid] = 0
@@ -270,7 +357,13 @@ async def internal_refresh_vlib_cache(
 @proxy_app.websocket("/{full_path:path}")
 async def websocket_proxy(client_ws: WebSocket, full_path: str):
     await client_ws.accept()
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(client_ws.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
+    if not config.emby_url:
+        await client_ws.close(code=1011)
+        return
     target_url = config.emby_url.replace("http", "ws", 1).rstrip('/') + "/" + full_path
     
     session = proxy_app.state.aiohttp_session
@@ -316,7 +409,13 @@ async def websocket_proxy(client_ws: WebSocket, full_path: str):
 
 @proxy_app.api_route("/{full_path:path}", methods=["GET", "POST", "DELETE", "PUT"])
 async def reverse_proxy(request: Request, full_path: str):
-    config = config_manager.load_config()
+    raw_config = config_manager.load_config()
+    listen_port = _local_listen_port_from_scope(request.scope)
+    server = _resolve_server_for_listen_port(raw_config, listen_port)
+    config = _config_for_server(raw_config, server)
+    request.state.server_id = server.id if server else None
+    if not config.emby_url:
+        raise HTTPException(status_code=400, detail="Emby server is not configured for this proxy port.")
     real_emby_url = config.emby_url.rstrip('/')
 
     proxy_address = f"{request.url.scheme}://{request.url.netloc}"
