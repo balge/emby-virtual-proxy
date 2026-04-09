@@ -1,5 +1,5 @@
 <template>
-  <div class="fixed top-4 right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
+  <div class="fixed top-[calc(1rem+env(safe-area-inset-top,0px))] right-4 z-[9999] flex flex-col gap-2 pointer-events-none">
     <TransitionGroup name="slide">
       <div
         v-for="toast in toasts"

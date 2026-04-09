@@ -24,7 +24,8 @@ export function useToast() {
     success: (msg) => add(msg, 'success'),
     error: (msg) => add(msg, 'error', 5000),
     warning: (msg) => add(msg, 'warning', 4000),
-    info: (msg) => add(msg, 'info'),
+    /** @param {number} [durationMs] 显示毫秒数，默认 3000；RSS 等场景可传更长 */
+    info: (msg, durationMs) => add(msg, 'info', durationMs ?? 3000),
     remove,
   }
 }
