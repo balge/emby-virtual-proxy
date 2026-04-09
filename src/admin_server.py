@@ -22,6 +22,7 @@ from pydantic import BaseModel
 import base64
 import json
 from fastapi import Request
+from urllib.parse import urlparse, urlunparse
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -53,7 +54,14 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
     """
     out: dict = {"user_ids": []}
     try:
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        cfg = config_manager.load_config()
+        active = cfg.get_admin_active_server()
+        target_port = int(active.proxy_port) if active else 8999
+        base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        parsed = urlparse(base_raw)
+        host = parsed.hostname or "localhost"
+        scheme = parsed.scheme or "http"
+        base = urlunparse((scheme, f"{host}:{target_port}", "", "", "", "")).rstrip("/")
         url = f"{base}/api/internal/invalidate-vlib-cache/{library_id}"
         token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
         headers = {"X-Internal-Token": token} if token else {}
@@ -74,7 +82,14 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
 async def _list_vlib_cache_user_ids_from_proxy(library_id: str) -> list[str]:
     """磁盘上对该虚拟库已有缓存的用户 Id（与 proxy 目录遍历顺序一致，已排序）。"""
     try:
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        cfg = config_manager.load_config()
+        active = cfg.get_admin_active_server()
+        target_port = int(active.proxy_port) if active else 8999
+        base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        parsed = urlparse(base_raw)
+        host = parsed.hostname or "localhost"
+        scheme = parsed.scheme or "http"
+        base = urlunparse((scheme, f"{host}:{target_port}", "", "", "", "")).rstrip("/")
         url = f"{base}/api/internal/vlib-cache-user-ids/{library_id}"
         async with create_client_session() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=8)) as resp:
@@ -109,7 +124,14 @@ async def _get_cached_items_from_proxy(
         uid = user_id or await _resolve_cover_cache_user_id(library_id)
         if not uid:
             return None
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        cfg = config_manager.load_config()
+        active = cfg.get_admin_active_server()
+        target_port = int(active.proxy_port) if active else 8999
+        base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        parsed = urlparse(base_raw)
+        host = parsed.hostname or "localhost"
+        scheme = parsed.scheme or "http"
+        base = urlunparse((scheme, f"{host}:{target_port}", "", "", "", "")).rstrip("/")
         url = f"{base}/api/internal/get-cached-items/{library_id}"
         params = {"user_id": uid}
         async with create_client_session() as session:
@@ -139,7 +161,14 @@ async def _notify_proxy_refresh_cache(
     - ``user_ids`` 为 None：刷新**当前磁盘上已有该库缓存**的所有用户（无人访问过则跳过）。
     """
     try:
-        base = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        cfg = config_manager.load_config()
+        active = cfg.get_admin_active_server()
+        target_port = int(active.proxy_port) if active else 8999
+        base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
+        parsed = urlparse(base_raw)
+        host = parsed.hostname or "localhost"
+        scheme = parsed.scheme or "http"
+        base = urlunparse((scheme, f"{host}:{target_port}", "", "", "", "")).rstrip("/")
         url = f"{base}/api/internal/refresh-vlib-cache/{library_id}"
         token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
         headers = {"X-Internal-Token": token} if token else {}
@@ -490,7 +519,9 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
             )
 
     if deduped:
-        vlib_items_cache.set_for_user(user_id, vlib.id, slim_items(deduped))
+        active = config.get_admin_active_server()
+        server_bucket = active.id if active else "default"
+        vlib_items_cache.set_for_user(server_bucket, user_id, vlib.id, slim_items(deduped))
         logger.info(f"Populated on-disk cache for '{vlib.name}' user={user_id}: {len(deduped)} items (slimmed).")
     else:
         logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
@@ -902,14 +933,29 @@ async def get_config():
 # 修改 update_config
 @api_router.post("/config", response_model=AppConfig, response_model_by_alias=True, tags=["Configuration"])
 async def update_config(config: AppConfig):
+    config.ensure_servers_migrated()
+    # Basic validation: proxy ports must be unique for enabled servers.
+    used_ports = set()
+    for s in config.servers:
+        if not s.enabled:
+            continue
+        p = int(s.proxy_port)
+        if p in used_ports:
+            raise HTTPException(status_code=400, detail=f"重复的代理端口: {p}")
+        used_ports.add(p)
+    if config.admin_active_server_id and not any(s.id == config.admin_active_server_id for s in config.servers):
+        config.admin_active_server_id = config.servers[0].id if config.servers else None
+
     config_manager.save_config(config)
-    if not config.enable_cache:
+    # Re-load saved config so return value + schedulers match on-disk state
+    saved = config_manager.load_config()
+    if not saved.enable_cache:
         api_cache.clear()
         logger.info("enable_cache=false: cleared api_cache")
     # 更新定时任务
-    update_virtual_library_refresh_jobs(config)
-    update_real_library_cover_cron(config)
-    return config
+    update_virtual_library_refresh_jobs(saved)
+    update_real_library_cover_cron(saved)
+    return saved
 
 # 将 /cache/clear 路径改为 /proxy/restart，功能也彻底改变
 @api_router.post("/proxy/restart", status_code=204, tags=["System Management"])

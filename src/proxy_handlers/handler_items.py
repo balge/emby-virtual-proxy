@@ -318,6 +318,7 @@ async def _populate_random_vlib_cache(
 
     headers = _build_headers_to_forward(request)
     token = request.query_params.get("X-Emby-Token")
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     return await populate_random_vlib_items(
         found_vlib,
         config,
@@ -326,6 +327,7 @@ async def _populate_random_vlib_cache(
         real_emby_url.rstrip("/"),
         headers=headers,
         query_emby_token=token,
+        server_id=server_id,
     )
 
 
@@ -337,8 +339,9 @@ async def _handle_random_library(
 ) -> Response:
     """Handle 'random' type virtual library."""
     ttl = effective_cache_ttl_seconds(found_vlib, config)
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     cached = vlib_items_cache.get_for_user(
-        user_id, found_vlib.id, max_age_seconds=ttl
+        server_id, user_id, found_vlib.id, max_age_seconds=ttl
     )
     if cached is not None:
         logger.info(f"Random '{found_vlib.name}': cache HIT for user {user_id}")
@@ -442,8 +445,9 @@ async def handle_virtual_library_items(
     limit_count = int(params.get("Limit", 50))
 
     ttl = effective_cache_ttl_seconds(found_vlib, config)
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     cached_items = vlib_items_cache.get_for_user(
-        user_id, found_vlib.id, max_age_seconds=ttl
+        server_id, user_id, found_vlib.id, max_age_seconds=ttl
     )
     if cached_items is not None:
         logger.info(f"Cache HIT '{found_vlib.name}' user={user_id}: {len(cached_items)} items")
@@ -454,9 +458,9 @@ async def handle_virtual_library_items(
     # Cache MISS: fetch on demand via cache manager (per-user on-disk cache)
     logger.info(f"Cache MISS '{found_vlib.name}' user={user_id}, fetching from Emby...")
     from vlib_cache_manager import refresh_vlib_cache
-    await refresh_vlib_cache(found_vlib, config, user_id=user_id)
+    await refresh_vlib_cache(found_vlib, config, user_id=user_id, server_id=server_id)
 
-    cached_items = vlib_items_cache.get_for_user(user_id, found_vlib.id)
+    cached_items = vlib_items_cache.get_for_user(server_id, user_id, found_vlib.id)
     if cached_items is not None:
         items = list(cached_items)
         _apply_client_sort(items, request)

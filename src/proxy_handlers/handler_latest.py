@@ -63,8 +63,9 @@ async def handle_home_latest_items(
     if found_vlib.resource_type == 'random':
         from proxy_cache import vlib_items_cache
         ttl = effective_cache_ttl_seconds(found_vlib, config)
+        server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
         cached = vlib_items_cache.get_for_user(
-            user_id, found_vlib.id, max_age_seconds=ttl
+            server_id, user_id, found_vlib.id, max_age_seconds=ttl
         )
         if cached is None:
             headers = _build_headers_to_forward(request)
@@ -77,6 +78,7 @@ async def handle_home_latest_items(
                 real_emby_url.rstrip("/"),
                 headers=headers,
                 query_emby_token=token,
+                server_id=server_id,
             )
         limit = int(params.get("Limit", 20))
         items = (cached or [])[:limit]

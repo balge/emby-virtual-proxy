@@ -42,11 +42,18 @@ def load_config() -> AppConfig:
                         lib['cache_refresh_interval'] = lib.get('rss_refresh_interval')
             if 'webhook' not in data or not isinstance(data.get('webhook'), dict):
                 data['webhook'] = {}
-            return AppConfig.model_validate(data)
+            cfg = AppConfig.model_validate(data)
+            # Migrate legacy single-server config into servers[] in memory.
+            cfg.ensure_servers_migrated()
+            cfg.sync_active_profile_to_legacy()
+            return cfg
             
     except (json.JSONDecodeError, Exception) as e:
         print(f"Error loading or parsing config file: {e}. Returning a temporary default config.")
-        return AppConfig()
+        cfg = AppConfig()
+        cfg.ensure_servers_migrated()
+        cfg.sync_active_profile_to_legacy()
+        return cfg
 
 def save_config(config: AppConfig):
     """
@@ -54,9 +61,34 @@ def save_config(config: AppConfig):
     """
     try:
         CONFIG_DIR.mkdir(exist_ok=True)
+        # Persist current edited top-level settings into selected server profile.
+        config.sync_legacy_to_active_profile()
+
+        # Write a canonical config format:
+        # - servers[].profile is the source of truth for per-server settings
+        # - keep advanced_filters (and other truly global settings) at top-level
+        # - avoid duplicating per-server fields at top-level to reduce confusion
+        data = config.model_dump(by_alias=True)
+        per_server_keys = {
+            "enable_cache",
+            "display_order",
+            "ignore_libraries",
+            "real_libraries",
+            "real_library_cover_cron",
+            "hide",
+            "library",
+            "virtual_libraries",
+            "default_cover_style",
+            "show_missing_episodes",
+            "cache_refresh_interval",
+            "webhook",
+            "force_merge_by_tmdb_id",
+        }
+        for k in per_server_keys:
+            data.pop(k, None)
 
         with open(CONFIG_FILE_PATH, 'w', encoding='utf-8') as f:
-            f.write(config.model_dump_json(by_alias=True, indent=4))
+            f.write(json.dumps(data, ensure_ascii=False, indent=4))
         print(f"Configuration successfully saved to {CONFIG_FILE_PATH}")
     except Exception as e:
         print(f"Error saving config file: {e}")

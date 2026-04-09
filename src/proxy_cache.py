@@ -2,7 +2,8 @@
 """
 Virtual library cache layer.
 
-Per-user per-virtual-library SQLite files under config/vlib/users/{user_id}/{vlib_id}/items.db.
+Per-server per-user per-virtual-library SQLite files under:
+config/vlib/servers/{server_id}/users/{user_id}/{vlib_id}/items.db.
 No long-lived connections: open → read/write → close to avoid memory growth from many handles.
 
 Legacy config/vlib_cache.db (single table) is no longer written; old rows are ignored.
@@ -85,7 +86,7 @@ def slim_items(items: list[dict]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 # config/ is sibling to src/ at runtime image layout /app/config
-VLIB_USER_CACHE_ROOT = Path(__file__).resolve().parent.parent / "config" / "vlib" / "users"
+VLIB_CACHE_ROOT = Path(__file__).resolve().parent.parent / "config" / "vlib" / "servers"
 
 _write_lock = threading.Lock()
 
@@ -100,22 +101,24 @@ def _safe_fs_segment(part: str, name: str) -> str:
     return s
 
 
-def _items_db_path(user_id: str, vlib_id: str) -> Path:
+def _items_db_path(server_id: str, user_id: str, vlib_id: str) -> Path:
+    s = _safe_fs_segment(server_id, "server_id")
     u = _safe_fs_segment(user_id, "user_id")
     v = _safe_fs_segment(vlib_id, "vlib_id")
-    return VLIB_USER_CACHE_ROOT / u / v / "items.db"
+    return VLIB_CACHE_ROOT / s / "users" / u / v / "items.db"
 
 
-def list_user_ids_with_vlib_cache(vlib_id: str) -> list[str]:
+def list_user_ids_with_vlib_cache(server_id: str, vlib_id: str) -> list[str]:
     """
     Emby user ids that already have items.db for this virtual library
     (i.e. have browsed this vlib at least once).
     """
     try:
+        s_seg = _safe_fs_segment(server_id, "server_id")
         v_seg = _safe_fs_segment(vlib_id, "vlib_id")
     except ValueError:
         return []
-    root = VLIB_USER_CACHE_ROOT
+    root = VLIB_CACHE_ROOT / s_seg / "users"
     if not root.is_dir():
         return []
     out: list[str] = []
@@ -146,12 +149,13 @@ class VLibUserItemsCache:
 
     def get_for_user(
         self,
+        server_id: str,
         user_id: str,
         vlib_id: str,
         *,
         max_age_seconds: Optional[float] = None,
     ) -> Optional[List[Dict[str, Any]]]:
-        path = _items_db_path(user_id, vlib_id)
+        path = _items_db_path(server_id, user_id, vlib_id)
         if not path.is_file():
             return None
         try:
@@ -196,11 +200,17 @@ class VLibUserItemsCache:
             finally:
                 conn.close()
         except Exception as e:
-            logger.warning("VLibUserItemsCache.get_for_user(%s, %s) failed: %s", user_id, vlib_id, e)
+            logger.warning(
+                "VLibUserItemsCache.get_for_user(%s, %s, %s) failed: %s",
+                server_id,
+                user_id,
+                vlib_id,
+                e,
+            )
             return None
 
-    def set_for_user(self, user_id: str, vlib_id: str, items: List[Dict[str, Any]]) -> None:
-        path = _items_db_path(user_id, vlib_id)
+    def set_for_user(self, server_id: str, user_id: str, vlib_id: str, items: List[Dict[str, Any]]) -> None:
+        path = _items_db_path(server_id, user_id, vlib_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         raw = json.dumps(items, ensure_ascii=False).encode("utf-8")
         compressed = zlib.compress(raw, level=6)
@@ -217,29 +227,31 @@ class VLibUserItemsCache:
             finally:
                 conn.close()
 
-    def has_for_user(self, user_id: str, vlib_id: str) -> bool:
-        path = _items_db_path(user_id, vlib_id)
+    def has_for_user(self, server_id: str, user_id: str, vlib_id: str) -> bool:
+        path = _items_db_path(server_id, user_id, vlib_id)
         return path.is_file()
 
-    def delete_for_user(self, user_id: str, vlib_id: str) -> bool:
-        path = _items_db_path(user_id, vlib_id)
+    def delete_for_user(self, server_id: str, user_id: str, vlib_id: str) -> bool:
+        path = _items_db_path(server_id, user_id, vlib_id)
         parent = path.parent
         try:
             if parent.is_dir():
                 shutil.rmtree(parent, ignore_errors=True)
                 return True
         except Exception as e:
-            logger.warning("delete_for_user failed %s/%s: %s", user_id, vlib_id, e)
+            logger.warning("delete_for_user failed %s/%s/%s: %s", server_id, user_id, vlib_id, e)
         return False
 
-    def delete_vlib_all_users(self, vlib_id: str) -> int:
+    def delete_vlib_all_users(self, server_id: str, vlib_id: str) -> int:
         """Remove this vlib's cache directory under every user. Returns user dirs removed."""
+        s_seg = _safe_fs_segment(server_id, "server_id")
         v_seg = _safe_fs_segment(vlib_id, "vlib_id")
         removed = 0
-        if not VLIB_USER_CACHE_ROOT.is_dir():
+        root = VLIB_CACHE_ROOT / s_seg / "users"
+        if not root.is_dir():
             return 0
         with _write_lock:
-            for user_dir in VLIB_USER_CACHE_ROOT.iterdir():
+            for user_dir in root.iterdir():
                 if not user_dir.is_dir():
                     continue
                 target = user_dir / v_seg
@@ -255,13 +267,13 @@ class VLibUserItemsCache:
 vlib_items_cache = VLibUserItemsCache()
 
 
-def clear_vlib_items_cache(vlib_id: str) -> dict:
+def clear_vlib_items_cache(server_id: str, vlib_id: str) -> dict:
     """
     Drop on-disk cache for this virtual library for all users.
     Returns user_ids that had cache *before* deletion (for targeted refresh).
     """
-    user_ids = list_user_ids_with_vlib_cache(vlib_id)
-    n = vlib_items_cache.delete_vlib_all_users(vlib_id)
+    user_ids = list_user_ids_with_vlib_cache(server_id, vlib_id)
+    n = vlib_items_cache.delete_vlib_all_users(server_id, vlib_id)
     return {
         "main": n,
         "random_scoped": 0,

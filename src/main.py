@@ -24,8 +24,28 @@ def start_admin():
 def start_proxy():
     """启动代理服务器（独立进程；本地调试用）"""
     print("--- Starting Proxy Server ---")
-    print("Proxy is listening on http://0.0.0.0:8999")
-    uvicorn.run("proxy_server:proxy_app", host="0.0.0.0", port=8999, reload=False)
+    import config_manager
+    from proxy_server import proxy_app
+
+    cfg = config_manager.load_config()
+    ports = cfg.list_enabled_proxy_ports() or [8999]
+    print(f"Proxy is listening on http://0.0.0.0:{ports} (multi-port)")
+
+    log_level = os.environ.get("LOG_LEVEL", "info").lower()
+
+    async def _serve() -> None:
+        servers = []
+        for p in ports:
+            cfg_proxy = uvicorn.Config(
+                proxy_app,
+                host="0.0.0.0",
+                port=int(p),
+                log_level=log_level,
+            )
+            servers.append(uvicorn.Server(cfg_proxy).serve())
+        await asyncio.gather(*servers)
+
+    asyncio.run(_serve())
 
 
 def start_both():
@@ -37,6 +57,7 @@ def start_both():
     """
     from admin_server import admin_app
     from proxy_server import proxy_app
+    import config_manager
 
     log_level = os.environ.get("LOG_LEVEL", "info").lower()
 
@@ -47,15 +68,21 @@ def start_both():
             port=8001,
             log_level=log_level,
         )
-        cfg_proxy = uvicorn.Config(
-            proxy_app,
-            host="0.0.0.0",
-            port=8999,
-            log_level=log_level,
-        )
+        cfg = config_manager.load_config()
+        ports = cfg.list_enabled_proxy_ports() or [8999]
         await asyncio.gather(
             uvicorn.Server(cfg_admin).serve(),
-            uvicorn.Server(cfg_proxy).serve(),
+            *[
+                uvicorn.Server(
+                    uvicorn.Config(
+                        proxy_app,
+                        host="0.0.0.0",
+                        port=int(p),
+                        log_level=log_level,
+                    )
+                ).serve()
+                for p in ports
+            ],
         )
 
     print("--- Single process: Admin :8001 + Proxy :8999 ---")

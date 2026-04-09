@@ -26,19 +26,53 @@
           服务器连接
         </h2>
         <div class="space-y-4">
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <BaseSelect
+              :model-value="store.config.admin_active_server_id"
+              @update:modelValue="store.setActiveServer"
+              :options="store.serverOptions"
+              label="当前管理服务器"
+              placeholder="请选择服务器"
+              hint="切换后，分类/真实库同步/虚拟库刷新等管理操作将作用于该服务器。"
+            />
+            <BaseButton
+              class="self-end"
+              variant="secondary"
+              @click="store.addServer()"
+            >
+              添加服务器
+            </BaseButton>
+            <BaseButton
+              class="self-end"
+              variant="danger"
+              :disabled="!(store.config.servers && store.config.servers.length > 1 && store.activeServer)"
+              @click="store.activeServer && store.removeServer(store.activeServer.id)"
+            >
+              删除当前服务器
+            </BaseButton>
+          </div>
+
           <BaseInput
-            v-model="store.config.emby_url"
+            v-if="store.activeServer"
+            v-model="store.activeServer.emby_url"
             label="Emby 服务器地址"
             placeholder="http://192.168.1.10:8096"
             hint="如果使用了302，请填写302地址。"
           />
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div v-if="store.activeServer" class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <BaseInput
-              v-model="store.config.emby_api_key"
+              v-model="store.activeServer.emby_api_key"
               label="Emby API 密钥"
               type="password"
               placeholder="API Key"
               hint="在 Emby 后台 → API 密钥中生成。"
+            />
+            <BaseInput
+              v-model="store.activeServer.proxy_port"
+              label="代理端口（对外访问）"
+              type="number"
+              placeholder="8999"
+              hint="需同时在 docker-compose.yml 中手动映射该端口（例如 &quot;9000:9000&quot;），否则外部客户端无法访问。保存后需重启生效。"
             />
             <BaseInput
               v-model="store.config.tmdb_api_key"

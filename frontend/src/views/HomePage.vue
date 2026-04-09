@@ -7,6 +7,27 @@
       Emby Virtual Proxy 配置面板
     </p>
 
+    <!-- Server switch -->
+    <div
+      v-if="store.config?.servers?.length"
+      class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 mb-8"
+    >
+      <div class="flex items-end gap-3 flex-wrap">
+        <BaseSelect
+          :model-value="store.config.admin_active_server_id"
+          @update:modelValue="store.setActiveServer"
+          :options="store.serverOptions"
+          label="当前管理服务器"
+          placeholder="请选择服务器"
+          wrapperClass="w-full sm:w-80"
+        />
+        <BaseButton variant="secondary" @click="store.addServer()">添加服务器</BaseButton>
+      </div>
+      <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
+        提示：代理访问入口为 <span class="font-mono">http://&lt;代理IP&gt;:&lt;代理端口&gt;</span>，端口需在 compose 中手动映射后才可从局域网访问。
+      </p>
+    </div>
+
     <!-- Status -->
     <div
       v-if="store.dataLoading"
@@ -95,6 +116,8 @@
 <script setup>
 import { onMounted } from "vue";
 import { useMainStore } from "@/stores/main";
+import BaseSelect from "@/components/ui/BaseSelect.vue";
+import BaseButton from "@/components/ui/BaseButton.vue";
 import {
   Cog6ToothIcon,
   RectangleStackIcon,

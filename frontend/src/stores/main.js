@@ -14,8 +14,12 @@ function effectiveResourceIds(lib) {
 export const useMainStore = defineStore('main', {
   state: () => ({
     config: {
+      // Legacy single-server fields (kept for backward compatibility with older backend)
       emby_url: '',
       emby_api_key: '',
+      // Multi-server
+      servers: [],
+      admin_active_server_id: null,
       enable_cache: true,
       cache_refresh_interval: 12,
       hide: [],
@@ -44,6 +48,21 @@ export const useMainStore = defineStore('main', {
 
   getters: {
     virtualLibraries: (state) => state.config.library || [],
+    serverOptions: (state) =>
+      (state.config.servers || []).map((s) => ({
+        value: s.id,
+        label: `${s.name || 'Emby'} (${s.proxy_port || '?'})`,
+      })),
+    activeServer: (state) => {
+      const list = state.config.servers || []
+      if (!list.length) return null
+      const id = state.config.admin_active_server_id
+      if (id) {
+        const found = list.find((s) => String(s.id) === String(id))
+        if (found) return found
+      }
+      return list.find((s) => s.enabled) || list[0]
+    },
 
     sortedLibsInDisplayOrder: (state) => {
       if (!state.config.display_order || !state.allLibrariesForSorting.length) return []
@@ -66,6 +85,106 @@ export const useMainStore = defineStore('main', {
   },
 
   actions: {
+    _ensureServersShape() {
+      // Backend should already migrate, but keep frontend resilient.
+      if (!Array.isArray(this.config.servers)) this.config.servers = []
+      if (!this.config.servers.length && (this.config.emby_url || this.config.emby_api_key)) {
+        this.config.servers = [{
+          id: crypto?.randomUUID ? crypto.randomUUID() : String(Date.now()),
+          name: 'Emby',
+          emby_url: this.config.emby_url || '',
+          emby_api_key: this.config.emby_api_key || '',
+          enabled: true,
+          proxy_port: 8999,
+        }]
+      }
+      if (!this.config.admin_active_server_id && this.config.servers.length) {
+        this.config.admin_active_server_id = this.config.servers[0].id
+      }
+      for (const s of this.config.servers) {
+        if (!s.profile || typeof s.profile !== 'object') s.profile = {}
+      }
+    },
+
+    _legacySnapshotForServerProfile() {
+      return {
+        enable_cache: this.config.enable_cache,
+        display_order: Array.isArray(this.config.display_order) ? [...this.config.display_order] : [],
+        ignore_libraries: Array.isArray(this.config.ignore_libraries) ? [...this.config.ignore_libraries] : [],
+        real_libraries: Array.isArray(this.config.real_libraries) ? JSON.parse(JSON.stringify(this.config.real_libraries)) : [],
+        real_library_cover_cron: this.config.real_library_cover_cron ?? null,
+        hide: Array.isArray(this.config.hide) ? [...this.config.hide] : [],
+        library: Array.isArray(this.config.library) ? JSON.parse(JSON.stringify(this.config.library)) : [],
+        default_cover_style: this.config.default_cover_style,
+        show_missing_episodes: this.config.show_missing_episodes,
+        cache_refresh_interval: this.config.cache_refresh_interval,
+        webhook: this.config.webhook ? JSON.parse(JSON.stringify(this.config.webhook)) : { enabled: false, secret: null, delay_seconds: 0 },
+        force_merge_by_tmdb_id: this.config.force_merge_by_tmdb_id,
+      }
+    },
+
+    _applyServerProfileToLegacy(server) {
+      const p = server?.profile || {}
+      this.config.enable_cache = p.enable_cache ?? this.config.enable_cache
+      this.config.display_order = Array.isArray(p.display_order) ? [...p.display_order] : (this.config.display_order || [])
+      this.config.ignore_libraries = Array.isArray(p.ignore_libraries) ? [...p.ignore_libraries] : (this.config.ignore_libraries || [])
+      this.config.real_libraries = Array.isArray(p.real_libraries) ? JSON.parse(JSON.stringify(p.real_libraries)) : (this.config.real_libraries || [])
+      this.config.real_library_cover_cron = p.real_library_cover_cron ?? this.config.real_library_cover_cron
+      this.config.hide = Array.isArray(p.hide) ? [...p.hide] : (this.config.hide || [])
+      this.config.library = Array.isArray(p.library) ? JSON.parse(JSON.stringify(p.library)) : (this.config.library || [])
+      this.config.default_cover_style = p.default_cover_style ?? this.config.default_cover_style
+      this.config.show_missing_episodes = p.show_missing_episodes ?? this.config.show_missing_episodes
+      this.config.cache_refresh_interval = p.cache_refresh_interval ?? this.config.cache_refresh_interval
+      this.config.webhook = p.webhook ? JSON.parse(JSON.stringify(p.webhook)) : (this.config.webhook || { enabled: false, secret: null, delay_seconds: 0 })
+      this.config.force_merge_by_tmdb_id = p.force_merge_by_tmdb_id ?? this.config.force_merge_by_tmdb_id
+    },
+
+    addServer() {
+      this._ensureServersShape()
+      const id = crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())
+      const usedPorts = new Set((this.config.servers || []).map((s) => Number(s.proxy_port)))
+      let p = 8999
+      while (usedPorts.has(p)) p += 1
+      this.config.servers.push({
+        id,
+        name: `Emby ${this.config.servers.length + 1}`,
+        emby_url: '',
+        emby_api_key: '',
+        enabled: true,
+        proxy_port: p,
+      })
+      this.config.admin_active_server_id = id
+    },
+
+    removeServer(serverId) {
+      this._ensureServersShape()
+      const list = this.config.servers || []
+      const idx = list.findIndex((s) => String(s.id) === String(serverId))
+      if (idx < 0) return
+      list.splice(idx, 1)
+      if (this.config.admin_active_server_id === serverId) {
+        this.config.admin_active_server_id = list[0]?.id ?? null
+        if (list[0]) this._applyServerProfileToLegacy(list[0])
+      }
+    },
+
+    async setActiveServer(serverId) {
+      this._ensureServersShape()
+      const current = (this.config.servers || []).find((s) => String(s.id) === String(this.config.admin_active_server_id))
+      if (current) {
+        current.profile = this._legacySnapshotForServerProfile()
+      }
+      this.config.admin_active_server_id = serverId
+      const next = (this.config.servers || []).find((s) => String(s.id) === String(serverId))
+      if (next) this._applyServerProfileToLegacy(next)
+      // Persist selected admin context so backend APIs run against same server immediately.
+      try {
+        await api.updateConfig(this.config)
+      } catch (error) {
+        this._handleApiError(error, '切换服务器失败')
+      }
+    },
+
     async fetchAllInitialData() {
       this.dataLoading = true
       this.dataStatus = null
@@ -74,6 +193,8 @@ export const useMainStore = defineStore('main', {
           api.getConfig(), api.getClassifications(), api.getAllLibraries(),
         ])
         this.config = configRes.data
+        this._ensureServersShape()
+        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
         if (!this.config.advanced_filters) this.config.advanced_filters = []
         if (!this.config.library) this.config.library = []
         if (!this.config.real_libraries) this.config.real_libraries = []
@@ -101,6 +222,8 @@ export const useMainStore = defineStore('main', {
       try {
         const [configRes, allLibsRes] = await Promise.all([api.getConfig(), api.getAllLibraries()])
         this.config = configRes.data
+        this._ensureServersShape()
+        if (this.activeServer) this._applyServerProfileToLegacy(this.activeServer)
         if (!this.config.advanced_filters) this.config.advanced_filters = []
         if (!this.config.library) this.config.library = []
         this.originalConfigForComparison = JSON.parse(JSON.stringify(configRes.data))
@@ -345,6 +468,23 @@ export const useMainStore = defineStore('main', {
     async saveConfig() {
       this.saving = true
       try {
+        const current = this.activeServer
+        if (current) current.profile = this._legacySnapshotForServerProfile()
+        const ports = new Set()
+        for (const s of this.config.servers || []) {
+          const p = Number(s.proxy_port)
+          if (!Number.isInteger(p) || p < 1 || p > 65535) {
+            toast.warning(`服务器 ${s.name || ''} 端口无效`)
+            this.saving = false
+            return
+          }
+          if (ports.has(p)) {
+            toast.warning(`代理端口重复：${p}`)
+            this.saving = false
+            return
+          }
+          ports.add(p)
+        }
         await api.updateConfig(this.config)
         toast.success('系统设置已保存')
         this.originalConfigForComparison = JSON.parse(JSON.stringify(this.config))

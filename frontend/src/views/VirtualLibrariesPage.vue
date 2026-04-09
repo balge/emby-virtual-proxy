@@ -12,6 +12,20 @@
         </p>
       </div>
       <div
+        v-if="store.config?.servers?.length"
+        class="w-full sm:w-auto flex items-end gap-2 flex-wrap"
+      >
+        <BaseSelect
+          :model-value="store.config.admin_active_server_id"
+          @update:modelValue="store.setActiveServer"
+          :options="store.serverOptions"
+          label="当前服务器"
+          placeholder="请选择服务器"
+          wrapperClass="w-full sm:w-72"
+        />
+        <BaseButton variant="secondary" @click="store.addServer()">添加</BaseButton>
+      </div>
+      <div
         class="grid grid-cols-2 gap-2 w-full sm:w-auto sm:flex sm:flex-wrap sm:justify-end"
       >
         <BaseButton class="min-w-0" @click="store.refreshAllCovers()"
@@ -459,6 +473,7 @@ import {
 } from "@heroicons/vue/24/outline";
 import { useMainStore } from "@/stores/main";
 import BaseButton from "@/components/ui/BaseButton.vue";
+import BaseSelect from "@/components/ui/BaseSelect.vue";
 import BaseTag from "@/components/ui/BaseTag.vue";
 import BaseTooltip from "@/components/ui/BaseTooltip.vue";
 import ConfirmPopover from "@/components/ui/ConfirmPopover.vue";
