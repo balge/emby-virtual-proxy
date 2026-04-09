@@ -47,15 +47,15 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
+async def _notify_proxy_invalidate_cache(library_id: str, server_id: Optional[str] = None) -> dict:
     """
     通知 proxy 清除该虚拟库在磁盘上的所有用户缓存。
     返回 JSON 中的 items.user_ids：清除**前**已有缓存的用户（供随后按用户重填）。
     """
     out: dict = {"user_ids": []}
     try:
-        cfg = config_manager.load_config()
-        active = cfg.get_admin_active_server()
+        cfg, resolved_sid = _load_server_scoped_config(server_id)
+        active = cfg.get_server_by_id(resolved_sid) if resolved_sid else cfg.get_admin_active_server()
         target_port = int(active.proxy_port) if active else 8999
         base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         parsed = urlparse(base_raw)
@@ -79,11 +79,11 @@ async def _notify_proxy_invalidate_cache(library_id: str) -> dict:
     return out
 
 
-async def _list_vlib_cache_user_ids_from_proxy(library_id: str) -> list[str]:
+async def _list_vlib_cache_user_ids_from_proxy(library_id: str, server_id: Optional[str] = None) -> list[str]:
     """磁盘上对该虚拟库已有缓存的用户 Id（与 proxy 目录遍历顺序一致，已排序）。"""
     try:
-        cfg = config_manager.load_config()
-        active = cfg.get_admin_active_server()
+        cfg, resolved_sid = _load_server_scoped_config(server_id)
+        active = cfg.get_server_by_id(resolved_sid) if resolved_sid else cfg.get_admin_active_server()
         target_port = int(active.proxy_port) if active else 8999
         base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         parsed = urlparse(base_raw)
@@ -117,15 +117,15 @@ async def _resolve_cover_cache_user_id(library_id: str) -> Optional[str]:
 
 
 async def _get_cached_items_from_proxy(
-    library_id: str, user_id: Optional[str] = None
+    library_id: str, user_id: Optional[str] = None, server_id: Optional[str] = None
 ) -> list[dict] | None:
     """从 proxy 读虚拟库全量缓存。user_id 缺省时按 _resolve_cover_cache_user_id 选取。"""
     try:
         uid = user_id or await _resolve_cover_cache_user_id(library_id)
         if not uid:
             return None
-        cfg = config_manager.load_config()
-        active = cfg.get_admin_active_server()
+        cfg, resolved_sid = _load_server_scoped_config(server_id)
+        active = cfg.get_server_by_id(resolved_sid) if resolved_sid else cfg.get_admin_active_server()
         target_port = int(active.proxy_port) if active else 8999
         base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         parsed = urlparse(base_raw)
@@ -145,14 +145,15 @@ async def _get_cached_items_from_proxy(
         return None
 
 
-async def _cache_exists_in_proxy(library_id: str) -> bool:
+async def _cache_exists_in_proxy(library_id: str, server_id: Optional[str] = None) -> bool:
     """是否存在任意用户对该虚拟库的磁盘缓存。"""
-    return len(await _list_vlib_cache_user_ids_from_proxy(library_id)) > 0
+    return len(await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=server_id)) > 0
 
 
 async def _notify_proxy_refresh_cache(
     library_id: str,
     user_ids: list[str] | None = None,
+    server_id: Optional[str] = None,
 ) -> None:
     """
     通知 proxy 从 Emby 重填缓存。
@@ -161,8 +162,8 @@ async def _notify_proxy_refresh_cache(
     - ``user_ids`` 为 None：刷新**当前磁盘上已有该库缓存**的所有用户（无人访问过则跳过）。
     """
     try:
-        cfg = config_manager.load_config()
-        active = cfg.get_admin_active_server()
+        cfg, resolved_sid = _load_server_scoped_config(server_id)
+        active = cfg.get_server_by_id(resolved_sid) if resolved_sid else cfg.get_admin_active_server()
         target_port = int(active.proxy_port) if active else 8999
         base_raw = os.environ.get("PROXY_CORE_URL", "http://localhost:8999").rstrip("/")
         parsed = urlparse(base_raw)
@@ -236,6 +237,51 @@ scheduler = AsyncIOScheduler()
 # Webhook 延迟合并：收集待刷新的真实库 ID，延迟窗口到期后统一刷新
 _webhook_pending_lib_ids: set = set()
 _webhook_pending_task: Optional[asyncio.Task] = None
+
+
+def _remove_scheduler_jobs_for_server(server_id: str) -> int:
+    """
+    Best-effort cleanup for jobs that belong to a specific server.
+    Supports both legacy and namespaced job ids.
+    """
+    sid = str(server_id)
+    removed = 0
+    prefixes = (
+        f"vlib_scheduled_refresh:{sid}:",
+        f"real_lib_cover_cron:{sid}",
+    )
+    exact_ids = {
+        # legacy ids (single-server mode)
+        "real_lib_cover_cron",
+    }
+    for job in list(scheduler.get_jobs()):
+        jid = str(job.id)
+        if jid in exact_ids or any(jid.startswith(p) for p in prefixes):
+            try:
+                scheduler.remove_job(jid)
+                removed += 1
+            except Exception:
+                pass
+    if removed:
+        logger.info("Removed %s scheduled jobs for server=%s", removed, sid)
+    return removed
+
+
+def _load_server_scoped_config(server_id: Optional[str] = None) -> tuple[AppConfig, Optional[str]]:
+    """
+    Load config and project one server profile to legacy top-level fields.
+    Returns (scoped_config, resolved_server_id).
+    """
+    raw = config_manager.load_config(apply_active_profile=False)
+    raw.ensure_servers_migrated()
+    server = raw.get_server_by_id(server_id) if server_id else raw.get_admin_active_server()
+    if not server:
+        return raw, None
+    raw.sync_active_profile_to_legacy(server)
+    raw.emby_url = server.emby_url
+    raw.emby_api_key = server.emby_api_key
+    raw.emby_server_id = server.emby_server_id or raw.emby_server_id
+    return raw, str(server.id)
 
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
 
@@ -786,25 +832,31 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         shutil.rmtree(image_gen_dir, ignore_errors=True)
 
 
-async def refresh_all_real_library_covers():
+async def refresh_all_real_library_covers(server_id: Optional[str] = None):
     """定时任务：刷新所有启用且开启封面生成的真实库封面。"""
-    config = config_manager.load_config()
+    config, resolved_sid = _load_server_scoped_config(server_id)
     for rl in config.real_libraries:
         if not rl.enabled or not rl.cover_enabled:
             continue
         logger.info(f"Cron: refreshing cover for real lib '{rl.name}' ({rl.id})")
         tag = await _generate_real_library_cover(rl, config)
         if tag:
-            # 更新 config 中的 image_tag
-            current_config = config_manager.load_config()
-            for r in current_config.real_libraries:
-                if r.id == rl.id:
-                    r.image_tag = tag
+            # 更新该 server profile 中的 real_libraries.image_tag
+            current_config = config_manager.load_config(apply_active_profile=False)
+            sid = resolved_sid or str(config.admin_active_server_id or "")
+            profile = current_config.get_server_profile(sid) if sid else {}
+            libs = list(profile.get("real_libraries") or [])
+            for r in libs:
+                if str(r.get("id")) == str(rl.id):
+                    r["image_tag"] = tag
                     break
-            config_manager.save_config(current_config)
+            profile["real_libraries"] = libs
+            if sid:
+                current_config.set_server_profile(sid, profile)
+                config_manager.save_config(current_config, sync_active_profile=False)
 
 
-async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
+async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id: Optional[str] = None) -> None:
     """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
     library_id = vlib.id
     logger.info(
@@ -814,7 +866,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
-    inv = await _notify_proxy_invalidate_cache(library_id)
+    inv = await _notify_proxy_invalidate_cache(library_id, server_id=server_id)
     had_users = list(inv.get("user_ids") or [])
 
     logger.info(
@@ -826,9 +878,9 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary) -> None:
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
     else:
         # 仅对「此前已有磁盘缓存」的用户重拉；从未访问过该库的用户不建缓存
-        await _notify_proxy_refresh_cache(library_id, user_ids=had_users)
+        await _notify_proxy_refresh_cache(library_id, user_ids=had_users, server_id=server_id)
 
-    await _regenerate_cover_for_vlib(vlib)
+    await _regenerate_cover_for_vlib(vlib, server_id=server_id)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
 
 
@@ -919,7 +971,8 @@ async def _webhook_delayed_flush(delay_seconds: int):
             if v.id not in refreshed:
                 refreshed.add(v.id)
                 logger.info(f"Webhook flush: 刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {lib_ids}")
-                asyncio.create_task(refresh_virtual_library_data_and_cover(v))
+                sid = str(config.admin_active_server_id or "")
+                asyncio.create_task(refresh_virtual_library_data_and_cover(v, server_id=sid))
 
     if not refreshed:
         logger.info(f"Webhook flush: 真实库 {lib_ids} 无关联虚拟库需要刷新")
@@ -936,6 +989,9 @@ async def get_config():
 # 修改 update_config
 @api_router.post("/config", tags=["Configuration"])
 async def update_config(config: AppConfig):
+    prev_cfg = config_manager.load_config(apply_active_profile=False)
+    prev_server_ids = {str(s.id) for s in prev_cfg.servers}
+
     config.ensure_servers_migrated()
     # Basic validation: proxy ports must be unique for enabled servers.
     used_ports = set()
@@ -948,6 +1004,11 @@ async def update_config(config: AppConfig):
         used_ports.add(p)
     if config.admin_active_server_id and not any(s.id == config.admin_active_server_id for s in config.servers):
         config.admin_active_server_id = config.servers[0].id if config.servers else None
+
+    new_server_ids = {str(s.id) for s in config.servers}
+    removed_server_ids = sorted(prev_server_ids - new_server_ids)
+    for sid in removed_server_ids:
+        _remove_scheduler_jobs_for_server(sid)
 
     # /config is treated as global + servers metadata update; do not overwrite
     # active server profile from top-level legacy fields.
@@ -1131,24 +1192,30 @@ async def refresh_rss_library(library_id: str, request: Request):
     return {"message": "RSS library refresh process has been started."}
 
 
-async def _regenerate_cover_for_vlib(vlib: VirtualLibrary):
+async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[str] = None):
     """
     仅重生成封面图：不触发虚拟库列表缓存刷新（避免 random 等库只更新「代表用户」、其它用户推荐仍旧）。
     素材来自现有磁盘缓存（_resolve_cover_cache_user_id）；无缓存时需先「刷新数据」。
     """
-    config = config_manager.load_config()
+    config, resolved_sid = _load_server_scoped_config(server_id)
     style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
         image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
         if image_tag:
-            current_config = config_manager.load_config()
-            for v in current_config.virtual_libraries:
-                if v.id == vlib.id:
-                    v.image_tag = image_tag
+            current_config = config_manager.load_config(apply_active_profile=False)
+            sid = resolved_sid or str(config.admin_active_server_id or "")
+            profile = current_config.get_server_profile(sid) if sid else {}
+            libs = list(profile.get("library") or [])
+            for v in libs:
+                if str(v.get("id")) == str(vlib.id):
+                    v["image_tag"] = image_tag
                     break
-            config_manager.save_config(current_config)
+            profile["library"] = libs
+            if sid:
+                current_config.set_server_profile(sid, profile)
+                config_manager.save_config(current_config, sync_active_profile=False)
             logger.info(f"Cover regenerated for '{vlib.name}', tag={image_tag}")
         else:
             logger.warning(f"Cover generation returned None for '{vlib.name}'")
@@ -1163,7 +1230,9 @@ async def refresh_library_cover(library_id: str):
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
-    asyncio.create_task(_regenerate_cover_for_vlib(vlib))
+    cfg = config_manager.load_config(apply_active_profile=False)
+    sid = str(cfg.admin_active_server_id or "")
+    asyncio.create_task(_regenerate_cover_for_vlib(vlib, server_id=sid))
     return {"message": f"Cover refresh started for '{vlib.name}'."}
 
 
@@ -1178,7 +1247,9 @@ async def refresh_library_data(library_id: str):
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
     logger.info(f"refresh_library_data: 开始刷新虚拟库 '{vlib.name}' ({vlib.id}) type={vlib.resource_type}")
-    asyncio.create_task(refresh_virtual_library_data_and_cover(vlib))
+    cfg = config_manager.load_config(apply_active_profile=False)
+    sid = str(cfg.admin_active_server_id or "")
+    asyncio.create_task(refresh_virtual_library_data_and_cover(vlib, server_id=sid))
     return {"message": f"Data and cover refresh started for '{vlib.name}'."}
 
 
@@ -1189,8 +1260,10 @@ async def refresh_all_covers():
     vlibs = config.virtual_libraries
 
     async def _refresh_all():
+        cfg = config_manager.load_config(apply_active_profile=False)
+        sid = str(cfg.admin_active_server_id or "")
         for vlib in vlibs:
-            await _regenerate_cover_for_vlib(vlib)
+            await _regenerate_cover_for_vlib(vlib, server_id=sid)
         logger.info(f"All {len(vlibs)} virtual library covers have been refreshed.")
 
     asyncio.create_task(_refresh_all())
@@ -1656,77 +1729,103 @@ def update_virtual_library_refresh_jobs(config: AppConfig):
         elif any(job.id.startswith(p) for p in _legacy_prefixes):
             scheduler.remove_job(job.id)
 
-    def _effective_hours(vlib: VirtualLibrary) -> int:
-        if vlib.cache_refresh_interval is not None:
-            return int(vlib.cache_refresh_interval)
-        return int(config.cache_refresh_interval or 0)
+    raw = config_manager.load_config(apply_active_profile=False)
+    for s in raw.servers:
+        if not s.enabled:
+            continue
+        scoped = raw.model_copy(deep=False)
+        scoped.sync_active_profile_to_legacy(s)
+        scoped.emby_url = s.emby_url
+        scoped.emby_api_key = s.emby_api_key
+        sid = str(s.id)
 
-    for vlib in config.virtual_libraries:
-        if vlib.hidden:
-            continue
-        hours = _effective_hours(vlib)
-        if hours <= 0:
-            continue
-        job_id = f"vlib_scheduled_refresh:{vlib.id}"
-        scheduler.add_job(
-            scheduled_refresh_virtual_library,
-            "interval",
-            hours=hours,
-            id=job_id,
-            replace_existing=True,
-            args=[vlib.id],
-        )
-        logger.info(
-            f"Scheduled virtual library refresh: '{vlib.name}' ({vlib.id}) "
-            f"type={vlib.resource_type} every {hours} hours"
-        )
+        def _effective_hours(vlib: VirtualLibrary) -> int:
+            if vlib.cache_refresh_interval is not None:
+                return int(vlib.cache_refresh_interval)
+            return int(scoped.cache_refresh_interval or 0)
+
+        for vlib in scoped.virtual_libraries:
+            if vlib.hidden:
+                continue
+            hours = _effective_hours(vlib)
+            if hours <= 0:
+                continue
+            job_id = f"vlib_scheduled_refresh:{sid}:{vlib.id}"
+            scheduler.add_job(
+                scheduled_refresh_virtual_library,
+                "interval",
+                hours=hours,
+                id=job_id,
+                replace_existing=True,
+                args=[sid, vlib.id],
+            )
+            logger.info(
+                f"Scheduled virtual library refresh: server={sid} '{vlib.name}' ({vlib.id}) "
+                f"type={vlib.resource_type} every {hours} hours"
+            )
 
 
 def update_real_library_cover_cron(config: AppConfig):
     """管理真实库封面刷新的 cron 定时任务。"""
-    job_id = "real_lib_cover_cron"
-    # 先移除旧任务
-    try:
-        scheduler.remove_job(job_id)
-    except Exception:
-        pass
+    # Remove legacy/non-namespaced jobs first
+    for jid in ("real_lib_cover_cron",):
+        try:
+            scheduler.remove_job(jid)
+        except Exception:
+            pass
 
-    cron_expr = (config.real_library_cover_cron or "").strip()
-    if not cron_expr:
-        logger.info("Real library cover cron: disabled (no cron expression).")
-        return
+    # Remove all namespaced cover cron jobs, then rebuild
+    for job in list(scheduler.get_jobs()):
+        if str(job.id).startswith("real_lib_cover_cron:"):
+            try:
+                scheduler.remove_job(job.id)
+            except Exception:
+                pass
 
-    try:
-        trigger = CronTrigger.from_crontab(cron_expr)
-        scheduler.add_job(
-            refresh_all_real_library_covers,
-            trigger,
-            id=job_id,
-            replace_existing=True,
-        )
-        logger.info(f"Real library cover cron scheduled: '{cron_expr}'")
-    except Exception as e:
-        logger.error(f"Invalid cron expression '{cron_expr}': {e}")
+    raw = config_manager.load_config(apply_active_profile=False)
+    for s in raw.servers:
+        if not s.enabled:
+            continue
+        scoped = raw.model_copy(deep=False)
+        scoped.sync_active_profile_to_legacy(s)
+        sid = str(s.id)
+        cron_expr = (scoped.real_library_cover_cron or "").strip()
+        if not cron_expr:
+            logger.info("Real library cover cron: disabled for server=%s (no cron expression).", sid)
+            continue
+        job_id = f"real_lib_cover_cron:{sid}"
+        try:
+            trigger = CronTrigger.from_crontab(cron_expr)
+            scheduler.add_job(
+                refresh_all_real_library_covers,
+                trigger,
+                id=job_id,
+                replace_existing=True,
+                args=[sid],
+            )
+            logger.info("Real library cover cron scheduled: server=%s expr='%s'", sid, cron_expr)
+        except Exception as e:
+            logger.error("Invalid cron expression '%s' for server=%s: %s", cron_expr, sid, e)
 
 
-async def scheduled_refresh_virtual_library(library_id: str):
+async def scheduled_refresh_virtual_library(server_id: str, library_id: str):
     """定时任务唯一入口：按虚拟库类型调用对应刷新实现。"""
-    config = config_manager.load_config()
+    config, sid = _load_server_scoped_config(server_id)
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
     if not vlib or vlib.hidden:
         return
     logger.info(
-        f"SCHEDULED_VLIB_REFRESH START vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
+        f"SCHEDULED_VLIB_REFRESH START server={sid} vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
     )
     if vlib.resource_type == "rsshub":
         # RSS 库仍走 RSS 队列刷新；随后重生成封面
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
-        await _regenerate_cover_for_vlib(vlib)
+        await _regenerate_cover_for_vlib(vlib, server_id=sid)
     else:
         # 非 RSS：与手动「刷新数据」保持完全一致的语义（刷新磁盘缓存 + 刷新封面）
-        await refresh_virtual_library_data_and_cover(vlib)
+        await refresh_virtual_library_data_and_cover(vlib, server_id=sid)
     logger.info(
-        f"SCHEDULED_VLIB_REFRESH DONE vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
+        f"SCHEDULED_VLIB_REFRESH DONE server={sid} vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
     )
 
 async def refresh_all_rss_libraries():

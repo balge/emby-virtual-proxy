@@ -24,11 +24,11 @@
         <div
           v-for="srv in store.config.servers"
           :key="srv.id"
-          class="rounded-xl border p-3 transition-colors"
+          class="rounded-xl border p-3 transition-colors shadow-sm"
           :class="
             String(srv.id) === String(store.config.admin_active_server_id)
-              ? 'border-primary-400 bg-primary-50/50 dark:border-primary-600 dark:bg-primary-950/30'
-              : 'border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800'
+              ? 'border-primary-400 bg-primary-50/60 dark:border-primary-500 dark:bg-slate-900/80'
+              : 'border-gray-200 bg-white dark:border-slate-700 dark:bg-slate-800/70'
           "
         >
           <div class="flex items-center justify-between gap-2">
@@ -41,8 +41,8 @@
               class="text-[10px] px-2 py-0.5 rounded-full"
               :class="
                 String(srv.id) === String(store.config.admin_active_server_id)
-                  ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/60 dark:text-primary-200'
-                  : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+                  ? 'bg-primary-100 text-primary-700 dark:bg-primary-700/40 dark:text-primary-100'
+                  : 'bg-gray-100 text-gray-600 dark:bg-slate-700 dark:text-slate-200'
               "
             >
               {{
@@ -52,13 +52,21 @@
               }}
             </span>
           </div>
-          <div class="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400">
+          <div class="mt-2 space-y-1 text-xs text-gray-500 dark:text-slate-300">
             <p class="truncate">地址：{{ srv.emby_url || "-" }}</p>
             <p>代理端口：{{ srv.proxy_port ?? "-" }}</p>
           </div>
-          <div class="mt-3 flex items-center gap-2">
+          <div
+            class="mt-3 flex items-center gap-2 rounded-lg px-2 py-2"
+            :class="
+              String(srv.id) === String(store.config.admin_active_server_id)
+                ? 'bg-white/70 dark:bg-slate-800/70'
+                : 'bg-gray-50 dark:bg-slate-800/40'
+            "
+          >
             <BaseButton
               size="sm"
+              class="!font-medium dark:!border-slate-500 dark:!text-slate-100 dark:hover:!border-slate-400 dark:hover:!bg-slate-700/70"
               :disabled="
                 String(srv.id) === String(store.config.admin_active_server_id)
               "
@@ -66,17 +74,23 @@
             >
               设为当前
             </BaseButton>
-            <BaseButton size="sm" variant="secondary" @click="openEditServerDialog(srv)">
+            <BaseButton
+              size="sm"
+              variant="secondary"
+              class="!font-medium dark:!border-slate-500 dark:!text-slate-100 dark:hover:!border-slate-400 dark:hover:!bg-slate-700/70"
+              @click="openEditServerDialog(srv)"
+            >
               编辑
             </BaseButton>
             <BaseButton
               size="sm"
               variant="danger-outline"
+              class="dark:!border-red-500/60 dark:!text-red-300 dark:hover:!bg-red-900/30 dark:hover:!border-red-400"
               :disabled="
                 (store.config.servers || []).length <= 1 ||
                 String(srv.id) === String(store.config.admin_active_server_id)
               "
-              @click="onDeleteServer(srv.id)"
+              @click="openDeleteServerConfirm(srv)"
             >
               删除
             </BaseButton>
@@ -246,6 +260,34 @@
         >
       </template>
     </BaseDialog>
+
+    <BaseDialog
+      :open="deleteServerDialogOpen"
+      title="确认删除服务器"
+      @close="deleteServerDialogOpen = false"
+    >
+      <div class="space-y-2">
+        <p class="text-sm text-gray-800 dark:text-gray-200">
+          确定要删除服务器
+          <span class="font-semibold">{{ deletingServer.name || "Emby" }}</span>
+          吗？
+        </p>
+        <p class="text-xs text-gray-500 dark:text-gray-400">
+          删除后将移除该服务器配置，且不可恢复。
+        </p>
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" @click="deleteServerDialogOpen = false"
+          >取消</BaseButton
+        >
+        <BaseButton
+          variant="danger"
+          :loading="deletingServerLoading"
+          @click="confirmDeleteServer"
+          >确认删除</BaseButton
+        >
+      </template>
+    </BaseDialog>
   </div>
 </template>
 
@@ -270,6 +312,9 @@ const creatingServer = ref(false);
 const editServerDialogOpen = ref(false);
 const editingServer = ref(false);
 const editingServerId = ref("");
+const deleteServerDialogOpen = ref(false);
+const deletingServerLoading = ref(false);
+const deletingServer = reactive({ id: "", name: "" });
 const newServer = reactive({
   name: "",
   emby_url: "",
@@ -331,6 +376,23 @@ async function onDeleteServer(serverId) {
     toast.success("服务器已删除");
   } catch (e) {
     toast.error("删除服务器失败");
+  }
+}
+
+function openDeleteServerConfirm(srv) {
+  deletingServer.id = String(srv.id || "");
+  deletingServer.name = srv.name || "Emby";
+  deleteServerDialogOpen.value = true;
+}
+
+async function confirmDeleteServer() {
+  if (!deletingServer.id) return;
+  deletingServerLoading.value = true;
+  try {
+    await onDeleteServer(deletingServer.id);
+    deleteServerDialogOpen.value = false;
+  } finally {
+    deletingServerLoading.value = false;
   }
 }
 
