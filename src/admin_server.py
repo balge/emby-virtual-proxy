@@ -101,13 +101,13 @@ async def _list_vlib_cache_user_ids_from_proxy(library_id: str, server_id: Optio
     return []
 
 
-async def _resolve_cover_cache_user_id(library_id: str) -> Optional[str]:
+async def _resolve_cover_cache_user_id(library_id: str, server_id: Optional[str] = None) -> Optional[str]:
     """
     封面素材：优先使用「该库磁盘缓存里第一个用户」（真正访问过该库的人），
     避免 Emby /Users 顺序第一个与缓存所有者不一致导致 404。
     若尚无任何缓存，再退回 Emby 首个用户（与旧行为一致，便于无访问记录时的兜底刷新）。
     """
-    scoped, sid = _load_server_scoped_config()
+    scoped, sid = _load_server_scoped_config(server_id)
     uids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=sid)
     if uids:
         return uids[0]
@@ -575,12 +575,12 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
 
 
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
-async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig):
+async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig, server_id: Optional[str] = None):
     """
     Read items from proxy cache via internal API and download cover images.
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
     """
-    cache_uid = await _resolve_cover_cache_user_id(library_id)
+    cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
     if not cache_uid:
         raise HTTPException(
             status_code=404,
@@ -590,7 +590,7 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
         f"Fetching cover images for vlib {library_id} from proxy cache (user={cache_uid})..."
     )
 
-    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid)
+    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=server_id)
     if not items:
         raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
@@ -878,8 +878,14 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
     if vlib.resource_type == "rsshub":
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
     else:
-        # 仅对「此前已有磁盘缓存」的用户重拉；从未访问过该库的用户不建缓存
-        await _notify_proxy_refresh_cache(library_id, user_ids=had_users, server_id=server_id)
+        # 默认对「此前已有磁盘缓存」的用户重拉；若是新库无人缓存，则回退用首个 Emby 用户预热一次，
+        # 这样封面生成不再因为“无缓存素材”而报 404。
+        target_users = had_users
+        if not target_users:
+            fallback_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
+            if fallback_uid:
+                target_users = [fallback_uid]
+        await _notify_proxy_refresh_cache(library_id, user_ids=target_users, server_id=server_id)
 
     await _regenerate_cover_for_vlib(vlib, server_id=server_id)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
@@ -1203,7 +1209,7 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name)
+        image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name, server_id=resolved_sid)
         if image_tag:
             current_config = config_manager.load_config(apply_active_profile=False)
             sid = resolved_sid or str(config.admin_active_server_id or "")
@@ -1333,8 +1339,15 @@ async def clear_all_covers():
         raise HTTPException(status_code=500, detail=f"清空封面时发生内部错误: {e}")
 
 # 封面生成的核心逻辑
-async def _generate_library_cover(library_id: str, title_zh: str, title_en: Optional[str], style_name: str, temp_image_paths: Optional[List[str]] = None) -> Optional[str]:
-    config = config_manager.load_config()
+async def _generate_library_cover(
+    library_id: str,
+    title_zh: str,
+    title_en: Optional[str],
+    style_name: str,
+    temp_image_paths: Optional[List[str]] = None,
+    server_id: Optional[str] = None,
+) -> Optional[str]:
+    config, resolved_sid = _load_server_scoped_config(server_id)
     # --- 1. 定义路径 ---
     FONT_DIR = "/app/src/assets/fonts/"
     OUTPUT_DIR = "/app/config/images/"
@@ -1362,7 +1375,7 @@ async def _generate_library_cover(library_id: str, title_zh: str, title_en: Opti
             elif config.custom_image_path:
                 await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
             else:
-                await _fetch_images_from_vlib(library_id, image_gen_dir, config)
+                await _fetch_images_from_vlib(library_id, image_gen_dir, config, server_id=resolved_sid)
 
         # --- 3. 【核心改动】: 动态调用所选的样式生成函数 ---
         logger.info(f"素材准备完毕，开始使用样式 '{style_name}' 为 '{title_zh}' ({library_id}) 生成封面...")

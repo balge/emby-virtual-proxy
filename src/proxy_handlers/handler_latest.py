@@ -140,8 +140,16 @@ async def handle_home_latest_items(
         logger.info(f"HOME_LATEST: Cover missing for vlib '{found_vlib.name}' ({found_vlib.id}), triggering auto-generation.")
         if found_vlib.id not in handler_autogen.GENERATION_IN_PROGRESS:
             api_key = params.get("X-Emby-Token") or config.emby_api_key
+            server_id_ctx = getattr(getattr(request, "state", None), "server_id", None)
             if user_id and api_key:
-                asyncio.create_task(handler_autogen.generate_poster_in_background(found_vlib.id, user_id, api_key))
+                asyncio.create_task(
+                    handler_autogen.generate_poster_in_background(
+                        found_vlib.id,
+                        user_id,
+                        api_key,
+                        server_id=server_id_ctx,
+                    )
+                )
 
     new_params = {}
     safe_params_to_inherit = ["Fields", "IncludeItemTypes", "EnableImageTypes", "ImageTypeLimit", "X-Emby-Token", "EnableUserData", "Limit", "ParentId"]

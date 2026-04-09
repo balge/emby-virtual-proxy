@@ -95,9 +95,17 @@ async def handle_view_injection(
                         if 'Users' in path_parts:
                             user_id = path_parts[path_parts.index('Users') + 1]
                     api_key = params.get("X-Emby-Token") or config.emby_api_key
+                    server_id_ctx = getattr(getattr(request, "state", None), "server_id", None)
 
                     if user_id and api_key:
-                        asyncio.create_task(handler_autogen.generate_poster_in_background(vlib.id, user_id, api_key))
+                        asyncio.create_task(
+                            handler_autogen.generate_poster_in_background(
+                                vlib.id,
+                                user_id,
+                                api_key,
+                                server_id=server_id_ctx,
+                            )
+                        )
                     else:
                         logger.warning(f"无法为库 {vlib.id} 触发后台任务，因为缺少 UserId 或 ApiKey。")
 
