@@ -122,7 +122,7 @@ async def _get_cached_items_from_proxy(
 ) -> list[dict] | None:
     """从 proxy 读虚拟库全量缓存。user_id 缺省时按 _resolve_cover_cache_user_id 选取。"""
     try:
-        uid = user_id or await _resolve_cover_cache_user_id(library_id)
+        uid = user_id or await _resolve_cover_cache_user_id(library_id, server_id=server_id)
         if not uid:
             return None
         cfg, resolved_sid = _load_server_scoped_config(server_id)
@@ -283,6 +283,50 @@ def _load_server_scoped_config(server_id: Optional[str] = None) -> tuple[AppConf
     raw.emby_api_key = server.emby_api_key
     raw.emby_server_id = server.emby_server_id or raw.emby_server_id
     return raw, str(server.id)
+
+
+def _scheduler_rebuild_signature(cfg: AppConfig) -> str:
+    """
+    Build a stable signature for scheduler-relevant settings across all servers.
+    Active server switching alone should not change this signature.
+    """
+    cfg.ensure_servers_migrated()
+    server_entries = []
+    for s in sorted(cfg.servers, key=lambda x: str(x.id)):
+        sid = str(s.id)
+        profile = cfg.get_server_profile(sid) or {}
+        profile_cache_h = profile.get("cache_refresh_interval")
+        cron_expr = str(profile.get("real_library_cover_cron") or "").strip()
+        libs = []
+        for raw_lib in list(profile.get("library") or []):
+            vlib_id = str(raw_lib.get("id") or "")
+            interval = raw_lib.get("cache_refresh_interval")
+            effective_h = interval if interval is not None else profile_cache_h
+            if effective_h is None:
+                effective_h = cfg.cache_refresh_interval
+            try:
+                effective_h = int(effective_h or 0)
+            except Exception:
+                effective_h = 0
+            libs.append(
+                {
+                    "id": vlib_id,
+                    "hidden": bool(raw_lib.get("hidden", False)),
+                    "resource_type": str(raw_lib.get("resource_type") or ""),
+                    "cache_refresh_interval": effective_h,
+                }
+            )
+        libs.sort(key=lambda x: x["id"])
+        server_entries.append(
+            {
+                "id": sid,
+                "enabled": bool(getattr(s, "enabled", True)),
+                "proxy_port": int(getattr(s, "proxy_port", 0) or 0),
+                "real_library_cover_cron": cron_expr,
+                "virtual_libraries": libs,
+            }
+        )
+    return json.dumps(server_entries, sort_keys=True, ensure_ascii=True)
 
 admin_app = FastAPI(title="Emby Virtual Proxy - Admin API")
 
@@ -580,23 +624,54 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
     Read items from proxy cache via internal API and download cover images.
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
     """
-    cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
+    scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
+    cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
+    cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
     if not cache_uid:
+        logger.warning(
+            "COVER_FETCH failed: no cache user resolved "
+            "server_id=%s vlib=%s cache_user_ids=%s",
+            resolved_sid,
+            library_id,
+            cache_user_ids,
+        )
         raise HTTPException(
             status_code=404,
             detail="No cached items found for this virtual library. Please refresh data first.",
         )
     logger.info(
-        f"Fetching cover images for vlib {library_id} from proxy cache (user={cache_uid})..."
+        "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
+        resolved_sid,
+        library_id,
+        cache_uid,
+        cache_user_ids,
+        (scoped_cfg.emby_url or "").rstrip("/"),
     )
 
-    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=server_id)
+    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=resolved_sid)
     if not items:
+        logger.warning(
+            "COVER_FETCH failed: cached items empty "
+            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s",
+            resolved_sid,
+            library_id,
+            cache_uid,
+            cache_user_ids,
+        )
         raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
     items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
 
     if not items_with_images:
+        logger.warning(
+            "COVER_FETCH failed: cached items without primary images "
+            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s items=%s",
+            resolved_sid,
+            library_id,
+            cache_uid,
+            cache_user_ids,
+            len(items),
+        )
         raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
 
     selected_items = items_with_images[:9]
@@ -997,6 +1072,7 @@ async def get_config():
 @api_router.post("/config", tags=["Configuration"])
 async def update_config(config: AppConfig):
     prev_cfg = config_manager.load_config(apply_active_profile=False)
+    prev_scheduler_sig = _scheduler_rebuild_signature(prev_cfg)
     prev_server_ids = {str(s.id) for s in prev_cfg.servers}
 
     config.ensure_servers_migrated()
@@ -1020,14 +1096,19 @@ async def update_config(config: AppConfig):
     # /config is treated as global + servers metadata update; do not overwrite
     # active server profile from top-level legacy fields.
     config_manager.save_config(config, sync_active_profile=False)
+    saved_raw = config_manager.load_config(apply_active_profile=False)
+    new_scheduler_sig = _scheduler_rebuild_signature(saved_raw)
     # Re-load saved config so return value + schedulers match on-disk state
     saved = config_manager.load_config()
     if not saved.enable_cache:
         api_cache.clear()
         logger.info("enable_cache=false: cleared api_cache")
-    # 更新定时任务
-    update_virtual_library_refresh_jobs(saved)
-    update_real_library_cover_cron(saved)
+    # 仅在调度相关配置发生变化时重建任务，避免仅切换 active server 造成重复重建。
+    if prev_scheduler_sig != new_scheduler_sig:
+        update_virtual_library_refresh_jobs(saved)
+        update_real_library_cover_cron(saved)
+    else:
+        logger.info("Skip scheduler rebuild: no scheduler-related config changes.")
     return config_manager.load_config(apply_active_profile=False).model_dump(by_alias=True)
 
 

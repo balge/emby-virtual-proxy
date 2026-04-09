@@ -261,7 +261,7 @@ async def internal_refresh_vlib_cache(
     listen_port = _local_listen_port_from_scope(request.scope)
     server = _resolve_server_for_listen_port(raw_config, listen_port)
     config = _config_for_server(raw_config, server)
-    vlib = next((v for v in raw_config.virtual_libraries if v.id == library_id), None)
+    vlib = next((v for v in config.virtual_libraries if v.id == library_id), None)
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
