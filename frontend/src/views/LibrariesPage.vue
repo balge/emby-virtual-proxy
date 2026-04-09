@@ -5,20 +5,6 @@
         <h1 class="text-2xl font-bold text-gray-900 dark:text-gray-100">媒体库管理</h1>
         <p class="text-sm text-gray-500 dark:text-gray-400 mt-0.5">同步、配置真实媒体库与封面</p>
       </div>
-      <div
-        v-if="store.config?.servers?.length"
-        class="w-full sm:w-auto flex items-end gap-2 flex-wrap"
-      >
-        <BaseSelect
-          :model-value="store.config.admin_active_server_id"
-          @update:modelValue="store.setActiveServer"
-          :options="store.serverOptions"
-          label="当前服务器"
-          placeholder="请选择服务器"
-          wrapperClass="w-full sm:w-72"
-        />
-        <BaseButton variant="secondary" @click="store.addServer()">添加</BaseButton>
-      </div>
       <div class="flex flex-wrap gap-2">
         <BaseButton @click="store.syncRealLibraries()" :loading="store.dataLoading">从 Emby 同步</BaseButton>
         <BaseButton @click="store.refreshAllRealLibraryCovers()">刷新全部封面</BaseButton>
@@ -111,7 +97,6 @@ import { computed, onMounted } from 'vue'
 import { BuildingLibraryIcon, ArrowPathIcon } from '@heroicons/vue/24/outline'
 import { useMainStore } from '@/stores/main'
 import BaseButton from '@/components/ui/BaseButton.vue'
-import BaseSelect from '@/components/ui/BaseSelect.vue'
 import BaseSwitch from '@/components/ui/BaseSwitch.vue'
 import BaseInput from '@/components/ui/BaseInput.vue'
 

@@ -145,27 +145,65 @@ export const useMainStore = defineStore('main', {
       const usedPorts = new Set((this.config.servers || []).map((s) => Number(s.proxy_port)))
       let p = 8999
       while (usedPorts.has(p)) p += 1
-      this.config.servers.push({
+      const created = {
         id,
         name: `Emby ${this.config.servers.length + 1}`,
         emby_url: '',
         emby_api_key: '',
         enabled: true,
         proxy_port: p,
-      })
-      this.config.admin_active_server_id = id
+      }
+      this.config.servers.push(created)
+      return created
+    },
+
+    async createServer(serverInput, { switchToNew = false, persist = true } = {}) {
+      this._ensureServersShape()
+      const id = crypto?.randomUUID ? crypto.randomUUID() : String(Date.now())
+      const name = String(serverInput?.name || '').trim() || `Emby ${this.config.servers.length + 1}`
+      const emby_url = String(serverInput?.emby_url || '').trim()
+      const emby_api_key = String(serverInput?.emby_api_key || '').trim()
+      const proxy_port = Number(serverInput?.proxy_port)
+      const enabled = serverInput?.enabled !== false
+
+      if (!emby_url || !emby_api_key || !Number.isInteger(proxy_port) || proxy_port < 1 || proxy_port > 65535) {
+        throw new Error('服务器参数不完整或端口无效')
+      }
+      if ((this.config.servers || []).some((s) => Number(s.proxy_port) === proxy_port)) {
+        throw new Error(`代理端口重复：${proxy_port}`)
+      }
+
+      const created = { id, name, emby_url, emby_api_key, enabled, proxy_port, profile: {} }
+      this.config.servers.push(created)
+
+      if (switchToNew) {
+        await this.setActiveServer(id)
+      } else if (persist) {
+        await api.updateConfig(this.config)
+      }
+      return created
     },
 
     removeServer(serverId) {
       this._ensureServersShape()
       const list = this.config.servers || []
+      if (list.length <= 1) return false
       const idx = list.findIndex((s) => String(s.id) === String(serverId))
-      if (idx < 0) return
+      if (idx < 0) return false
       list.splice(idx, 1)
       if (this.config.admin_active_server_id === serverId) {
         this.config.admin_active_server_id = list[0]?.id ?? null
         if (list[0]) this._applyServerProfileToLegacy(list[0])
       }
+      return true
+    },
+
+    async deleteServer(serverId) {
+      if (String(serverId) === String(this.config.admin_active_server_id)) return false
+      const ok = this.removeServer(serverId)
+      if (!ok) return false
+      await api.updateConfig(this.config)
+      return true
     },
 
     async setActiveServer(serverId) {

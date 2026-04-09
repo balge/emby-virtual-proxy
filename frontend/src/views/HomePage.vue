@@ -7,24 +7,83 @@
       Emby Virtual Proxy 配置面板
     </p>
 
-    <!-- Server switch -->
+    <!-- Server management -->
     <div
       v-if="store.config?.servers?.length"
       class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 mb-8"
     >
-      <div class="flex items-end gap-3 flex-wrap">
-        <BaseSelect
-          :model-value="store.config.admin_active_server_id"
-          @update:modelValue="store.setActiveServer"
-          :options="store.serverOptions"
-          label="当前管理服务器"
-          placeholder="请选择服务器"
-          wrapperClass="w-full sm:w-80"
-        />
-        <BaseButton variant="secondary" @click="store.addServer()">添加服务器</BaseButton>
+      <div class="flex items-center justify-between gap-3 mb-3">
+        <h2 class="text-sm font-semibold text-gray-900 dark:text-gray-100">
+          当前管理服务器
+        </h2>
+        <BaseButton variant="secondary" @click="openCreateServerDialog"
+          >添加服务器</BaseButton
+        >
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div
+          v-for="srv in store.config.servers"
+          :key="srv.id"
+          class="rounded-xl border p-3 transition-colors"
+          :class="
+            String(srv.id) === String(store.config.admin_active_server_id)
+              ? 'border-primary-400 bg-primary-50/50 dark:border-primary-600 dark:bg-primary-950/30'
+              : 'border-gray-200 bg-white dark:border-gray-700 dark:bg-gray-800'
+          "
+        >
+          <div class="flex items-center justify-between gap-2">
+            <p
+              class="text-sm font-medium text-gray-900 dark:text-gray-100 truncate"
+            >
+              {{ srv.name || "Emby" }}
+            </p>
+            <span
+              class="text-[10px] px-2 py-0.5 rounded-full"
+              :class="
+                String(srv.id) === String(store.config.admin_active_server_id)
+                  ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/60 dark:text-primary-200'
+                  : 'bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300'
+              "
+            >
+              {{
+                String(srv.id) === String(store.config.admin_active_server_id)
+                  ? "当前"
+                  : "可切换"
+              }}
+            </span>
+          </div>
+          <div class="mt-2 space-y-1 text-xs text-gray-500 dark:text-gray-400">
+            <p class="truncate">地址：{{ srv.emby_url || "-" }}</p>
+            <p>代理端口：{{ srv.proxy_port ?? "-" }}</p>
+          </div>
+          <div class="mt-3 flex items-center gap-2">
+            <BaseButton
+              size="sm"
+              :disabled="
+                String(srv.id) === String(store.config.admin_active_server_id)
+              "
+              @click="store.setActiveServer(srv.id)"
+            >
+              设为当前
+            </BaseButton>
+            <BaseButton
+              size="sm"
+              variant="danger-outline"
+              :disabled="
+                (store.config.servers || []).length <= 1 ||
+                String(srv.id) === String(store.config.admin_active_server_id)
+              "
+              @click="onDeleteServer(srv.id)"
+            >
+              删除
+            </BaseButton>
+          </div>
+        </div>
       </div>
       <p class="mt-2 text-xs text-gray-500 dark:text-gray-400">
-        提示：代理访问入口为 <span class="font-mono">http://&lt;代理IP&gt;:&lt;代理端口&gt;</span>，端口需在 compose 中手动映射后才可从局域网访问。
+        提示：代理访问入口为
+        <span class="font-mono">http://&lt;代理IP&gt;:&lt;代理端口&gt;</span
+        >，端口需在 compose 中手动映射后才可从局域网访问。
       </p>
     </div>
 
@@ -110,22 +169,123 @@
         </div>
       </router-link>
     </div>
+
+    <BaseDialog
+      :open="createServerDialogOpen"
+      title="添加服务器"
+      @close="createServerDialogOpen = false"
+    >
+      <div class="space-y-3">
+        <BaseInput
+          v-model="newServer.name"
+          label="名称"
+          placeholder="例如：客厅 Emby"
+        />
+        <BaseInput
+          v-model="newServer.emby_url"
+          label="Emby 服务器地址"
+          placeholder="http://192.168.1.10:8096"
+        />
+        <BaseInput
+          v-model="newServer.emby_api_key"
+          label="Emby API 密钥"
+          type="password"
+          placeholder="API Key"
+        />
+        <BaseInput
+          v-model.number="newServer.proxy_port"
+          label="代理端口"
+          type="number"
+          placeholder="9000"
+        />
+      </div>
+      <template #footer>
+        <BaseButton variant="secondary" @click="createServerDialogOpen = false"
+          >取消</BaseButton
+        >
+        <BaseButton :loading="creatingServer" @click="onCreateServer"
+          >保存</BaseButton
+        >
+      </template>
+    </BaseDialog>
   </div>
 </template>
 
 <script setup>
-import { onMounted } from "vue";
+import { reactive, ref, onMounted } from "vue";
 import { useMainStore } from "@/stores/main";
-import BaseSelect from "@/components/ui/BaseSelect.vue";
 import BaseButton from "@/components/ui/BaseButton.vue";
+import BaseDialog from "@/components/ui/BaseDialog.vue";
+import BaseInput from "@/components/ui/BaseInput.vue";
 import {
   Cog6ToothIcon,
   RectangleStackIcon,
   FunnelIcon,
   BuildingLibraryIcon,
 } from "@heroicons/vue/24/outline";
+import { useToast } from "@/composables/useToast";
 
 const store = useMainStore();
+const toast = useToast();
+const createServerDialogOpen = ref(false);
+const creatingServer = ref(false);
+const newServer = reactive({
+  name: "",
+  emby_url: "",
+  emby_api_key: "",
+  proxy_port: 9000,
+});
+
+function openCreateServerDialog() {
+  const used = new Set(
+    (store.config.servers || []).map((s) => Number(s.proxy_port)),
+  );
+  let p = 8999;
+  while (used.has(p)) p += 1;
+  newServer.name = "";
+  newServer.emby_url = "";
+  newServer.emby_api_key = "";
+  newServer.proxy_port = p;
+  createServerDialogOpen.value = true;
+}
+
+async function onCreateServer() {
+  creatingServer.value = true;
+  try {
+    await store.createServer(
+      {
+        name: newServer.name,
+        emby_url: newServer.emby_url,
+        emby_api_key: newServer.emby_api_key,
+        proxy_port: newServer.proxy_port,
+      },
+      { switchToNew: false, persist: true },
+    );
+    toast.success("服务器已添加（未切换当前服务器）");
+    createServerDialogOpen.value = false;
+  } catch (e) {
+    toast.error(e?.message || "添加服务器失败");
+  } finally {
+    creatingServer.value = false;
+  }
+}
+
+async function onDeleteServer(serverId) {
+  try {
+    const ok = await store.deleteServer(serverId);
+    if (!ok) {
+      if (String(serverId) === String(store.config.admin_active_server_id)) {
+        toast.warning("当前选中服务器不能删除");
+      } else {
+        toast.warning("至少保留一个服务器");
+      }
+      return;
+    }
+    toast.success("服务器已删除");
+  } catch (e) {
+    toast.error("删除服务器失败");
+  }
+}
 
 const quickLinks = [
   {
