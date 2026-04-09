@@ -774,6 +774,32 @@ export const useMainStore = defineStore("main", {
       try {
         const current = this.activeServer;
         if (current) current.profile = this._legacySnapshotForServerProfile();
+        // Webhook token policy: enabled server => non-empty token, and tokens must be unique.
+        const tokenOwners = new Map();
+        for (const s of this.config.servers || []) {
+          const profile = {
+            ...this._defaultServerProfile(),
+            ...(s?.profile || {}),
+          };
+          const wc = profile.webhook || {};
+          const enabled = wc.enabled === true;
+          const token = String(wc.secret || "").trim();
+          if (!enabled) continue;
+          if (!token) {
+            toast.warning(`服务器 ${s.name || s.id} 的 Webhook token 不能为空`);
+            this.saving = false;
+            return;
+          }
+          const owner = tokenOwners.get(token);
+          if (owner && owner !== String(s.id)) {
+            toast.warning(
+              `Webhook token 重复：${s.name || s.id} 与 ${owner} 使用了同一 token`,
+            );
+            this.saving = false;
+            return;
+          }
+          tokenOwners.set(token, String(s.name || s.id));
+        }
         const ports = new Set();
         for (const s of this.config.servers || []) {
           const p = Number(s.proxy_port);

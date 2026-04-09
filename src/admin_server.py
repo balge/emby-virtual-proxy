@@ -27,7 +27,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from proxy_cache import api_cache, vlib_items_cache, slim_items
-from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig
+from models import AppConfig, VirtualLibrary, AdvancedFilter, RealLibraryConfig, WebhookSettings
 from emby_webhook import (
     parse_request_payload,
     extract_event_raw,
@@ -236,8 +236,8 @@ def _cleanup_expired_tokens():
 scheduler = AsyncIOScheduler()
 
 # Webhook 延迟合并：收集待刷新的真实库 ID，延迟窗口到期后统一刷新
-_webhook_pending_lib_ids: set = set()
-_webhook_pending_task: Optional[asyncio.Task] = None
+_webhook_pending_lib_ids_by_server: dict[str, set[str]] = {}
+_webhook_pending_task_by_server: dict[str, asyncio.Task] = {}
 
 
 def _remove_scheduler_jobs_for_server(server_id: str) -> int:
@@ -283,6 +283,56 @@ def _load_server_scoped_config(server_id: Optional[str] = None) -> tuple[AppConf
     raw.emby_api_key = server.emby_api_key
     raw.emby_server_id = server.emby_server_id or raw.emby_server_id
     return raw, str(server.id)
+
+
+def _extract_webhook_token(request: Request) -> str:
+    incoming = (request.headers.get("X-Webhook-Secret") or "").strip()
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        incoming = incoming or auth[7:].strip()
+    q_token = request.query_params.get("token")
+    if q_token:
+        incoming = incoming or q_token.strip()
+    return incoming
+
+
+def _validate_webhook_tokens(cfg: AppConfig) -> None:
+    """Webhook token policy: enabled server must set non-empty unique token."""
+    seen: dict[str, str] = {}
+    for s in cfg.servers:
+        sid = str(s.id)
+        profile = cfg.get_server_profile(sid)
+        wc = WebhookSettings.model_validate(profile.get("webhook") or {})
+        if not wc.enabled:
+            continue
+        token = (wc.secret or "").strip()
+        if not token:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Webhook 已启用但 token 为空：server={sid}",
+            )
+        owner = seen.get(token)
+        if owner and owner != sid:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Webhook token 重复：server={owner} 与 server={sid}",
+            )
+        seen[token] = sid
+
+
+def _resolve_server_id_by_webhook_token(cfg: AppConfig, token: str) -> Optional[str]:
+    t = (token or "").strip()
+    if not t:
+        return None
+    for s in cfg.servers:
+        sid = str(s.id)
+        profile = cfg.get_server_profile(sid)
+        wc = WebhookSettings.model_validate(profile.get("webhook") or {})
+        if not wc.enabled:
+            continue
+        if (wc.secret or "").strip() == t:
+            return sid
+    return None
 
 
 def _scheduler_rebuild_signature(cfg: AppConfig) -> str:
@@ -417,21 +467,13 @@ async def emby_webhook_receive(request: Request):
     http(s)://<管理面板>/api/webhook/emby
     若设置了密钥，任选其一：请求头 X-Webhook-Secret、Authorization: Bearer、或查询参数 ?token=
     """
-    config = config_manager.load_config()
-    wc = config.webhook
-    if not wc.enabled:
-        return {"ok": True, "ignored": True, "reason": "webhook_disabled"}
-
-    if wc.secret:
-        incoming = (request.headers.get("X-Webhook-Secret") or "").strip()
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            incoming = incoming or auth[7:].strip()
-        q_token = request.query_params.get("token")
-        if q_token:
-            incoming = incoming or q_token.strip()
-        if incoming != wc.secret:
-            raise HTTPException(status_code=403, detail="Invalid webhook secret")
+    config = config_manager.load_config(apply_active_profile=False)
+    incoming = _extract_webhook_token(request)
+    if not incoming:
+        raise HTTPException(status_code=403, detail="Webhook token is required")
+    sid = _resolve_server_id_by_webhook_token(config, incoming)
+    if not sid:
+        raise HTTPException(status_code=403, detail="Invalid webhook token")
 
     try:
         body = await request.json()
@@ -444,8 +486,8 @@ async def emby_webhook_receive(request: Request):
     payload = parse_request_payload(body)
     logger.debug(f"Webhook RAW body: {body}")
     logger.debug(f"Webhook PARSED payload: {payload}")
-    asyncio.create_task(_handle_emby_webhook_payload(payload))
-    return {"ok": True, "accepted": True}
+    asyncio.create_task(_handle_emby_webhook_payload(payload, server_id=sid))
+    return {"ok": True, "accepted": True, "server_id": sid}
 
 # --- 高级筛选器 API ---
 @api_router.get("/advanced-filters", response_model=List[AdvancedFilter], tags=["Advanced Filters"])
@@ -745,13 +787,15 @@ async def _fetch_images_from_custom_path(custom_path: str, temp_dir: Path):
     if not any(temp_dir.iterdir()):
         raise HTTPException(status_code=500, detail="从自定义目录复制图片素材失败。")
 
-async def _admin_emby_get_json(endpoint: str, params: Optional[Dict] = None) -> Optional[dict]:
+async def _admin_emby_get_json(
+    endpoint: str, params: Optional[Dict] = None, config: Optional[AppConfig] = None
+) -> Optional[dict]:
     """GET Emby JSON，失败返回 None（不抛 HTTPException）。"""
-    config = config_manager.load_config()
-    if not config.emby_url or not config.emby_api_key:
+    scoped = config or config_manager.load_config()
+    if not scoped.emby_url or not scoped.emby_api_key:
         return None
-    headers = {"X-Emby-Token": config.emby_api_key, "Accept": "application/json"}
-    url = f"{config.emby_url.rstrip('/')}/emby{endpoint}"
+    headers = {"X-Emby-Token": scoped.emby_api_key, "Accept": "application/json"}
+    url = f"{scoped.emby_url.rstrip('/')}/emby{endpoint}"
     try:
         async with create_client_session() as session:
             async with session.get(url, headers=headers, params=params or {}, timeout=20) as resp:
@@ -967,9 +1011,10 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
 
 
 
-async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
-    global _webhook_pending_task
-    config = config_manager.load_config()
+async def _handle_emby_webhook_payload(payload: Dict[str, Any], server_id: str) -> None:
+    config, sid = _load_server_scoped_config(server_id)
+    if not sid:
+        return
     wc = config.webhook
     if not wc.enabled:
         return
@@ -987,7 +1032,7 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
 
     # 通过 Emby VirtualFolders API 获取每个库的实际路径，用路径前缀匹配 item path
     try:
-        vfolders = await _admin_emby_get_json("/Library/VirtualFolders")
+        vfolders = await _admin_emby_get_json("/Library/VirtualFolders", config=config)
     except Exception as e:
         logger.error(f"Webhook: 获取 VirtualFolders 失败: {e}")
         return
@@ -1013,33 +1058,39 @@ async def _handle_emby_webhook_payload(payload: Dict[str, Any]) -> None:
         return
 
     # 合并到待处理集合
-    _webhook_pending_lib_ids.update(matched_lib_ids)
+    pending = _webhook_pending_lib_ids_by_server.setdefault(sid, set())
+    pending.update(matched_lib_ids)
     delay = max(wc.delay_seconds, 0)
     logger.info(
-        f"Webhook: event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}"
-        f"（待处理共 {len(_webhook_pending_lib_ids)} 个，{delay}s 后刷新）"
+        f"Webhook: server={sid} event={event_raw} path='{item_path}' → 匹配真实库 {matched_lib_ids}"
+        f"（待处理共 {len(pending)} 个，{delay}s 后刷新）"
     )
 
     # 只在没有待执行任务时启动定时器，避免不断重置导致饥饿
-    if _webhook_pending_task is None or _webhook_pending_task.done():
-        _webhook_pending_task = asyncio.create_task(_webhook_delayed_flush(delay))
+    t = _webhook_pending_task_by_server.get(sid)
+    if t is None or t.done():
+        _webhook_pending_task_by_server[sid] = asyncio.create_task(
+            _webhook_delayed_flush(server_id=sid, delay_seconds=delay)
+        )
 
 
-async def _webhook_delayed_flush(delay_seconds: int):
+async def _webhook_delayed_flush(server_id: str, delay_seconds: int):
     """延迟后统一刷新所有待处理的真实库关联的虚拟库。"""
-    global _webhook_pending_task
     if delay_seconds > 0:
         await asyncio.sleep(delay_seconds)
 
     # 取出并清空待处理集合
-    lib_ids = list(_webhook_pending_lib_ids)
-    _webhook_pending_lib_ids.clear()
-    _webhook_pending_task = None
+    pending = _webhook_pending_lib_ids_by_server.get(server_id, set())
+    lib_ids = list(pending)
+    pending.clear()
+    _webhook_pending_task_by_server.pop(server_id, None)
 
     if not lib_ids:
         return
 
-    config = config_manager.load_config()
+    config, sid = _load_server_scoped_config(server_id)
+    if not sid:
+        return
     ignore_set = config.disabled_library_ids
     refreshed = set()
     for v in config.virtual_libraries:
@@ -1052,12 +1103,13 @@ async def _webhook_delayed_flush(delay_seconds: int):
         if any(lid in src_filtered for lid in lib_ids):
             if v.id not in refreshed:
                 refreshed.add(v.id)
-                logger.info(f"Webhook flush: 刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {lib_ids}")
-                sid = str(config.admin_active_server_id or "")
+                logger.info(
+                    f"Webhook flush: server={sid} 刷新虚拟库 '{v.name}' ({v.id}) ← 真实库 {lib_ids}"
+                )
                 asyncio.create_task(refresh_virtual_library_data_and_cover(v, server_id=sid))
 
     if not refreshed:
-        logger.info(f"Webhook flush: 真实库 {lib_ids} 无关联虚拟库需要刷新")
+        logger.info(f"Webhook flush: server={sid} 真实库 {lib_ids} 无关联虚拟库需要刷新")
 
 
 # --- API ---
@@ -1076,6 +1128,7 @@ async def update_config(config: AppConfig):
     prev_server_ids = {str(s.id) for s in prev_cfg.servers}
 
     config.ensure_servers_migrated()
+    _validate_webhook_tokens(config)
     # Basic validation: proxy ports must be unique for enabled servers.
     used_ports = set()
     for s in config.servers:
@@ -1126,6 +1179,7 @@ async def update_server_profile(server_id: str, profile: Dict[str, Any]):
     cfg = config_manager.load_config(apply_active_profile=False)
     if not cfg.set_server_profile(server_id, profile):
         raise HTTPException(status_code=404, detail="Server not found")
+    _validate_webhook_tokens(cfg)
     config_manager.save_config(cfg, sync_active_profile=False)
     # Schedulers depend on active top-level projection; re-load with projection for safety.
     saved = config_manager.load_config()

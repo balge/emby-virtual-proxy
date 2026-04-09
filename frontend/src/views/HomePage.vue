@@ -104,29 +104,6 @@
       </p>
     </div>
 
-    <!-- Status -->
-    <div
-      v-if="store.dataLoading"
-      class="flex items-center gap-2 text-sm text-gray-500 mb-6"
-    >
-      <svg class="animate-spin h-4 w-4" viewBox="0 0 24 24" fill="none">
-        <circle
-          class="opacity-25"
-          cx="12"
-          cy="12"
-          r="10"
-          stroke="currentColor"
-          stroke-width="4"
-        />
-        <path
-          class="opacity-75"
-          fill="currentColor"
-          d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-        />
-      </svg>
-      正在加载数据...
-    </div>
-
     <!-- Quick stats -->
     <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
       <div

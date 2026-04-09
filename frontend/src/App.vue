@@ -19,7 +19,7 @@
     <Toast />
 
     <div
-      v-if="mainStore.switchingServer"
+      v-if="showGlobalLoadingModal"
       class="fixed inset-0 z-[100] bg-black/40 backdrop-blur-[1px] flex items-center justify-center"
     >
       <div
@@ -47,10 +47,10 @@
           </svg>
           <div>
             <p class="text-sm font-medium text-gray-900 dark:text-gray-100">
-              正在切换服务器
+              {{ globalLoadingTitle }}
             </p>
             <p class="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
-              请稍候，正在刷新配置与数据...
+              {{ globalLoadingDesc }}
             </p>
           </div>
         </div>
@@ -75,6 +75,17 @@ const mainStore = useMainStore();
 const authEnabled = ref(false);
 
 const isLoginRoute = computed(() => route.name === "Login");
+const showGlobalLoadingModal = computed(
+  () => mainStore.switchingServer || mainStore.dataLoading,
+);
+const globalLoadingTitle = computed(() =>
+  mainStore.switchingServer ? "正在切换服务器" : "正在加载数据",
+);
+const globalLoadingDesc = computed(() =>
+  mainStore.switchingServer
+    ? "请稍候，正在刷新配置与数据..."
+    : "请稍候，正在获取配置与媒体库数据...",
+);
 
 const initTheme = () => {
   const saved = localStorage.getItem("theme");
