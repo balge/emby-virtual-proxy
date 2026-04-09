@@ -45,14 +45,12 @@ def load_config() -> AppConfig:
             cfg = AppConfig.model_validate(data)
             # Migrate legacy single-server config into servers[] in memory.
             cfg.ensure_servers_migrated()
-            cfg.sync_active_profile_to_legacy()
             return cfg
             
     except (json.JSONDecodeError, Exception) as e:
         print(f"Error loading or parsing config file: {e}. Returning a temporary default config.")
         cfg = AppConfig()
         cfg.ensure_servers_migrated()
-        cfg.sync_active_profile_to_legacy()
         return cfg
 
 def save_config(config: AppConfig):

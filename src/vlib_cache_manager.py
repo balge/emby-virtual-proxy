@@ -181,7 +181,7 @@ async def populate_random_vlib_items(
         source_libs = [lid for lid in source_libs if lid not in ignore_set]
     if not source_libs:
         try:
-            real_libs = await get_real_libraries_hybrid_mode()
+            real_libs = await get_real_libraries_hybrid_mode(config=config)
             source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
         except Exception as e:
             logger.error(f"Random: failed to fetch real libraries: {e}")
@@ -557,7 +557,7 @@ async def refresh_vlib_cache(
 
         if vlib.resource_type == "all" and ignore_set and not source_libs:
             try:
-                real_libs = await get_real_libraries_hybrid_mode()
+                real_libs = await get_real_libraries_hybrid_mode(config=config)
                 source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
             except Exception as e:
                 logger.error(f"Failed to fetch real libraries: {e}")

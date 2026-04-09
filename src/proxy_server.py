@@ -96,6 +96,13 @@ def _config_for_server(config: "config_manager.AppConfig", server):
     cfg = config.model_copy(deep=False)
     if server is None:
         return cfg
+    # Apply server-scoped settings (virtual libs, real libs, cache settings, webhook, etc.)
+    # into the request-local config view, so proxy port truly isolates behavior per server.
+    try:
+        cfg.sync_active_profile_to_legacy(server)
+    except Exception:
+        # Keep proxy resilient even if profile is malformed; it will fallback to defaults/top-level.
+        pass
     cfg.emby_url = server.emby_url
     cfg.emby_api_key = server.emby_api_key
     cfg.emby_server_id = server.emby_server_id or cfg.emby_server_id

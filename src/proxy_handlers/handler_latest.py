@@ -204,7 +204,7 @@ async def handle_home_latest_items(
 
     if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
         try:
-            real_libs = await get_real_libraries_hybrid_mode()
+            real_libs = await get_real_libraries_hybrid_mode(config=config)
             effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
         except Exception as e:
             logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")

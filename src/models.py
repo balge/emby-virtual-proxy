@@ -195,13 +195,13 @@ class AppConfig(BaseModel):
                 self.admin_active_server_id = first_enabled.id if first_enabled else self.servers[0].id
             self._ensure_server_profiles_initialized()
             # Keep legacy single-server fields in sync with current admin selection
-            active = self.get_admin_active_server()
+            active = self._select_active_server_no_ensure()
             if active:
                 self.emby_url = active.emby_url
                 self.emby_api_key = active.emby_api_key
                 self.emby_server_id = active.emby_server_id or self.emby_server_id
             # Project current active server profile into legacy top-level fields so old code keeps working.
-            self.sync_active_profile_to_legacy()
+            self.sync_active_profile_to_legacy(active)
             return
 
         # Build server[0] from legacy fields (or defaults).
@@ -222,7 +222,16 @@ class AppConfig(BaseModel):
         self.emby_url = s.emby_url
         self.emby_api_key = s.emby_api_key
         self.emby_server_id = s.emby_server_id or self.emby_server_id
-        self.sync_active_profile_to_legacy()
+        self.sync_active_profile_to_legacy(s)
+
+    def _select_active_server_no_ensure(self) -> Optional[EmbyServerConfig]:
+        if not self.servers:
+            return None
+        if self.admin_active_server_id:
+            found = next((s for s in self.servers if s.id == self.admin_active_server_id), None)
+            if found:
+                return found
+        return next((s for s in self.servers if s.enabled), self.servers[0])
 
     def _profile_snapshot_from_legacy(self) -> dict:
         return {
@@ -249,12 +258,14 @@ class AppConfig(BaseModel):
                 if k not in s.profile:
                     s.profile[k] = v
 
-    def sync_active_profile_to_legacy(self) -> None:
+    def sync_active_profile_to_legacy(self, active: Optional[EmbyServerConfig] = None) -> None:
         """
         Load active server scoped settings into legacy top-level fields.
         This keeps old call sites and APIs working while introducing per-server profiles.
         """
-        active = self.get_admin_active_server()
+        if active is None:
+            # Avoid recursion: do not call ensure_servers_migrated() here.
+            active = self._select_active_server_no_ensure()
         if not active or not isinstance(active.profile, dict):
             return
         p = active.profile
@@ -281,21 +292,14 @@ class AppConfig(BaseModel):
         Call this before save_config.
         """
         self.ensure_servers_migrated()
-        active = self.get_admin_active_server()
+        active = self._select_active_server_no_ensure()
         if not active:
             return
         active.profile = self._profile_snapshot_from_legacy()
 
     def get_admin_active_server(self) -> Optional[EmbyServerConfig]:
         self.ensure_servers_migrated()
-        if not self.servers:
-            return None
-        if self.admin_active_server_id:
-            found = next((s for s in self.servers if s.id == self.admin_active_server_id), None)
-            if found:
-                return found
-        # fallback: first enabled, else first
-        return next((s for s in self.servers if s.enabled), self.servers[0])
+        return self._select_active_server_no_ensure()
 
     def get_server_by_proxy_port(self, port: int) -> Optional[EmbyServerConfig]:
         self.ensure_servers_migrated()
