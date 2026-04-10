@@ -665,6 +665,7 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
     """
     Read items from proxy cache via internal API and download cover images.
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
+    Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前 9 条导致刷新封面变化不大。
     """
     scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
     cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
@@ -716,7 +717,12 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
         )
         raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
 
-    selected_items = items_with_images[:9]
+    vlib_meta = next((v for v in scoped_cfg.virtual_libraries if v.id == library_id), None)
+    if vlib_meta and vlib_meta.resource_type == "random":
+        k = min(9, len(items_with_images))
+        selected_items = random.sample(items_with_images, k)
+    else:
+        selected_items = items_with_images[:9]
 
     async def download_image(session, item, index):
         image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
@@ -977,7 +983,11 @@ async def refresh_all_real_library_covers(server_id: Optional[str] = None):
 
 
 async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id: Optional[str] = None) -> None:
-    """与「刷新数据」按钮一致：清缓存、RSS 库则拉 RSS，再生成封面。"""
+    """与「刷新数据」一致：清缓存、RSS 则拉条目，再重生封面。
+
+    random 库条目按用户随机，封面仍用 _resolve_cover_cache_user_id 对应用户的缓存素材合成，
+    可能与其它用户看到的列表不一致，但保留刷新封面以便更新展示图。
+    """
     library_id = vlib.id
     logger.info(
         f"VLIB_REFRESH START vlib={library_id} name='{vlib.name}' "
@@ -1007,7 +1017,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
         await _notify_proxy_refresh_cache(library_id, user_ids=target_users, server_id=server_id)
 
     await _regenerate_cover_for_vlib(vlib, server_id=server_id)
-    logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}'")
+    logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}' type={vlib.resource_type}")
 
 
 
@@ -1380,7 +1390,7 @@ async def refresh_library_cover(library_id: str):
 
 @api_router.post("/libraries/{library_id}/refresh-data", status_code=202, tags=["Libraries"])
 async def refresh_library_data(library_id: str):
-    """Refresh data for a single virtual library, then regenerate its cover."""
+    """Refresh virtual library item cache, then regenerate its cover (random: cover uses one cache user’s items)."""
     logger.info(f"API refresh_library_data called for library_id={library_id}")
     config = config_manager.load_config()
     raw = config_manager.load_config(apply_active_profile=False)

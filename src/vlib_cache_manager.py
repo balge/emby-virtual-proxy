@@ -513,7 +513,13 @@ async def refresh_vlib_cache(
         if vlib.resource_type == "random":
             base = config.emby_url.rstrip("/")
             slimmed = await populate_random_vlib_items(
-                vlib, config, session, user_id, base, headers=dict(headers)
+                vlib,
+                config,
+                session,
+                user_id,
+                base,
+                headers=dict(headers),
+                server_id=server_id,
             )
             logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
             return len(slimmed)
