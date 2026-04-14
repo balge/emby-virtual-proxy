@@ -94,10 +94,37 @@ class WebhookSettings(BaseModel):
     delay_seconds: int = Field(default=0)  # 延迟合并窗口（秒），默认0立即刷新
 
 
-class AppConfig(BaseModel):
+class EmbyServerConfig(BaseModel):
+    """
+    One upstream Emby server + one proxy listen port.
+
+    Notes:
+    - proxy_port is the port clients connect to on the proxy container/host.
+      Docker publish (compose ports) must include the same port mapping manually.
+    """
+
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str = Field(default="Emby")
     emby_url: str = Field(default="http://127.0.0.1:8096")
     emby_api_key: Optional[str] = Field(default="")
-    emby_server_id: Optional[str] = Field(default=None) # 新增：用于TMDB缓存占位符的备用服务器ID
+    enabled: bool = Field(default=True)
+    proxy_port: int = Field(default=8999)
+    # Optional: used by TMDB/RSS placeholders in some paths; kept for compatibility.
+    emby_server_id: Optional[str] = Field(default=None)
+    # Per-server scoped settings/profile (payload dict for backward-compatible gradual rollout)
+    profile: dict = Field(default_factory=dict)
+
+
+class AppConfig(BaseModel):
+    # ---- Legacy single-server fields (migrated into servers[] on load) ----
+    emby_url: Optional[str] = Field(default=None)
+    emby_api_key: Optional[str] = Field(default=None)
+    emby_server_id: Optional[str] = Field(default=None)  # legacy fallback server_id
+
+    # ---- Multi-server ----
+    servers: List[EmbyServerConfig] = Field(default_factory=list)
+    admin_active_server_id: Optional[str] = Field(default=None)
+
     log_level: Literal["debug", "info", "warn", "error"] = Field(default="info")
     # 代理是否缓存部分 Emby JSON（GET）；关闭后直连 Emby、不写入 api_cache
     enable_cache: bool = Field(default=True)
@@ -155,6 +182,175 @@ class AppConfig(BaseModel):
         populate_by_name = True
         # 兼容旧配置文件中的未知字段
         extra = "ignore"
+
+    def ensure_servers_migrated(self) -> None:
+        """
+        In-place migrate legacy single-server fields into servers[].
+        Safe to call multiple times.
+        """
+        if self.servers:
+            # Ensure admin_active_server_id is set to an existing enabled server.
+            if not self.admin_active_server_id:
+                first_enabled = next((s for s in self.servers if s.enabled), None)
+                self.admin_active_server_id = first_enabled.id if first_enabled else self.servers[0].id
+            self._ensure_server_profiles_initialized()
+            # Keep legacy single-server fields in sync with current admin selection
+            active = self._select_active_server_no_ensure()
+            if active:
+                self.emby_url = active.emby_url
+                self.emby_api_key = active.emby_api_key
+                self.emby_server_id = active.emby_server_id or self.emby_server_id
+            # Project current active server profile into legacy top-level fields so old code keeps working.
+            self.sync_active_profile_to_legacy(active)
+            return
+
+        # Build server[0] from legacy fields (or defaults).
+        url = (self.emby_url or "http://127.0.0.1:8096").strip()
+        key = (self.emby_api_key or "").strip()
+        s = EmbyServerConfig(
+            name="Emby",
+            emby_url=url,
+            emby_api_key=key,
+            enabled=True,
+            proxy_port=8999,
+            emby_server_id=self.emby_server_id,
+        )
+        self.servers = [s]
+        self.admin_active_server_id = s.id
+        self._ensure_server_profiles_initialized()
+        # Sync legacy fields for old code paths
+        self.emby_url = s.emby_url
+        self.emby_api_key = s.emby_api_key
+        self.emby_server_id = s.emby_server_id or self.emby_server_id
+        self.sync_active_profile_to_legacy(s)
+
+    def _select_active_server_no_ensure(self) -> Optional[EmbyServerConfig]:
+        if not self.servers:
+            return None
+        if self.admin_active_server_id:
+            found = next((s for s in self.servers if s.id == self.admin_active_server_id), None)
+            if found:
+                return found
+        return next((s for s in self.servers if s.enabled), self.servers[0])
+
+    def _profile_snapshot_from_legacy(self) -> dict:
+        return {
+            "enable_cache": self.enable_cache,
+            "display_order": list(self.display_order or []),
+            "ignore_libraries": list(self.ignore_libraries or []),
+            "real_libraries": [rl.model_dump() for rl in (self.real_libraries or [])],
+            "real_library_cover_cron": self.real_library_cover_cron,
+            "hide": list(self.hide or []),
+            "library": [v.model_dump() for v in (self.virtual_libraries or [])],
+            "default_cover_style": self.default_cover_style,
+            "show_missing_episodes": self.show_missing_episodes,
+            "cache_refresh_interval": self.cache_refresh_interval,
+            "webhook": self.webhook.model_dump() if self.webhook else {},
+            "force_merge_by_tmdb_id": self.force_merge_by_tmdb_id,
+        }
+
+    def _default_profile_template(self) -> dict:
+        return {
+            "enable_cache": True,
+            "display_order": [],
+            "ignore_libraries": [],
+            "real_libraries": [],
+            "real_library_cover_cron": None,
+            "hide": [],
+            "library": [],
+            "default_cover_style": "style_multi_1",
+            "show_missing_episodes": False,
+            "cache_refresh_interval": 12,
+            "webhook": WebhookSettings().model_dump(),
+            "force_merge_by_tmdb_id": False,
+        }
+
+    def _ensure_server_profiles_initialized(self) -> None:
+        base = self._default_profile_template()
+        for s in self.servers:
+            if not isinstance(s.profile, dict):
+                s.profile = {}
+            for k, v in base.items():
+                if k not in s.profile:
+                    s.profile[k] = v
+
+    def sync_active_profile_to_legacy(self, active: Optional[EmbyServerConfig] = None) -> None:
+        """
+        Load active server scoped settings into legacy top-level fields.
+        This keeps old call sites and APIs working while introducing per-server profiles.
+        """
+        if active is None:
+            # Avoid recursion: do not call ensure_servers_migrated() here.
+            active = self._select_active_server_no_ensure()
+        if not active or not isinstance(active.profile, dict):
+            return
+        p = {**self._default_profile_template(), **active.profile}
+        self.enable_cache = bool(p.get("enable_cache", self.enable_cache))
+        self.display_order = list(p.get("display_order", self.display_order or []))
+        self.ignore_libraries = list(p.get("ignore_libraries", self.ignore_libraries or []))
+        self.real_libraries = [
+            RealLibraryConfig.model_validate(x) for x in (p.get("real_libraries") or [])
+        ]
+        self.real_library_cover_cron = p.get("real_library_cover_cron", self.real_library_cover_cron)
+        self.hide = list(p.get("hide", self.hide or []))
+        self.virtual_libraries = [
+            VirtualLibrary.model_validate(x) for x in (p.get("library") or p.get("virtual_libraries") or [])
+        ]
+        self.default_cover_style = p.get("default_cover_style", self.default_cover_style)
+        self.show_missing_episodes = bool(p.get("show_missing_episodes", self.show_missing_episodes))
+        self.cache_refresh_interval = p.get("cache_refresh_interval", self.cache_refresh_interval)
+        self.webhook = WebhookSettings.model_validate(p.get("webhook") or self.webhook.model_dump())
+        self.force_merge_by_tmdb_id = bool(p.get("force_merge_by_tmdb_id", self.force_merge_by_tmdb_id))
+
+    def sync_legacy_to_active_profile(self) -> None:
+        """
+        Save current top-level (legacy) settings into active server profile.
+        Call this before save_config.
+        """
+        self.ensure_servers_migrated()
+        active = self._select_active_server_no_ensure()
+        if not active:
+            return
+        active.profile = self._profile_snapshot_from_legacy()
+
+    def get_admin_active_server(self) -> Optional[EmbyServerConfig]:
+        self.ensure_servers_migrated()
+        return self._select_active_server_no_ensure()
+
+    def get_server_by_proxy_port(self, port: int) -> Optional[EmbyServerConfig]:
+        self.ensure_servers_migrated()
+        return next((s for s in self.servers if int(s.proxy_port) == int(port) and s.enabled), None)
+
+    def get_server_by_id(self, server_id: str) -> Optional[EmbyServerConfig]:
+        self.ensure_servers_migrated()
+        sid = str(server_id)
+        return next((s for s in self.servers if str(s.id) == sid), None)
+
+    def get_server_profile(self, server_id: str) -> dict:
+        server = self.get_server_by_id(server_id)
+        if not server:
+            return self._default_profile_template()
+        p = server.profile if isinstance(server.profile, dict) else {}
+        return {**self._default_profile_template(), **p}
+
+    def set_server_profile(self, server_id: str, profile: dict) -> bool:
+        server = self.get_server_by_id(server_id)
+        if not server:
+            return False
+        merged = {**self._default_profile_template(), **(profile or {})}
+        server.profile = merged
+        return True
+
+    def list_enabled_proxy_ports(self) -> List[int]:
+        self.ensure_servers_migrated()
+        ports: List[int] = []
+        for s in self.servers:
+            if not s.enabled:
+                continue
+            p = int(s.proxy_port)
+            if p not in ports:
+                ports.append(p)
+        return ports
 
     @property
     def disabled_library_ids(self) -> set:

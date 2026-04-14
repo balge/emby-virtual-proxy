@@ -70,6 +70,11 @@ async def resolve_emby_user_id(
     return None
 
 
+def _server_bucket_id(server_id: Optional[str]) -> str:
+    s = (server_id or "").strip()
+    return s if s else "default"
+
+
 # ---------------------------------------------------------------------------
 # Fields to request from Emby (superset for poster wall + filter + sort)
 # ---------------------------------------------------------------------------
@@ -161,6 +166,7 @@ async def populate_random_vlib_items(
     *,
     headers: Dict[str, str],
     query_emby_token: Optional[str] = None,
+    server_id: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     未播池 + 播放偏好加权 + 电影/剧集各 15 条共 30 条，slim 后写入磁盘缓存。
@@ -175,7 +181,7 @@ async def populate_random_vlib_items(
         source_libs = [lid for lid in source_libs if lid not in ignore_set]
     if not source_libs:
         try:
-            real_libs = await get_real_libraries_hybrid_mode()
+            real_libs = await get_real_libraries_hybrid_mode(config=config)
             source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
         except Exception as e:
             logger.error(f"Random: failed to fetch real libraries: {e}")
@@ -244,7 +250,7 @@ async def populate_random_vlib_items(
 
     slimmed = slim_items(all_items)
     if slimmed:
-        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
+        vlib_items_cache.set_for_user(_server_bucket_id(server_id), user_id, vlib.id, slimmed)
     return slimmed
 
 
@@ -325,11 +331,11 @@ def _apply_custom_sort(items: List[Dict], sort_field: str, sort_order: str) -> L
     def sort_key(item):
         val = _get_value_for_rule(item, sort_field)
         if val is None:
-            return (1, "")
+            return (2, "")
         try:
             return (0, float(val))
         except (ValueError, TypeError):
-            return (0, str(val))
+            return (1, str(val))
     items.sort(key=sort_key, reverse=reverse)
     return items
 
@@ -478,10 +484,11 @@ async def refresh_vlib_cache(
     *,
     session: aiohttp.ClientSession | None = None,
     user_id: str | None = None,
+    server_id: str | None = None,
 ) -> int:
     """
     Fetch complete item list from Emby for the given user, slim, store on disk
-    under config/vlib/users/{user_id}/{vlib_id}/. Runs inside proxy process.
+    under config/vlib/servers/{server_id}/users/{user_id}/{vlib_id}/. Runs inside proxy process.
     Returns item count (0 if skipped/failed).
     """
     if vlib.resource_type == "rsshub":
@@ -506,7 +513,13 @@ async def refresh_vlib_cache(
         if vlib.resource_type == "random":
             base = config.emby_url.rstrip("/")
             slimmed = await populate_random_vlib_items(
-                vlib, config, session, user_id, base, headers=dict(headers)
+                vlib,
+                config,
+                session,
+                user_id,
+                base,
+                headers=dict(headers),
+                server_id=server_id,
             )
             logger.info(f"Cache refreshed (random) for '{vlib.name}': {len(slimmed)} items")
             return len(slimmed)
@@ -550,7 +563,7 @@ async def refresh_vlib_cache(
 
         if vlib.resource_type == "all" and ignore_set and not source_libs:
             try:
-                real_libs = await get_real_libraries_hybrid_mode()
+                real_libs = await get_real_libraries_hybrid_mode(config=config)
                 source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
             except Exception as e:
                 logger.error(f"Failed to fetch real libraries: {e}")
@@ -584,7 +597,7 @@ async def refresh_vlib_cache(
                     # 默认按「最近媒体入库」降序，与 DateLastMediaAdded 规则语义一致。
                     _apply_custom_sort(all_items, "DateLastMediaAdded", "desc")
                 slimmed = slim_items(all_items)
-                vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
+                vlib_items_cache.set_for_user(_server_bucket_id(server_id), user_id, vlib.id, slimmed)
                 logger.info(f"Cache refreshed (DLA) for '{vlib.name}': {len(slimmed)} items")
                 return len(slimmed)
 
@@ -630,7 +643,7 @@ async def refresh_vlib_cache(
             _apply_custom_sort(all_items, custom_sort_field, custom_sort_order)
 
         slimmed = slim_items(all_items)
-        vlib_items_cache.set_for_user(user_id, vlib.id, slimmed)
+        vlib_items_cache.set_for_user(_server_bucket_id(server_id), user_id, vlib.id, slimmed)
         logger.info(f"Cache refreshed for '{vlib.name}': {len(slimmed)} items")
         return len(slimmed)
 

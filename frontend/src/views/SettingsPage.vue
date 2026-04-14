@@ -27,18 +27,29 @@
         </h2>
         <div class="space-y-4">
           <BaseInput
-            v-model="store.config.emby_url"
+            v-if="store.activeServer"
+            v-model="store.activeServer.emby_url"
             label="Emby 服务器地址"
             placeholder="http://192.168.1.10:8096"
             hint="如果使用了302，请填写302地址。"
           />
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div
+            v-if="store.activeServer"
+            class="grid grid-cols-1 md:grid-cols-2 gap-4"
+          >
             <BaseInput
-              v-model="store.config.emby_api_key"
+              v-model="store.activeServer.emby_api_key"
               label="Emby API 密钥"
               type="password"
               placeholder="API Key"
               hint="在 Emby 后台 → API 密钥中生成。"
+            />
+            <BaseInput
+              v-model="store.activeServer.proxy_port"
+              label="代理端口（对外访问）"
+              type="number"
+              placeholder="8999"
+              hint='需同时在 docker-compose.yml 中手动映射该端口（例如 "9000:9000"），否则外部客户端无法访问。保存后需重启生效。'
             />
             <BaseInput
               v-model="store.config.tmdb_api_key"
@@ -173,7 +184,7 @@
           <BaseSwitch v-model="store.config.webhook.enabled" />
         </div>
         <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
-          库变更后自动刷新关联的虚拟库。仅对「全部媒体库」类型且做了源库限定的虚拟库生效。
+          每个 Emby 服务器独立 Webhook 配置与 token。token 为必填且全局不可重复，事件只作用于该 token 对应服务器。
         </p>
         <template v-if="store.config.webhook.enabled">
           <div class="space-y-4">
@@ -186,9 +197,11 @@
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
               <BaseInput
                 v-model="store.config.webhook.secret"
-                label="密钥（可选）"
+                label="Webhook Token"
                 type="password"
-                placeholder="留空则不校验"
+                required
+                placeholder="必填，且与其它服务器不能重复"
+                hint="支持从 X-Webhook-Secret、Authorization: Bearer 或 ?token= 读取。"
               />
               <div>
                 <label
@@ -208,6 +221,12 @@
                 </p>
               </div>
             </div>
+            <p
+              v-if="webhookTokenError"
+              class="text-xs text-red-600 dark:text-red-400"
+            >
+              {{ webhookTokenError }}
+            </p>
           </div>
         </template>
       </section>
@@ -274,6 +293,22 @@ const webhookCallbackUrl = computed(() =>
     ? `${window.location.origin}/api/webhook/emby`
     : "",
 );
+
+const webhookTokenError = computed(() => {
+  if (!store.config?.webhook?.enabled) return "";
+  const active = store.activeServer;
+  const token = String(store.config?.webhook?.secret || "").trim();
+  if (!token) return "当前服务器已启用 Webhook，Token 必填。";
+  const duplicate = (store.config?.servers || []).some((s) => {
+    if (String(s?.id) === String(active?.id)) return false;
+    const p = s?.profile || {};
+    const w = p?.webhook || {};
+    if (w?.enabled !== true) return false;
+    return String(w?.secret || "").trim() === token;
+  });
+  if (duplicate) return "Token 与其它已启用服务器重复，请更换。";
+  return "";
+});
 
 const collectionTypes = [
   { value: "movies", label: "电影" },

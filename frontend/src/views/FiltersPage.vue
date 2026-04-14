@@ -14,6 +14,12 @@
         <BaseButton variant="primary" @click="openAdd">新增筛选器</BaseButton>
       </div>
     </div>
+    <div
+      class="mb-4 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-800 dark:bg-blue-950/30 dark:text-blue-200"
+    >
+      候选项来自当前服务器：<span class="font-semibold">{{ activeServerName }}</span>
+      （工作室/类型/标签下拉会随服务器切换自动刷新）
+    </div>
 
     <!-- Empty -->
     <div v-if="!filters.length" class="text-center py-20">
@@ -309,7 +315,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onMounted } from "vue";
+import { ref, computed, reactive, onMounted, watch } from "vue";
 import {
   FunnelIcon,
   XMarkIcon,
@@ -329,6 +335,7 @@ import ConfirmPopover from "@/components/ui/ConfirmPopover.vue";
 
 const store = useMainStore();
 const toast = useToast();
+const activeServerName = computed(() => store.activeServer?.name || "未选择");
 const filters = computed(() => store.config.advanced_filters || []);
 
 const editVisible = ref(false);
@@ -560,4 +567,12 @@ const deleteFilter = async (id) => {
 onMounted(() => {
   if (!store.dataStatus) store.fetchAllInitialData();
 });
+
+watch(
+  () => store.config.admin_active_server_id,
+  async () => {
+    // Keep rule candidate dropdowns in sync with current server context.
+    await store.refreshClassificationsOnly();
+  },
+);
 </script>

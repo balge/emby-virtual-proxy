@@ -37,6 +37,9 @@ SORT_FIELD_MAP: Dict[str, str] = {
     "DateLastContentAdded": "DateLastMediaAdded",
 }
 
+NUMERIC_SORT_FIELDS = {"ProductionYear", "CommunityRating"}
+DATETIME_SORT_FIELDS = {"DateCreated", "PremiereDate", "DatePlayed", "DateLastMediaAdded"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,11 +229,11 @@ def _apply_custom_sort(items: List[Dict[str, Any]], sort_field: str, sort_order:
     def sort_key(item):
         val = _get_value_for_rule(item, sort_field)
         if val is None:
-            return (1, "")
+            return (2, "")
         try:
             return (0, float(val))
         except (ValueError, TypeError):
-            return (0, str(val))
+            return (1, str(val))
 
     items.sort(key=sort_key, reverse=reverse)
     return items
@@ -246,17 +249,27 @@ def _apply_client_sort(items: List[Dict[str, Any]], request: Request):
     sort_order = request.query_params.get("SortOrder", "Ascending")
     primary_sort = sort_by.split(",")[0] if sort_by else "SortName"
     reverse = sort_order.startswith("Descending")
-    if primary_sort == "DateLastContentAdded":
-        # Keep behavior consistent with rule filtering/sorting:
-        # Series use DateLastMediaAdded (fallback DateCreated), movies use DateCreated.
-        items.sort(
-            key=lambda x: (_get_value_for_rule(x, "DateLastMediaAdded") or ""),
-            reverse=reverse,
-        )
-        return
-
     emby_field = SORT_FIELD_MAP.get(primary_sort, "SortName")
-    items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+    def _sort_key(item: Dict[str, Any]) -> Tuple[int, Any]:
+        # Keep DateLastContentAdded behavior consistent with rule filtering/sorting:
+        # Series use DateLastMediaAdded (fallback DateCreated), movies use DateCreated.
+        raw = _get_value_for_rule(item, "DateLastMediaAdded") if emby_field == "DateLastMediaAdded" else item.get(emby_field)
+        if raw is None or raw == "":
+            return (2, "")
+        if emby_field in NUMERIC_SORT_FIELDS:
+            try:
+                return (0, float(raw))
+            except (TypeError, ValueError):
+                return (1, str(raw).lower())
+        if emby_field in DATETIME_SORT_FIELDS:
+            dt = _parse_iso_dt(raw)
+            if dt is not None:
+                return (0, dt.timestamp())
+            return (1, str(raw).lower())
+        return (0, str(raw).lower())
+
+    items.sort(key=_sort_key, reverse=reverse)
 
 
 def _make_page_response(items: List[Dict[str, Any]], start_idx: int, limit_count: int) -> Response:
@@ -318,6 +331,7 @@ async def _populate_random_vlib_cache(
 
     headers = _build_headers_to_forward(request)
     token = request.query_params.get("X-Emby-Token")
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     return await populate_random_vlib_items(
         found_vlib,
         config,
@@ -326,6 +340,7 @@ async def _populate_random_vlib_cache(
         real_emby_url.rstrip("/"),
         headers=headers,
         query_emby_token=token,
+        server_id=server_id,
     )
 
 
@@ -337,8 +352,9 @@ async def _handle_random_library(
 ) -> Response:
     """Handle 'random' type virtual library."""
     ttl = effective_cache_ttl_seconds(found_vlib, config)
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     cached = vlib_items_cache.get_for_user(
-        user_id, found_vlib.id, max_age_seconds=ttl
+        server_id, user_id, found_vlib.id, max_age_seconds=ttl
     )
     if cached is not None:
         logger.info(f"Random '{found_vlib.name}': cache HIT for user {user_id}")
@@ -442,8 +458,9 @@ async def handle_virtual_library_items(
     limit_count = int(params.get("Limit", 50))
 
     ttl = effective_cache_ttl_seconds(found_vlib, config)
+    server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
     cached_items = vlib_items_cache.get_for_user(
-        user_id, found_vlib.id, max_age_seconds=ttl
+        server_id, user_id, found_vlib.id, max_age_seconds=ttl
     )
     if cached_items is not None:
         logger.info(f"Cache HIT '{found_vlib.name}' user={user_id}: {len(cached_items)} items")
@@ -454,9 +471,9 @@ async def handle_virtual_library_items(
     # Cache MISS: fetch on demand via cache manager (per-user on-disk cache)
     logger.info(f"Cache MISS '{found_vlib.name}' user={user_id}, fetching from Emby...")
     from vlib_cache_manager import refresh_vlib_cache
-    await refresh_vlib_cache(found_vlib, config, user_id=user_id)
+    await refresh_vlib_cache(found_vlib, config, user_id=user_id, server_id=server_id)
 
-    cached_items = vlib_items_cache.get_for_user(user_id, found_vlib.id)
+    cached_items = vlib_items_cache.get_for_user(server_id, user_id, found_vlib.id)
     if cached_items is not None:
         items = list(cached_items)
         _apply_client_sort(items, request)

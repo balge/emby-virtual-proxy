@@ -63,8 +63,9 @@ async def handle_home_latest_items(
     if found_vlib.resource_type == 'random':
         from proxy_cache import vlib_items_cache
         ttl = effective_cache_ttl_seconds(found_vlib, config)
+        server_id = getattr(getattr(request, "state", None), "server_id", None) or "default"
         cached = vlib_items_cache.get_for_user(
-            user_id, found_vlib.id, max_age_seconds=ttl
+            server_id, user_id, found_vlib.id, max_age_seconds=ttl
         )
         if cached is None:
             headers = _build_headers_to_forward(request)
@@ -77,6 +78,7 @@ async def handle_home_latest_items(
                 real_emby_url.rstrip("/"),
                 headers=headers,
                 query_emby_token=token,
+                server_id=server_id,
             )
         limit = int(params.get("Limit", 20))
         items = (cached or [])[:limit]
@@ -138,8 +140,16 @@ async def handle_home_latest_items(
         logger.info(f"HOME_LATEST: Cover missing for vlib '{found_vlib.name}' ({found_vlib.id}), triggering auto-generation.")
         if found_vlib.id not in handler_autogen.GENERATION_IN_PROGRESS:
             api_key = params.get("X-Emby-Token") or config.emby_api_key
+            server_id_ctx = getattr(getattr(request, "state", None), "server_id", None)
             if user_id and api_key:
-                asyncio.create_task(handler_autogen.generate_poster_in_background(found_vlib.id, user_id, api_key))
+                asyncio.create_task(
+                    handler_autogen.generate_poster_in_background(
+                        found_vlib.id,
+                        user_id,
+                        api_key,
+                        server_id=server_id_ctx,
+                    )
+                )
 
     new_params = {}
     safe_params_to_inherit = ["Fields", "IncludeItemTypes", "EnableImageTypes", "ImageTypeLimit", "X-Emby-Token", "EnableUserData", "Limit", "ParentId"]
@@ -202,7 +212,7 @@ async def handle_home_latest_items(
 
     if found_vlib.resource_type == "all" and ignore_set and not effective_source_libs:
         try:
-            real_libs = await get_real_libraries_hybrid_mode()
+            real_libs = await get_real_libraries_hybrid_mode(config=config)
             effective_source_libs = [lib["Id"] for lib in real_libs if lib["Id"] not in ignore_set]
         except Exception as e:
             logger.error(f"Failed to fetch real libraries for ignore filtering: {e}")
