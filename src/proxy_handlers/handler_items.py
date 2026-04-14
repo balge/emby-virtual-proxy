@@ -37,6 +37,9 @@ SORT_FIELD_MAP: Dict[str, str] = {
     "DateLastContentAdded": "DateLastMediaAdded",
 }
 
+NUMERIC_SORT_FIELDS = {"ProductionYear", "CommunityRating"}
+DATETIME_SORT_FIELDS = {"DateCreated", "PremiereDate", "DatePlayed", "DateLastMediaAdded"}
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -226,11 +229,11 @@ def _apply_custom_sort(items: List[Dict[str, Any]], sort_field: str, sort_order:
     def sort_key(item):
         val = _get_value_for_rule(item, sort_field)
         if val is None:
-            return (1, "")
+            return (2, "")
         try:
             return (0, float(val))
         except (ValueError, TypeError):
-            return (0, str(val))
+            return (1, str(val))
 
     items.sort(key=sort_key, reverse=reverse)
     return items
@@ -246,17 +249,27 @@ def _apply_client_sort(items: List[Dict[str, Any]], request: Request):
     sort_order = request.query_params.get("SortOrder", "Ascending")
     primary_sort = sort_by.split(",")[0] if sort_by else "SortName"
     reverse = sort_order.startswith("Descending")
-    if primary_sort == "DateLastContentAdded":
-        # Keep behavior consistent with rule filtering/sorting:
-        # Series use DateLastMediaAdded (fallback DateCreated), movies use DateCreated.
-        items.sort(
-            key=lambda x: (_get_value_for_rule(x, "DateLastMediaAdded") or ""),
-            reverse=reverse,
-        )
-        return
-
     emby_field = SORT_FIELD_MAP.get(primary_sort, "SortName")
-    items.sort(key=lambda x: (x.get(emby_field) or ""), reverse=reverse)
+
+    def _sort_key(item: Dict[str, Any]) -> Tuple[int, Any]:
+        # Keep DateLastContentAdded behavior consistent with rule filtering/sorting:
+        # Series use DateLastMediaAdded (fallback DateCreated), movies use DateCreated.
+        raw = _get_value_for_rule(item, "DateLastMediaAdded") if emby_field == "DateLastMediaAdded" else item.get(emby_field)
+        if raw is None or raw == "":
+            return (2, "")
+        if emby_field in NUMERIC_SORT_FIELDS:
+            try:
+                return (0, float(raw))
+            except (TypeError, ValueError):
+                return (1, str(raw).lower())
+        if emby_field in DATETIME_SORT_FIELDS:
+            dt = _parse_iso_dt(raw)
+            if dt is not None:
+                return (0, dt.timestamp())
+            return (1, str(raw).lower())
+        return (0, str(raw).lower())
+
+    items.sort(key=_sort_key, reverse=reverse)
 
 
 def _make_page_response(items: List[Dict[str, Any]], start_idx: int, limit_count: int) -> Response:

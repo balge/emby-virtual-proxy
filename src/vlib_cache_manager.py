@@ -331,11 +331,11 @@ def _apply_custom_sort(items: List[Dict], sort_field: str, sort_order: str) -> L
     def sort_key(item):
         val = _get_value_for_rule(item, sort_field)
         if val is None:
-            return (1, "")
+            return (2, "")
         try:
             return (0, float(val))
         except (ValueError, TypeError):
-            return (0, str(val))
+            return (1, str(val))
     items.sort(key=sort_key, reverse=reverse)
     return items
 
