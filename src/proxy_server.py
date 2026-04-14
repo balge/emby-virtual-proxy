@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 import aiohttp
 from http_client import create_client_session
@@ -157,14 +158,41 @@ async def internal_list_vlib_cache_user_ids(request: Request, library_id: str):
     return JSONResponse(content={"vlib_id": library_id, "user_ids": uids})
 
 
+def _client_host_for_trust(request: Request) -> str:
+    """
+    Starlette may report IPv4-mapped IPv6 loopback as ::ffff:127.0.0.1; normalize for trust checks.
+    """
+    host = request.client.host if request.client else ""
+    if not host:
+        return ""
+    host = str(host).strip()
+    if host.startswith("::ffff:"):
+        return host[7:]
+    return host
+
+
+def _is_loopback_client(host: str) -> bool:
+    return host in ("127.0.0.1", "::1")
+
+
 def _allow_internal_cache_invalidate(request: Request) -> bool:
+    """
+    - No INTERNAL_CACHE_TOKEN: only loopback (127.0.0.1 / ::1, incl. ::ffff:127.0.0.1).
+    - Token set: valid X-Internal-Token OR loopback (same-container admin 常未带头也能失效缓存).
+    """
+    host = _client_host_for_trust(request)
+    loopback = _is_loopback_client(host)
+
     token = os.environ.get("INTERNAL_CACHE_TOKEN", "").strip()
     if token:
-        return request.headers.get("x-internal-token", "").strip() == token
+        header = (request.headers.get("x-internal-token") or "").strip()
+        if header and len(header) == len(token) and secrets.compare_digest(header, token):
+            return True
+        if loopback:
+            return True
+        return False
 
-    # Default: only allow from localhost (typical admin->proxy within the same container)
-    client_host = request.client.host if request.client else ""
-    return client_host in ("127.0.0.1", "::1")
+    return loopback
 
 
 @proxy_app.post("/api/internal/invalidate-vlib-cache/{library_id}")
