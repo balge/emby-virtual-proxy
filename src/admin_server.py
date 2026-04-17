@@ -660,6 +660,40 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
         logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
 
 
+def _list_rsshub_emby_item_ids(library_id: str, limit: int = 200) -> list[str]:
+    """
+    从 rss_library_items.db 读取 RSSHub 虚拟库中已匹配到 Emby 的条目 ID（按新到旧）。
+    这些 ID 可直接用于 /emby/Items/{id}/Images/Primary 下载封面，不依赖 vlib_items_cache。
+    """
+    try:
+        if not RSS_LIBRARY_ITEMS_DB.is_file():
+            return []
+        db = DBManager(RSS_LIBRARY_ITEMS_DB)
+        rows = db.fetchall(
+            """
+            SELECT emby_item_id
+            FROM rss_library_items
+            WHERE library_id = ?
+              AND emby_item_id IS NOT NULL
+              AND TRIM(emby_item_id) <> ''
+            ORDER BY rowid DESC
+            LIMIT ?
+            """,
+            (library_id, int(limit)),
+        )
+        ids: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            iid = str(row["emby_item_id"]).strip()
+            if iid and iid not in seen:
+                seen.add(iid)
+                ids.append(iid)
+        return ids
+    except Exception as e:
+        logger.warning("Read rss_library_items failed for vlib=%s: %s", library_id, e)
+        return []
+
+
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
 async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig, server_id: Optional[str] = None):
     """
@@ -668,61 +702,85 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
     Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前 9 条导致刷新封面变化不大。
     """
     scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
-    cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
-    cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
-    if not cache_uid:
-        logger.warning(
-            "COVER_FETCH failed: no cache user resolved "
-            "server_id=%s vlib=%s cache_user_ids=%s",
-            resolved_sid,
-            library_id,
-            cache_user_ids,
-        )
-        raise HTTPException(
-            status_code=404,
-            detail="No cached items found for this virtual library. Please refresh data first.",
-        )
-    logger.info(
-        "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
-        resolved_sid,
-        library_id,
-        cache_uid,
-        cache_user_ids,
-        (scoped_cfg.emby_url or "").rstrip("/"),
-    )
-
-    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=resolved_sid)
-    if not items:
-        logger.warning(
-            "COVER_FETCH failed: cached items empty "
-            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s",
-            resolved_sid,
-            library_id,
-            cache_uid,
-            cache_user_ids,
-        )
-        raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
-
-    items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
-
-    if not items_with_images:
-        logger.warning(
-            "COVER_FETCH failed: cached items without primary images "
-            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s items=%s",
-            resolved_sid,
-            library_id,
-            cache_uid,
-            cache_user_ids,
-            len(items),
-        )
-        raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
-
     vlib_meta = next((v for v in scoped_cfg.virtual_libraries if v.id == library_id), None)
-    if vlib_meta and vlib_meta.resource_type == "random":
-        k = min(9, len(items_with_images))
-        selected_items = random.sample(items_with_images, k)
+    selected_items: list[dict]
+    if vlib_meta and vlib_meta.resource_type == "rsshub":
+        # RSSHub 数据不走 vlib_items_cache，而是保存在 rss_library_items.db。
+        # 这里直接使用已匹配到 Emby 的 item id 作为封面素材来源。
+        rss_item_ids = _list_rsshub_emby_item_ids(library_id)
+        if not rss_item_ids:
+            logger.warning(
+                "COVER_FETCH failed: rsshub emby ids empty server_id=%s vlib=%s",
+                resolved_sid,
+                library_id,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="No matched Emby items found for this RSS library. Please refresh RSS data first.",
+            )
+        selected_ids = rss_item_ids[:9]
+        selected_items = [{"Id": iid} for iid in selected_ids]
+        logger.info(
+            "COVER_FETCH rsshub source server_id=%s vlib=%s candidates=%s selected=%s",
+            resolved_sid,
+            library_id,
+            len(rss_item_ids),
+            len(selected_items),
+        )
     else:
-        selected_items = items_with_images[:9]
+        cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
+        cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
+        if not cache_uid:
+            logger.warning(
+                "COVER_FETCH failed: no cache user resolved "
+                "server_id=%s vlib=%s cache_user_ids=%s",
+                resolved_sid,
+                library_id,
+                cache_user_ids,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="No cached items found for this virtual library. Please refresh data first.",
+            )
+        logger.info(
+            "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
+            resolved_sid,
+            library_id,
+            cache_uid,
+            cache_user_ids,
+            (scoped_cfg.emby_url or "").rstrip("/"),
+        )
+
+        items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=resolved_sid)
+        if not items:
+            logger.warning(
+                "COVER_FETCH failed: cached items empty "
+                "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s",
+                resolved_sid,
+                library_id,
+                cache_uid,
+                cache_user_ids,
+            )
+            raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
+
+        items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
+        if not items_with_images:
+            logger.warning(
+                "COVER_FETCH failed: cached items without primary images "
+                "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s items=%s",
+                resolved_sid,
+                library_id,
+                cache_uid,
+                cache_user_ids,
+                len(items),
+            )
+            raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
+
+        if vlib_meta and vlib_meta.resource_type == "random":
+            k = min(9, len(items_with_images))
+            selected_items = random.sample(items_with_images, k)
+        else:
+            selected_items = items_with_images[:9]
 
     async def download_image(session, item, index):
         image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
