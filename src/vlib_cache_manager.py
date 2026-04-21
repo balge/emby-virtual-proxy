@@ -26,6 +26,7 @@ from proxy_cache import vlib_items_cache, slim_items
 from proxy_handlers._filter_translator import translate_rules
 from proxy_handlers.handler_merger import merge_items_by_tmdb
 from emby_api_client import get_real_libraries_hybrid_mode
+from random_rating_filter import filter_items_by_official_rating_threshold
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,73 @@ async def _fetch_user_genre_preferences(
     except Exception as e:
         logger.warning(f"Failed to fetch user play history: {e}")
     return [g for g, _ in genre_counter.most_common(10)]
+
+
+async def _fetch_official_ratings_order(
+    session: aiohttp.ClientSession,
+    real_emby_url: str,
+    headers: Dict[str, str],
+) -> List[str]:
+    """Read ordered official ratings from Emby /OfficialRatings endpoint."""
+    url = f"{real_emby_url.rstrip('/')}/emby/OfficialRatings"
+    try:
+        async with session.get(
+            url,
+            headers=headers,
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+    except Exception as e:
+        logger.warning("Failed to fetch official ratings: %s", e)
+        return []
+
+    raw_list = data.get("Items", []) if isinstance(data, dict) else data
+    if not isinstance(raw_list, list):
+        return []
+
+    out: List[str] = []
+    for x in raw_list:
+        if isinstance(x, str):
+            s = x.strip()
+        elif isinstance(x, dict):
+            s = str(x.get("Name") or x.get("Id") or "").strip()
+        else:
+            s = ""
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
+async def _apply_official_rating_threshold_if_needed(
+    session: aiohttp.ClientSession,
+    real_emby_url: str,
+    headers: Dict[str, str],
+    vlib: VirtualLibrary,
+    items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    hide_from_rating = (vlib.random_hide_rating_and_above or "").strip()
+    if not hide_from_rating:
+        return items
+
+    ordered_ratings = await _fetch_official_ratings_order(session, real_emby_url, headers)
+    if not ordered_ratings:
+        return items
+
+    filtered = filter_items_by_official_rating_threshold(
+        items,
+        hide_from_rating,
+        ordered_ratings,
+    )
+    logger.info(
+        "Virtual library '%s': rating filter enabled, hide %s and above (%d -> %d)",
+        vlib.name,
+        hide_from_rating,
+        len(items),
+        len(filtered),
+    )
+    return filtered
 
 
 def _weighted_random_select(items: List[Dict], preferred_genres: List[str], count: int) -> List[Dict]:
@@ -223,6 +291,21 @@ async def populate_random_vlib_items(
         ]
         lst.clear()
         lst.extend(deduped)
+
+    all_movies = await _apply_official_rating_threshold_if_needed(
+        session,
+        base,
+        headers,
+        vlib,
+        all_movies,
+    )
+    all_series = await _apply_official_rating_threshold_if_needed(
+        session,
+        base,
+        headers,
+        vlib,
+        all_series,
+    )
 
     target_per_type = 15
     if has_prefs:
@@ -587,6 +670,13 @@ async def refresh_vlib_cache(
                     threshold_dt, source_libs or None,
                     post_filter_rules, filter_match_all,
                 )
+                all_items = await _apply_official_rating_threshold_if_needed(
+                    session,
+                    config.emby_url,
+                    headers,
+                    vlib,
+                    all_items,
+                )
                 if vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id:
                     all_items = await merge_items_by_tmdb(all_items)
                 all_items = _deduplicate(all_items)
@@ -635,6 +725,14 @@ async def refresh_vlib_cache(
         if post_filter_rules:
             from proxy_handlers.handler_items import _apply_post_filter
             all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
+
+        all_items = await _apply_official_rating_threshold_if_needed(
+            session,
+            config.emby_url,
+            headers,
+            vlib,
+            all_items,
+        )
 
         if vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id:
             all_items = await merge_items_by_tmdb(all_items)

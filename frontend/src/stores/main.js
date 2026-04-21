@@ -843,6 +843,7 @@ export const useMainStore = defineStore("main", {
         fallback_tmdb_type: null,
         cache_refresh_interval: null,
         source_libraries: [],
+        random_hide_rating_and_above: null,
       };
       this.dialogVisible = true;
     },
@@ -851,6 +852,8 @@ export const useMainStore = defineStore("main", {
       this.currentLibrary = JSON.parse(JSON.stringify(library));
       if (this.currentLibrary.merge_by_tmdb_id === undefined)
         this.currentLibrary.merge_by_tmdb_id = false;
+      if (this.currentLibrary.random_hide_rating_and_above === undefined)
+        this.currentLibrary.random_hide_rating_and_above = null;
       if (!Array.isArray(this.currentLibrary.resource_ids))
         this.currentLibrary.resource_ids = [];
       if (

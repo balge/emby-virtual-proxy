@@ -58,6 +58,8 @@ class VirtualLibrary(BaseModel):
     merge_by_tmdb_id: bool = Field(default=False)
     order: int = 0
     source_libraries: List[str] = Field(default_factory=list) # 源库范围限制，空列表表示不限制
+    # 虚拟库分级过滤：配置后隐藏该分级及以上内容（基于 Emby /OfficialRatings 顺序）
+    random_hide_rating_and_above: Optional[str] = Field(default=None)
     conditions: Optional[list] = None
     cover_custom_zh_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义中文字体
     cover_custom_en_font_path: Optional[str] = Field(default=None) # <-- 【新增】海报自定义英文字体

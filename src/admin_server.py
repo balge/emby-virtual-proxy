@@ -1931,6 +1931,19 @@ async def get_emby_classifications():
     def format_items(items_list: List) -> List:
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
+    def format_rating_items(items_list: List) -> List:
+        out = []
+        for item in items_list or []:
+            if isinstance(item, str):
+                s = item.strip()
+                if s:
+                    out.append({"name": s, "id": s})
+            elif isinstance(item, dict):
+                s = str(item.get("Name") or item.get("Id") or "").strip()
+                if s:
+                    out.append({"name": s, "id": s})
+        return out
+
     scoped, _sid = _load_server_scoped_config()
     try:
         tasks = {
@@ -1938,11 +1951,20 @@ async def get_emby_classifications():
             "genres": fetch_from_emby("/Genres", config=scoped),
             "tags": fetch_from_emby("/Tags", config=scoped),
             "studios": fetch_from_emby("/Studios", config=scoped),
+            "official_ratings": fetch_from_emby("/OfficialRatings", config=scoped),
         }
         results_list = await asyncio.gather(*tasks.values())
         results_dict = dict(zip(tasks.keys(), results_list))
         results_dict["persons"] = []
-        return {key: format_items(value) for key, value in results_dict.items()}
+
+        return {
+            "collections": format_items(results_dict["collections"]),
+            "genres": format_items(results_dict["genres"]),
+            "tags": format_items(results_dict["tags"]),
+            "studios": format_items(results_dict["studios"]),
+            "persons": [],
+            "official_ratings": format_rating_items(results_dict.get("official_ratings") or []),
+        }
     except HTTPException as e:
         raise e
 
