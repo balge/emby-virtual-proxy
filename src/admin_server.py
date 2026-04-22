@@ -1933,9 +1933,11 @@ async def get_emby_classifications():
 
     def format_rating_items(items_list: List) -> List:
         """按 Emby OfficialRatings 官方格式（字符串列表）转换为前端选项。"""
+        if not isinstance(items_list, list):
+            return []
         out = []
         seen = set()
-        for item in items_list or []:
+        for item in items_list:
             if not isinstance(item, str):
                 continue
             s = item.strip()
