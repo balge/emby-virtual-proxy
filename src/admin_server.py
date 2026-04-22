@@ -1932,16 +1932,17 @@ async def get_emby_classifications():
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
     def format_rating_items(items_list: List) -> List:
+        """按 Emby OfficialRatings 官方格式（字符串列表）转换为前端选项。"""
         out = []
+        seen = set()
         for item in items_list or []:
-            if isinstance(item, str):
-                s = item.strip()
-                if s:
-                    out.append({"name": s, "id": s})
-            elif isinstance(item, dict):
-                s = str(item.get("Name") or item.get("Id") or "").strip()
-                if s:
-                    out.append({"name": s, "id": s})
+            if not isinstance(item, str):
+                continue
+            s = item.strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append({"name": s, "id": s})
         return out
 
     scoped, _sid = _load_server_scoped_config()

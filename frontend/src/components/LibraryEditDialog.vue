@@ -324,24 +324,11 @@ const randomRatingThresholdOptions = computed(() => {
   const seen = new Set();
   const items = [];
 
-  const ratingDescMap = {
-    G: "普遍级（所有观众）",
-    PG: "建议家长指导",
-    "PG-13": "13岁以下建议家长注意",
-    R: "限制级（未成年需监护人陪同）",
-    "NC-17": "仅限成人",
-  };
-
   for (const x of src) {
     const value = String(x?.id ?? x?.name ?? x ?? "").trim();
     if (!value || seen.has(value)) continue;
     seen.add(value);
-
-    const desc = ratingDescMap[value.toUpperCase()] || "";
-    items.push({
-      value,
-      label: desc ? `${value}（${desc}）` : value,
-    });
+    items.push({ value, label: value });
   }
 
   return [{ value: null, label: "不过滤" }, ...items];
