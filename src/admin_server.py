@@ -1932,15 +1932,15 @@ async def get_emby_classifications():
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
     def format_rating_items(items_list: List) -> List:
-        """按 Emby OfficialRatings 官方格式（字符串列表）转换为前端选项。"""
+        """按 Emby 官方 /OfficialRatings（Items: OfficialRatingItem[]）格式转换。"""
         if not isinstance(items_list, list):
             return []
         out = []
         seen = set()
         for item in items_list:
-            if not isinstance(item, str):
+            if not isinstance(item, dict):
                 continue
-            s = item.strip()
+            s = str(item.get("Name") or "").strip()
             if not s or s in seen:
                 continue
             seen.add(s)

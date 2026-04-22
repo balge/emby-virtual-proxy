@@ -144,15 +144,18 @@ async def _fetch_official_ratings_order(
         logger.warning("Failed to fetch official ratings: %s", e)
         return []
 
-    # 严格遵循 Emby 官方约定：/OfficialRatings 返回字符串列表。
-    if not isinstance(data, list):
+    # 严格遵循 Emby 官方格式：/OfficialRatings 返回 QueryResult，分级在 Items[].Name。
+    if not isinstance(data, dict):
+        return []
+    items = data.get("Items")
+    if not isinstance(items, list):
         return []
 
     out: List[str] = []
-    for x in data:
-        if not isinstance(x, str):
+    for x in items:
+        if not isinstance(x, dict):
             continue
-        s = x.strip()
+        s = str(x.get("Name") or "").strip()
         if s and s not in out:
             out.append(s)
     return out
