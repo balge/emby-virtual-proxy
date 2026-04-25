@@ -2,7 +2,7 @@
 Emby 封面素材下载：供虚拟库 / 真实库拉取及后台自动生成共用。
 
 style_shelf_1（样式四）：
-- 九条媒体各写 **`n.jpg`=Primary**、**`fanart_n.jpg`=宽屏背景图**：**仅 Fanart**；剧集常无 Fanart 时 **仅此一步** 允许 **Backdrop**（仍不使用 Art/Primary）。生成器只用 `fanart_*` 评选全屏底图，底栏仍只用 Primary。
+- 九条媒体各写 **`n.jpg`=Primary**、**`fanart_n.jpg`=宽屏图（Fanart→Backdrop）**。若九槽均无宽屏图，生成器 **退回用槽 1 的 Primary** 作全屏底图；下载侧只需 **至少一张 Primary** 成功即可继续。
 其他样式：1～N 均为各条目的 Primary（与历史逻辑一致）。
 """
 
@@ -67,20 +67,19 @@ async def download_cover_images_emby(
     """
     将图片写入 temp_dir 的 1.jpg、2.jpg…
     非 shelf：最多 len(selected_items) 张，均为 Primary。
-    shelf：各槽 Primary 写入 `n.jpg`；`fanart_n.jpg` 为 **Fanart → Backdrop**（无 Art/Primary）；须至少成功 **一张宽屏背景** 与 **一张 Primary**。
+    shelf：各槽 Primary 写入 `n.jpg`；`fanart_n.jpg` 为 **Fanart → Backdrop**（可全部失败）。须至少成功 **一张 Primary**（通常 `1.jpg`）。
     """
     if not selected_items:
         return False
     emby_url = (emby_url or "").strip()
     if style_shelf_1:
         n = len(selected_items)
-        fanart_any = False
         primary_any = False
         for i in range(min(9, n)):
             iid = str(selected_items[i].get("Id") or "").strip()
             if not iid:
                 continue
-            fa_ok = await save_first_matching_image(
+            await save_first_matching_image(
                 session,
                 emby_url,
                 api_key,
@@ -88,7 +87,6 @@ async def download_cover_images_emby(
                 ("Fanart", "Backdrop"),
                 temp_dir / f"fanart_{i + 1}.jpg",
             )
-            fanart_any = fanart_any or fa_ok
             ok = await save_first_matching_image(
                 session,
                 emby_url,
@@ -98,7 +96,7 @@ async def download_cover_images_emby(
                 temp_dir / f"{i + 1}.jpg",
             )
             primary_any = primary_any or ok
-        return bool(fanart_any and primary_any)
+        return bool(primary_any)
 
     ok_any = False
     for i, item in enumerate(selected_items):
