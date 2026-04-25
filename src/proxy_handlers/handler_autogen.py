@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import config_manager
 from http_client import create_client_session
 import cover_subprocess
+from cover_emby_fetch import download_cover_images_emby
 
 logger = logging.getLogger(__name__)
 
@@ -110,33 +111,29 @@ async def generate_poster_in_background(
             return
             
         selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
-        
-        # --- 3. 下载图片 ---
+
+        style_name = config.default_cover_style
+
+        # --- 3. 下载图片（样式四：1=Fanart 链 + 2～6=Primary；其余样式：全 Primary）---
         output_dir = Path("/app/config/images/")
         output_dir.mkdir(exist_ok=True)
         temp_dir = output_dir / f"temp_autogen_{library_id}"
         temp_dir.mkdir(exist_ok=True)
 
-        async def download_image(session, item, index):
-            image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-            download_headers = {'X-Emby-Token': api_key} # 使用正确的api_key
-            try:
-                async with session.get(image_url, headers=download_headers, timeout=20) as response:
-                    if response.status == 200:
-                        with open(temp_dir / f"{index}.jpg", "wb") as f: f.write(await response.read())
-                        return True
-            except Exception: return False
-            return False
-
         async with create_client_session() as session:
-            tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
-            results = await asyncio.gather(*tasks)
+            ok = await download_cover_images_emby(
+                session,
+                config.emby_url or "",
+                api_key,
+                selected_items,
+                temp_dir,
+                style_shelf_1=(style_name == "style_shelf_1"),
+            )
 
-        if not any(results):
+        if not ok:
             logger.error(f"后台任务：为库 {library_id} 下载封面素材失败。")
             return
 
-        style_name = config.default_cover_style
         logger.info(f"后台任务：使用默认样式 '{style_name}' 为 '{vlib.name}' 生成封面...")
 
         if style_name not in cover_subprocess.ALLOWED_COVER_STYLES:

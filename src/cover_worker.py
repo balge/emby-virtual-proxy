@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image
 
-ALLOWED_STYLES = frozenset({"style_multi_1", "style_single_1", "style_single_2"})
+ALLOWED_STYLES = frozenset({"style_multi_1", "style_shelf_1", "style_single_1", "style_single_2"})
 
 
 def _build_kwargs(job: dict) -> dict:
@@ -28,7 +28,7 @@ def _build_kwargs(job: dict) -> dict:
         "font_path": (job["zh_font_path"], job["en_font_path"]),
         "font_size": (1, 1.2),
     }
-    if style_name == "style_multi_1":
+    if style_name in ("style_multi_1", "style_shelf_1"):
         kwargs["library_dir"] = str(library_dir)
     elif style_name in ("style_single_1", "style_single_2"):
         main_image_path = library_dir / "1.jpg"

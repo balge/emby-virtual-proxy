@@ -286,6 +286,7 @@ const coverStyleOptions = [
   { value: "style_multi_1", label: "样式一 (多图)" },
   { value: "style_single_1", label: "样式二 (单图)" },
   { value: "style_single_2", label: "样式三 (单图)" },
+  { value: "style_shelf_1", label: "样式四 (背景+底栏海报)" },
 ];
 
 const webhookCallbackUrl = computed(() =>

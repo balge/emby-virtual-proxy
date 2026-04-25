@@ -39,6 +39,7 @@ from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
 from db_manager import DBManager, RSS_CACHE_DB
 from http_client import create_client_session
 from rss_subprocess import run_rss_refresh_job
+from cover_emby_fetch import download_cover_images_emby
 
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
@@ -695,11 +696,19 @@ def _list_rsshub_emby_item_ids(library_id: str, limit: int = 200) -> list[str]:
 
 
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
-async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig, server_id: Optional[str] = None):
+async def _fetch_images_from_vlib(
+    library_id: str,
+    temp_dir: Path,
+    config: AppConfig,
+    server_id: Optional[str] = None,
+    cover_style: Optional[str] = None,
+):
     """
     Read items from proxy cache via internal API and download cover images.
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
     Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前 9 条导致刷新封面变化不大。
+
+    style_shelf_1：1.jpg 为 Fanart→Art→Backdrop→Primary（首条）；2～6.jpg 为连续 5 条 Primary，与多图主图接口一致。
     """
     scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
     vlib_meta = next((v for v in scoped_cfg.virtual_libraries if v.id == library_id), None)
@@ -782,25 +791,17 @@ async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppCo
         else:
             selected_items = items_with_images[:9]
 
-    async def download_image(session, item, index):
-        image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-        headers = {'X-Emby-Token': config.emby_api_key}
-        try:
-            async with session.get(image_url, headers=headers, timeout=20) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    image_path = temp_dir / f"{index}.jpg"
-                    with open(image_path, "wb") as f:
-                        f.write(content)
-                    return True
-        except Exception:
-            return False
-
     async with create_client_session() as session:
-        tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
-        results = await asyncio.gather(*tasks)
+        ok = await download_cover_images_emby(
+            session,
+            scoped_cfg.emby_url or "",
+            scoped_cfg.emby_api_key or "",
+            selected_items,
+            temp_dir,
+            style_shelf_1=(cover_style == "style_shelf_1"),
+        )
 
-    if not any(results):
+    if not ok:
         raise HTTPException(status_code=500, detail="所有封面素材下载失败，无法生成海报。")
 
 @api_router.post("/upload_temp_image", tags=["Cover Generator"])
@@ -871,7 +872,12 @@ async def _admin_emby_get_json(
         return None
 
 
-async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path, config: AppConfig):
+async def _fetch_latest_images_for_real_library(
+    real_lib_id: str,
+    temp_dir: Path,
+    config: AppConfig,
+    cover_style: Optional[str] = None,
+):
     """从真实库中获取最新入库的媒体封面图片（按 DateCreated 降序）。"""
     if not config.emby_url or not config.emby_api_key:
         logger.warning("Cannot fetch images: Emby URL or API key not configured.")
@@ -911,22 +917,18 @@ async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path
         logger.warning(f"No items with cover images in real lib {real_lib_id}")
         return
 
-    async def download_image(sess, item, index):
-        image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-        try:
-            async with sess.get(image_url, headers=headers, timeout=20) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    image_path = temp_dir / f"{index}.jpg"
-                    with open(image_path, "wb") as f:
-                        f.write(content)
-                    return True
-        except Exception:
-            return False
-
+    selected_items = items_with_images[:9]
     async with create_client_session() as session:
-        tasks = [download_image(session, item, i + 1) for i, item in enumerate(items_with_images)]
-        await asyncio.gather(*tasks)
+        ok = await download_cover_images_emby(
+            session,
+            config.emby_url or "",
+            config.emby_api_key or "",
+            selected_items,
+            temp_dir,
+            style_shelf_1=(cover_style == "style_shelf_1"),
+        )
+    if not ok:
+        logger.warning(f"Real lib {real_lib_id}: no cover images downloaded (style={cover_style!r})")
 
 
 async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppConfig):
@@ -968,7 +970,7 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         if config.custom_image_path:
             await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
         else:
-            await _fetch_latest_images_for_real_library(rl.id, image_gen_dir, config)
+            await _fetch_latest_images_for_real_library(rl.id, image_gen_dir, config, cover_style=style_name)
 
         zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
         en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
@@ -1578,7 +1580,13 @@ async def _generate_library_cover(
             elif config.custom_image_path:
                 await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
             else:
-                await _fetch_images_from_vlib(library_id, image_gen_dir, config, server_id=resolved_sid)
+                await _fetch_images_from_vlib(
+                    library_id,
+                    image_gen_dir,
+                    config,
+                    resolved_sid,
+                    cover_style=style_name,
+                )
 
         # --- 3. 【核心改动】: 动态调用所选的样式生成函数 ---
         logger.info(f"素材准备完毕，开始使用样式 '{style_name}' 为 '{title_zh}' ({library_id}) 生成封面...")
@@ -1606,6 +1614,13 @@ async def _generate_library_cover(
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 raise HTTPException(status_code=404, detail="无法找到用于单图模式的主素材图片 (1.jpg)。")
+        elif style_name == "style_shelf_1":
+            bg_ok = any((image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp"))
+            if not bg_ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail="无法找到用于背景+底栏样式的首图 (1.jpg / 1.png 等)。",
+                )
         elif style_name != 'style_multi_1':
             raise HTTPException(status_code=400, detail=f"未知的样式名称: {style_name}")
 
