@@ -2,8 +2,7 @@
 Emby 封面素材下载：供虚拟库 / 真实库拉取及后台自动生成共用。
 
 style_shelf_1（样式四）：
-- 1.jpg：第 **1** 条媒体的 Fanart → Art → Backdrop → Primary（底图）
-- 2～9.jpg：第 **2～9** 条媒体的 Primary，**最多 8 张**预选（与其它样式一致共取 9 条）；生成器按内容去重后取底栏 5 槽，不足用底图补齐。
+- 九条媒体各写 **`n.jpg`=Primary**、**`fanart_n.jpg`=宽屏背景图**：**仅 Fanart**；剧集常无 Fanart 时 **仅此一步** 允许 **Backdrop**（仍不使用 Art/Primary）。生成器只用 `fanart_*` 评选全屏底图，底栏仍只用 Primary。
 其他样式：1～N 均为各条目的 Primary（与历史逻辑一致）。
 """
 
@@ -16,9 +15,6 @@ from typing import Any, Optional
 import aiohttp
 
 logger = logging.getLogger(__name__)
-
-SHELF_BACKGROUND_IMAGE_TYPES = ("Fanart", "Art", "Backdrop", "Primary")
-
 
 async def fetch_emby_item_image_bytes(
     session: aiohttp.ClientSession,
@@ -71,44 +67,38 @@ async def download_cover_images_emby(
     """
     将图片写入 temp_dir 的 1.jpg、2.jpg…
     非 shelf：最多 len(selected_items) 张，均为 Primary。
-    shelf：必须成功写入 1.jpg（媒体[0] 底图）；2～9.jpg 为媒体[1]～[min(8,n-1)] 的 Primary，最多 8 张预选（可部分失败，由生成器去重后取 5 槽并用底图补齐）。
+    shelf：各槽 Primary 写入 `n.jpg`；`fanart_n.jpg` 为 **Fanart → Backdrop**（无 Art/Primary）；须至少成功 **一张宽屏背景** 与 **一张 Primary**。
     """
     if not selected_items:
         return False
     emby_url = (emby_url or "").strip()
     if style_shelf_1:
-        first_id = str(selected_items[0].get("Id") or "").strip()
-        if not first_id:
-            return False
-        bg_ok = await save_first_matching_image(
-            session,
-            emby_url,
-            api_key,
-            first_id,
-            SHELF_BACKGROUND_IMAGE_TYPES,
-            temp_dir / "1.jpg",
-        )
-        if not bg_ok:
-            return False
         n = len(selected_items)
-        # 2.jpg … 9.jpg：最多 8 个条目（索引 1…8），与其它封面同样只拉 9 条；不写索引 0，避免与 1.jpg 同源。
-        for j in range(8):
-            item_idx = 1 + j
-            if item_idx >= n:
-                break
-            item = selected_items[item_idx]
-            iid = str(item.get("Id") or "").strip()
+        fanart_any = False
+        primary_any = False
+        for i in range(min(9, n)):
+            iid = str(selected_items[i].get("Id") or "").strip()
             if not iid:
                 continue
-            await save_first_matching_image(
+            fa_ok = await save_first_matching_image(
+                session,
+                emby_url,
+                api_key,
+                iid,
+                ("Fanart", "Backdrop"),
+                temp_dir / f"fanart_{i + 1}.jpg",
+            )
+            fanart_any = fanart_any or fa_ok
+            ok = await save_first_matching_image(
                 session,
                 emby_url,
                 api_key,
                 iid,
                 ("Primary",),
-                temp_dir / f"{j + 2}.jpg",
+                temp_dir / f"{i + 1}.jpg",
             )
-        return True
+            primary_any = primary_any or ok
+        return bool(fanart_any and primary_any)
 
     ok_any = False
     for i, item in enumerate(selected_items):

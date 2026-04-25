@@ -113,7 +113,7 @@ async def generate_poster_in_background(
         style_name = config.default_cover_style
         selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
 
-        # --- 3. 下载图片（样式四：1=Fanart 链 + 2～9=Primary 预选；其余样式：全 Primary）---
+        # --- 3. 下载图片（样式四：1～9=Primary + fanart_n=仅 Fanart 底图候选；其余样式：全 Primary）---
         output_dir = Path("/app/config/images/")
         output_dir.mkdir(exist_ok=True)
         temp_dir = output_dir / f"temp_autogen_{library_id}"
