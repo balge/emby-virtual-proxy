@@ -16,7 +16,16 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 ALLOWED_COVER_STYLES = frozenset(
-    {"style_multi_1", "style_shelf_1", "style_single_1", "style_single_2"}
+    {
+        "style_multi_1",
+        "style_shelf_1",
+        "style_shelf_1_animated",
+        "style_single_1",
+        "style_single_2",
+        "style_multi_1_animated",
+        "style_single_1_animated",
+        "style_single_2_animated",
+    }
 )
 
 

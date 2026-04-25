@@ -54,7 +54,7 @@
               opt.preview ? 'relative flex-col items-start' : 'items-center',
               optionRowClass(opt.value, idx),
             ]"
-            @click="selectOption(opt.value)"
+            @click.stop="selectOption(opt.value)"
             @mouseenter="highlightIndex = idx"
           >
             <img
@@ -200,7 +200,7 @@ function attachGlobalListeners() {
   scrollListenerAttached = true
   window.addEventListener('scroll', updateMenuPosition, true)
   window.addEventListener('resize', updateMenuPosition)
-  document.addEventListener('pointerdown', onDocPointerDown, true)
+  document.addEventListener('click', onDocClick, true)
 }
 
 function detachGlobalListeners() {
@@ -208,11 +208,14 @@ function detachGlobalListeners() {
   scrollListenerAttached = false
   window.removeEventListener('scroll', updateMenuPosition, true)
   window.removeEventListener('resize', updateMenuPosition)
-  document.removeEventListener('pointerdown', onDocPointerDown, true)
+  document.removeEventListener('click', onDocClick, true)
 }
 
-function onDocPointerDown(e) {
+function onDocClick(e) {
   if (!open.value) return
+  const path = typeof e.composedPath === 'function' ? e.composedPath() : []
+  if (buttonRef.value && path.includes(buttonRef.value)) return
+  if (menuRef.value && path.includes(menuRef.value)) return
   const t = e.target
   if (buttonRef.value?.contains(t) || menuRef.value?.contains(t)) return
   close()

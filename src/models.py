@@ -155,6 +155,14 @@ class AppConfig(BaseModel):
 
     # 新增：自动生成封面的默认样式
     default_cover_style: str = Field(default='style_multi_1')
+    # 封面样式模式：静态、动态 GIF、动态 APNG
+    cover_style_variant: Literal["static", "animated", "animated_apng"] = Field(default="static")
+    # 动图参数
+    animation_duration: int = Field(default=8)
+    animation_fps: int = Field(default=24)
+    animated_image_count: int = Field(default=6)
+    animated_departure_type: Literal["fly", "fade", "crossfade"] = Field(default="fly")
+    animated_scroll_direction: Literal["up", "down", "alternate", "alternate_reverse"] = Field(default="alternate")
 
     # 新增：显示缺失剧集的开关
     show_missing_episodes: bool = Field(default=False)
@@ -245,6 +253,12 @@ class AppConfig(BaseModel):
             "hide": list(self.hide or []),
             "library": [v.model_dump() for v in (self.virtual_libraries or [])],
             "default_cover_style": self.default_cover_style,
+            "cover_style_variant": self.cover_style_variant,
+            "animation_duration": self.animation_duration,
+            "animation_fps": self.animation_fps,
+            "animated_image_count": self.animated_image_count,
+            "animated_departure_type": self.animated_departure_type,
+            "animated_scroll_direction": self.animated_scroll_direction,
             "show_missing_episodes": self.show_missing_episodes,
             "cache_refresh_interval": self.cache_refresh_interval,
             "webhook": self.webhook.model_dump() if self.webhook else {},
@@ -261,6 +275,12 @@ class AppConfig(BaseModel):
             "hide": [],
             "library": [],
             "default_cover_style": "style_multi_1",
+            "cover_style_variant": "static",
+            "animation_duration": 8,
+            "animation_fps": 24,
+            "animated_image_count": 6,
+            "animated_departure_type": "fly",
+            "animated_scroll_direction": "alternate",
             "show_missing_episodes": False,
             "cache_refresh_interval": 12,
             "webhook": WebhookSettings().model_dump(),
@@ -299,6 +319,12 @@ class AppConfig(BaseModel):
             VirtualLibrary.model_validate(x) for x in (p.get("library") or p.get("virtual_libraries") or [])
         ]
         self.default_cover_style = p.get("default_cover_style", self.default_cover_style)
+        self.cover_style_variant = p.get("cover_style_variant", self.cover_style_variant)
+        self.animation_duration = int(p.get("animation_duration", self.animation_duration) or self.animation_duration)
+        self.animation_fps = int(p.get("animation_fps", self.animation_fps) or self.animation_fps)
+        self.animated_image_count = int(p.get("animated_image_count", self.animated_image_count) or self.animated_image_count)
+        self.animated_departure_type = p.get("animated_departure_type", self.animated_departure_type)
+        self.animated_scroll_direction = p.get("animated_scroll_direction", self.animated_scroll_direction)
         self.show_missing_episodes = bool(p.get("show_missing_episodes", self.show_missing_episodes))
         self.cache_refresh_interval = p.get("cache_refresh_interval", self.cache_refresh_interval)
         self.webhook = WebhookSettings.model_validate(p.get("webhook") or self.webhook.model_dump())

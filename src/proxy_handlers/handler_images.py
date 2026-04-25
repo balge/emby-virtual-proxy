@@ -39,7 +39,13 @@ async def handle_virtual_library_image(request: Request, full_path: str, config:
             logger.info(f"IMAGE_HANDLER: Virtual library '{found.name}' is hidden; 404.")
             return Response(status_code=404)
 
-    # 检查实际的封面文件是否存在，如果存在则直接返回
+    # 检查实际的封面文件是否存在（优先动态 GIF/APNG）
+    gif_file = COVERS_DIR / f"{item_id}.gif"
+    if gif_file.is_file():
+        return FileResponse(str(gif_file), media_type="image/gif")
+    apng_file = COVERS_DIR / f"{item_id}.png"
+    if apng_file.is_file():
+        return FileResponse(str(apng_file), media_type="image/png")
     image_file = COVERS_DIR / f"{item_id}.jpg"
     if image_file.is_file():
         return FileResponse(str(image_file), media_type="image/jpeg")

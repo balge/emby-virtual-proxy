@@ -425,7 +425,7 @@ class CoverRequest(BaseModel):
     library_id: str
     title_zh: str # 之前是 library_name，现在改为 title_zh
     title_en: Optional[str] = None
-    style_name: str # 新增：用于指定封面样式
+    style_name: Optional[str] = None  # 空则使用当前服务器 profile 的 default_cover_style
     temp_image_paths: Optional[List[str]] = None
 
 class LoginRequest(BaseModel):
@@ -802,7 +802,7 @@ async def _fetch_images_from_vlib(
             scoped_cfg.emby_api_key or "",
             selected_items,
             temp_dir,
-            style_shelf_1=(cover_style == "style_shelf_1"),
+            style_shelf_1=(cover_style in ("style_shelf_1", "style_shelf_1_animated")),
         )
 
     if not ok:
@@ -967,7 +967,7 @@ async def _fetch_latest_images_for_real_library(
             config.emby_api_key or "",
             selected_items,
             temp_dir,
-            style_shelf_1=(cover_style == "style_shelf_1"),
+            style_shelf_1=(cover_style in ("style_shelf_1", "style_shelf_1_animated")),
         )
     if not ok:
         logger.warning(f"Real lib {real_lib_id}: no cover images downloaded (style={cover_style!r})")
@@ -982,9 +982,15 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         return
     url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    elif image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    else:
+        mime = "image/jpeg"
     headers = {
         'X-Emby-Token': config.emby_api_key,
-        'Content-Type': 'image/jpeg',
+        'Content-Type': mime,
     }
     try:
         async with create_client_session() as session:
@@ -998,11 +1004,43 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         logger.error(f"Failed to upload image to Emby for {item_id}: {e}")
 
 
+def _resolve_cover_worker_style(config: AppConfig, base_style: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if variant not in ("animated", "animated_apng"):
+        return base_style
+    animated_map = {
+        # 参考插件映射：
+        # 参考样式1 -> 本项目样式2(style_single_1)
+        # 参考样式2 -> 本项目样式3(style_single_2)
+        # 参考样式3 -> 本项目样式1(style_multi_1)
+        "style_single_1": "style_single_1_animated",
+        "style_single_2": "style_single_2_animated",
+        "style_multi_1": "style_multi_1_animated",
+        "style_shelf_1": "style_shelf_1_animated",
+    }
+    return animated_map.get(base_style, base_style)
+
+
+def _cover_output_extension(style_name: str) -> str:
+    if not style_name.endswith("_animated"):
+        return "jpg"
+    return "gif"
+
+
+def _resolve_animation_format(config: AppConfig, style_name: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if not style_name.endswith("_animated"):
+        return "jpeg"
+    if variant == "animated_apng":
+        return "apng"
+    return "gif"
+
+
 async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig) -> Optional[str]:
     """为真实库生成封面，复用虚拟库封面生成逻辑。"""
     title_zh = rl.cover_title_zh or rl.name
     title_en = rl.cover_title_en or ""
-    style_name = config.default_cover_style
+    style_name = _resolve_cover_worker_style(config, config.default_cover_style)
 
     FONT_DIR = "/app/src/assets/fonts/"
     OUTPUT_DIR = "/app/config/images/"
@@ -1035,7 +1073,7 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             if not main_image_path.is_file():
                 logger.warning(f"Real lib cover: no main image for {rl.name}")
                 return None
-        elif style_name == "style_shelf_1":
+        elif style_name in ("style_shelf_1", "style_shelf_1_animated"):
             has_any_primary_slot = any(
                 (image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp")
             )
@@ -1043,7 +1081,16 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
                 logger.warning(f"Real lib cover: no slot-1 image for shelf style in {rl.name}")
                 return None
 
-        output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
+        animation_format = _resolve_animation_format(config, style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(style_name)
+        output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.{output_ext}")
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                Path(os.path.join(OUTPUT_DIR, f"{rl.id}.{ext}")).unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
             "style_name": style_name,
             "title_zh": title_zh,
@@ -1053,6 +1100,13 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
             "crop_16_9": True,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             await cover_subprocess.run_cover_worker_job(job)
@@ -1466,11 +1520,13 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
     素材来自现有磁盘缓存（_resolve_cover_cache_user_id）；无缓存时需先「刷新数据」。
     """
     config, resolved_sid = _load_server_scoped_config(server_id)
-    style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name, server_id=resolved_sid)
+        # style_name=None：在 _generate_library_cover 内用当前 server profile 的 default_cover_style + variant
+        image_tag = await _generate_library_cover(
+            vlib.id, title_zh, title_en, None, server_id=resolved_sid
+        )
         if image_tag:
             current_config = config_manager.load_config(apply_active_profile=False)
             sid = resolved_sid or str(config.admin_active_server_id or "")
@@ -1495,12 +1551,21 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
 async def refresh_library_cover(library_id: str):
     """Regenerate cover for a single virtual library."""
     config = config_manager.load_config()
+    raw = config_manager.load_config(apply_active_profile=False)
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    resolved_sid = str(raw.admin_active_server_id or "")
+    if not vlib:
+        for s in raw.servers:
+            p = raw.get_server_profile(str(s.id))
+            libs = p.get("library") or []
+            found = next((x for x in libs if str(x.get("id")) == str(library_id)), None)
+            if found:
+                vlib = VirtualLibrary.model_validate(found)
+                resolved_sid = str(s.id)
+                break
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
-    cfg = config_manager.load_config(apply_active_profile=False)
-    sid = str(cfg.admin_active_server_id or "")
-    asyncio.create_task(_regenerate_cover_for_vlib(vlib, server_id=sid))
+    asyncio.create_task(_regenerate_cover_for_vlib(vlib, server_id=resolved_sid or None))
     return {"message": f"Cover refresh started for '{vlib.name}'."}
 
 
@@ -1552,8 +1617,16 @@ async def refresh_all_covers():
 @api_router.post("/generate-cover", tags=["Cover Generator"])
 async def generate_cover(body: CoverRequest):
     try:
-        # 调用核心生成逻辑，并传递样式名称
-        image_tag = await _generate_library_cover(body.library_id, body.title_zh, body.title_en, body.style_name, body.temp_image_paths)
+        raw = config_manager.load_config(apply_active_profile=False)
+        sid = str(raw.admin_active_server_id or "") or None
+        image_tag = await _generate_library_cover(
+            body.library_id,
+            body.title_zh,
+            body.title_en,
+            body.style_name,
+            body.temp_image_paths,
+            server_id=sid,
+        )
         if image_tag:
             # 成功后，需要找到对应的虚拟库并更新其 image_tag
             config = config_manager.load_config()
@@ -1604,11 +1677,12 @@ async def _generate_library_cover(
     library_id: str,
     title_zh: str,
     title_en: Optional[str],
-    style_name: str,
+    style_name: Optional[str] = None,
     temp_image_paths: Optional[List[str]] = None,
     server_id: Optional[str] = None,
 ) -> Optional[str]:
     config, resolved_sid = _load_server_scoped_config(server_id)
+    base_style = (style_name or "").strip() or (config.default_cover_style or "style_multi_1")
     # --- 1. 定义路径 ---
     FONT_DIR = "/app/src/assets/fonts/"
     OUTPUT_DIR = "/app/config/images/"
@@ -1641,11 +1715,19 @@ async def _generate_library_cover(
                     image_gen_dir,
                     config,
                     resolved_sid,
-                    cover_style=style_name,
+                    cover_style=base_style,
                 )
 
         # --- 3. 【核心改动】: 动态调用所选的样式生成函数 ---
-        logger.info(f"素材准备完毕，开始使用样式 '{style_name}' 为 '{title_zh}' ({library_id}) 生成封面...")
+        worker_style_name = _resolve_cover_worker_style(config, base_style)
+        logger.info(
+            "素材准备完毕，library=%s base_style=%s variant=%s worker=%s server_id=%s",
+            library_id,
+            base_style,
+            getattr(config, "cover_style_variant", None),
+            worker_style_name,
+            resolved_sid,
+        )
 
         # --- 字体选择逻辑 ---
         vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
@@ -1666,24 +1748,38 @@ async def _generate_library_cover(
         else:
             en_font_path = os.path.join(FONT_DIR, "multi_1_en.ttf")
 
-        if style_name in ['style_single_1', 'style_single_2']:
+        if worker_style_name in ['style_single_1', 'style_single_2']:
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 raise HTTPException(status_code=404, detail="无法找到用于单图模式的主素材图片 (1.jpg)。")
-        elif style_name == "style_shelf_1":
+        elif worker_style_name in ("style_shelf_1", "style_shelf_1_animated"):
             bg_ok = any((image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp"))
             if not bg_ok:
                 raise HTTPException(
                     status_code=404,
                     detail="无法找到用于背景+底栏样式的首图 (1.jpg / 1.png 等)。",
                 )
-        elif style_name != 'style_multi_1':
-            raise HTTPException(status_code=400, detail=f"未知的样式名称: {style_name}")
+        elif worker_style_name not in (
+            'style_multi_1',
+            'style_multi_1_animated',
+            'style_single_1_animated',
+            'style_single_2_animated',
+        ):
+            raise HTTPException(status_code=400, detail=f"未知的样式名称: {worker_style_name}")
 
-        final_filename = f"{library_id}.jpg"
+        animation_format = _resolve_animation_format(config, worker_style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(worker_style_name)
+        final_filename = f"{library_id}.{output_ext}"
         output_path = os.path.join(OUTPUT_DIR, final_filename)
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                Path(os.path.join(OUTPUT_DIR, f"{library_id}.{ext}")).unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
-            "style_name": style_name,
+            "style_name": worker_style_name,
             "title_zh": title_zh,
             "title_en": title_en or "",
             "zh_font_path": zh_font_path,
@@ -1691,6 +1787,13 @@ async def _generate_library_cover(
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
             "crop_16_9": False,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             import cover_subprocess

@@ -20,6 +20,31 @@ logger = logging.getLogger(__name__)
 
 GENERATION_IN_PROGRESS = set()
 
+
+def _resolve_cover_worker_style(config, base_style: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if variant not in ("animated", "animated_apng"):
+        return base_style
+    return {
+        "style_single_1": "style_single_1_animated",
+        "style_single_2": "style_single_2_animated",
+        "style_multi_1": "style_multi_1_animated",
+        "style_shelf_1": "style_shelf_1_animated",
+    }.get(base_style, base_style)
+
+
+def _cover_output_extension(style_name: str) -> str:
+    return "gif" if style_name.endswith("_animated") else "jpg"
+
+
+def _resolve_animation_format(config, style_name: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if not style_name.endswith("_animated"):
+        return "jpeg"
+    if variant == "animated_apng":
+        return "apng"
+    return "gif"
+
 # 【【【 核心修正1：函数签名改变，接收用户ID和Token 】】】
 async def generate_poster_in_background(
     library_id: str,
@@ -110,7 +135,7 @@ async def generate_poster_in_background(
             logger.warning(f"后台任务：获取到的 {len(items)} 个项目中，没有带主图的项目，无法为库 '{vlib.name}' 生成封面。")
             return
             
-        style_name = config.default_cover_style
+        style_name = _resolve_cover_worker_style(config, config.default_cover_style)
         selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
 
         # --- 3. 下载图片（样式四：1～9=Primary + fanart_n=Fanart→Backdrop；无宽屏时生成器用槽1 Primary 作底图；其余样式：全 Primary）---
@@ -126,7 +151,7 @@ async def generate_poster_in_background(
                 api_key,
                 selected_items,
                 temp_dir,
-                style_shelf_1=(style_name == "style_shelf_1"),
+                style_shelf_1=(style_name in ("style_shelf_1", "style_shelf_1_animated")),
             )
 
         if not ok:
@@ -148,7 +173,16 @@ async def generate_poster_in_background(
                 logger.error(f"后台任务：无法找到用于单图模式的主素材图片 (1.jpg)。")
                 return
 
-        final_path = output_dir / f"{library_id}.jpg"
+        animation_format = _resolve_animation_format(config, style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(style_name)
+        final_path = output_dir / f"{library_id}.{output_ext}"
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                (output_dir / f"{library_id}.{ext}").unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
             "style_name": style_name,
             "title_zh": vlib.cover_title_zh or vlib.name,
@@ -158,6 +192,13 @@ async def generate_poster_in_background(
             "library_dir": str(temp_dir),
             "output_path": str(final_path),
             "crop_16_9": False,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             await cover_subprocess.run_cover_worker_job(job)

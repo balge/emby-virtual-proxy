@@ -120,10 +120,65 @@
         </h2>
         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
           <BaseSelect
-            v-model="store.config.default_cover_style"
+            :model-value="store.config.default_cover_style"
+            @update:modelValue="(v) => (store.config.default_cover_style = v)"
             :options="coverStyleOptions"
             label="默认封面样式"
             hint="自动生成封面时使用的样式。"
+          />
+          <BaseSelect
+            :model-value="store.config.cover_style_variant"
+            @update:modelValue="(v) => (store.config.cover_style_variant = v)"
+            :options="coverVariantOptions"
+            label="封面类型"
+            hint="可选静态图、动态 GIF 或动态 APNG。"
+          />
+          <BaseInput
+            v-if="isAnimatedVariant"
+            v-model.number="store.config.animation_duration"
+            label="动图时长（秒）"
+            type="number"
+            min="2"
+            max="30"
+          />
+          <BaseInput
+            v-if="isAnimatedVariant"
+            v-model.number="store.config.animation_fps"
+            label="动图帧率（FPS）"
+            type="number"
+            min="6"
+            max="24"
+          />
+          <BaseInput
+            v-if="
+              isAnimatedVariant &&
+              ['style_single_1', 'style_single_2'].includes(
+                store.config.default_cover_style,
+              )
+            "
+            v-model.number="store.config.animated_image_count"
+            label="样式2/3图片数量"
+            type="number"
+            min="3"
+            max="9"
+          />
+          <BaseSelect
+            v-if="
+              isAnimatedVariant &&
+              store.config.default_cover_style === 'style_single_1'
+            "
+            v-model="store.config.animated_departure_type"
+            :options="animatedDepartureOptions"
+            label="样式1动画风格"
+          />
+          <BaseSelect
+            v-if="
+              isAnimatedVariant &&
+              store.config.default_cover_style === 'style_multi_1'
+            "
+            v-model="store.config.animated_scroll_direction"
+            :options="animatedScrollDirectionOptions"
+            label="样式1滚动方向"
           />
           <BaseInput
             v-model="store.config.custom_zh_font_path"
@@ -307,6 +362,29 @@ const coverStyleOptions = [
     label: "样式四 (背景+底栏海报)",
     preview: previewShelf1,
   },
+];
+
+const coverVariantOptions = [
+  { value: "static", label: "静态图" },
+  { value: "animated", label: "动态 GIF" },
+  { value: "animated_apng", label: "动态 APNG" },
+];
+
+const isAnimatedVariant = computed(() =>
+  ["animated", "animated_apng"].includes(store.config.cover_style_variant),
+);
+
+const animatedDepartureOptions = [
+  { value: "fly", label: "旋转-飞出" },
+  { value: "fade", label: "淡入淡出" },
+  { value: "crossfade", label: "交叠过渡" },
+];
+
+const animatedScrollDirectionOptions = [
+  { value: "up", label: "向上滚动" },
+  { value: "down", label: "向下滚动" },
+  { value: "alternate", label: "交替（两边上/中间下）" },
+  { value: "alternate_reverse", label: "交替反向（两边下/中间上）" },
 ];
 
 const webhookCallbackUrl = computed(() =>
