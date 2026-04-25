@@ -789,11 +789,25 @@ async def _fetch_images_from_vlib(
             )
             raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
 
-        if vlib_meta and vlib_meta.resource_type == "random":
-            k = min(9, len(items_with_images))
-            selected_items = random.sample(items_with_images, k)
-        else:
-            selected_items = items_with_images[:9]
+        def _pick_unique_items(source: list[dict], target: int, random_mode: bool) -> list[dict]:
+            unique: list[dict] = []
+            seen_ids: set[str] = set()
+            pool = random.sample(source, len(source)) if random_mode else source
+            for it in pool:
+                iid = str(it.get("Id") or "").strip()
+                if not iid or iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+                unique.append(it)
+                if len(unique) >= target:
+                    break
+            return unique
+
+        selected_items = _pick_unique_items(
+            items_with_images,
+            target=9,
+            random_mode=bool(vlib_meta and vlib_meta.resource_type == "random"),
+        )
 
     async with create_client_session() as session:
         ok = await download_cover_images_emby(
@@ -897,7 +911,7 @@ async def _fetch_latest_images_for_real_library(
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
         "Fields": "ImageTags,DateCreated",
-        "Limit": "9",
+        "Limit": "100",
         "SortBy": "DateCreated",
         "SortOrder": "Descending",
     }
@@ -959,7 +973,16 @@ async def _fetch_latest_images_for_real_library(
         )
         return False
 
-    selected_items = items_with_images[:9]
+    selected_items: list[dict] = []
+    seen_ids: set[str] = set()
+    for it in items_with_images:
+        iid = str(it.get("Id") or "").strip()
+        if not iid or iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        selected_items.append(it)
+        if len(selected_items) >= 9:
+            break
     async with create_client_session() as session:
         ok = await download_cover_images_emby(
             session,
@@ -1099,6 +1122,7 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             "en_font_path": en_font_path,
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
+            "output_width": 400,
             "crop_16_9": True,
             "output_format": animation_format,
             "animation_format": animation_format,
@@ -1786,6 +1810,7 @@ async def _generate_library_cover(
             "en_font_path": en_font_path,
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
+            "output_width": 400,
             "crop_16_9": False,
             "output_format": animation_format,
             "animation_format": animation_format,

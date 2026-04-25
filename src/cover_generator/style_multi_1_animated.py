@@ -44,6 +44,7 @@ def create_style_multi_1_animated(
     animation_duration=8,
     animation_fps=24,
     animation_format="gif",
+    output_width=400,
     scroll_direction="alternate",
     image_count=None,
     departure_type=None,
@@ -75,8 +76,8 @@ def create_style_multi_1_animated(
         column_spacing = float(POSTER_GEN_CONFIG["COLUMN_SPACING"])
         cell_width = float(POSTER_GEN_CONFIG["CELL_WIDTH"])
         cell_height = float(POSTER_GEN_CONFIG["CELL_HEIGHT"])
-        target_w = int(POSTER_GEN_CONFIG["CANVAS_WIDTH"])
-        target_h = int(POSTER_GEN_CONFIG["CANVAS_HEIGHT"])
+        target_w = max(120, int(output_width or 400))
+        target_h = max(68, int(target_w * (POSTER_GEN_CONFIG["CANVAS_HEIGHT"] / POSTER_GEN_CONFIG["CANVAS_WIDTH"])))
 
         # 跟参考 style_animated_3 一致：采用目标分辨率缩放坐标系统
         scale = target_h / 1080.0
@@ -232,7 +233,8 @@ def create_style_multi_1_animated(
         # 4) 对齐静态布局中心（参考 style_animated_3）
         base_centers = []
         col_x_step = cell_width_s - s(50)
-        third_col_extra_x = s(30)
+        # 与静态 style_multi_1 一致：右列额外偏移应为 +60（再叠加 2*(cell_w-50)）
+        third_col_extra_x = s(60)
         for ci in range(cols):
             cx = start_x_s + ci * column_spacing_s
             cy = start_y_s + (rows * cell_height_s + (rows - 1) * margin_s) // 2

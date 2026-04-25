@@ -233,16 +233,15 @@ def _collect_primary_pool(folder: Path) -> list[tuple[int, Path]]:
 
 def _primary_strip_candidates_ordered(
     primary_by_slot: dict[int, Path],
-    bg_slot: int,
+    bg_slot: int | None = None,
 ) -> list[Path]:
     """
-    去掉「已选为 Fanart 全屏底图」的那一槽后，按槽位 **1→9** 固定顺序收集 Primary，
-    至多 8 条路径，供五格去重消费。
+    按槽位 **1→9** 固定顺序收集 Primary。
+    注意：为支持“背景图与槽位可重复展示”，不再排除背景槽位。
     """
+    del bg_slot
     out: list[Path] = []
     for slot in range(1, 10):
-        if slot == bg_slot:
-            continue
         p = primary_by_slot.get(slot)
         if p is not None:
             out.append(p)
@@ -278,10 +277,9 @@ def _sha256_file(path: Path) -> str | None:
 
 def _tile_paths_for_five_deduped(candidates: list[Path], bg_path: Path) -> list[Path]:
     """
-    输入为「去掉底图槽后的 8 槽 Primary」按顺序的列表；沿序取**内容不重复**的前 5 张底栏；
-    与 Fanart 底图同字节的跳过；仍不足 5 则用底图文件路径补齐。
+    输入为 Primary 候选（按槽位顺序）；沿序取**内容不重复**的前 5 张底栏；
+    与背景图允许重复展示（不再跳过同字节）；仍不足 5 则用底图文件路径补齐。
     """
-    bg_fp = _sha256_file(bg_path)
     seen_fp: set[str] = set()
     chosen: list[Path] = []
     for p in candidates:
@@ -289,8 +287,6 @@ def _tile_paths_for_five_deduped(candidates: list[Path], bg_path: Path) -> list[
             break
         fp = _sha256_file(p)
         if fp is None:
-            continue
-        if bg_fp is not None and fp == bg_fp:
             continue
         if fp in seen_fp:
             continue

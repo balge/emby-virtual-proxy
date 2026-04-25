@@ -1,8 +1,8 @@
 """
 样式四动图（优化版）：
-- 背景：低幅度 Ken Burns 慢推（不再做高斯模糊）
-- 前景：底栏五槽位保持静态
-- 动效：整幅均匀黑罩做轻微“呼吸”透明度
+- 背景：低幅度 Ken Burns 慢推，按槽位 1→5 轮换 5 张背景图
+- 底栏五槽位：固定不动
+- 整幅均匀黑罩做轻微“呼吸”透明度
 """
 
 from __future__ import annotations
@@ -22,12 +22,10 @@ from .style_shelf_1 import (
     _collect_primary_pool,
     _composite_at,
     _make_tile_rgba,
-    _pick_fanart_background,
     _plain_text_top_left,
     _primary_strip_candidates_ordered,
     _shelf_title_block_height,
     _split_equal_int,
-    _tile_paths_for_five_deduped,
     _SHELF_EN_H_RATIO,
     _SHELF_EN_SIZE_MIN,
     _SHELF_ZH_EN_GAP_H_RATIO,
@@ -68,6 +66,42 @@ def _breathing_alpha(progress: float, lo: float = 0.28, hi: float = 0.32) -> flo
     return lo + (hi - lo) * t
 
 
+def _background_cycle_paths(
+    slot_tile_paths: list[Path],
+    primary_pool: list[tuple[int, Path]],
+    fanart_pool: list[tuple[int, Path]],
+    fallback_bg: Path,
+    max_count: int = 5,
+) -> list[Path]:
+    """
+    与槽位数据一一对应构建背景序列：
+    - 第 i 个槽位对应第 i 段背景（i=1..5）
+    - 每槽优先 fanart_i，无则回退该槽 primary_i
+    - 不做去重，不额外插入“默认背景”
+    """
+    primary_slot_by_path: dict[Path, int] = {}
+    for slot, p in primary_pool:
+        primary_slot_by_path.setdefault(p, slot)
+    fanart_by_slot: dict[int, Path] = {slot: p for slot, p in fanart_pool}
+
+    paths: list[Path] = []
+    for p in slot_tile_paths[:max_count]:
+        slot = primary_slot_by_path.get(p)
+        bg = fanart_by_slot.get(slot) if slot is not None else None
+        chosen = bg or p
+        paths.append(chosen)
+    while len(paths) < max_count:
+        paths.append(fallback_bg)
+    return paths[:max_count]
+
+
+def _first_five_slot_paths(candidates: list[Path]) -> list[Path] | None:
+    """严格使用槽位区前 5 个媒体，不做补位。"""
+    if len(candidates) < 5:
+        return None
+    return candidates[:5]
+
+
 def create_style_shelf_1_animated(
     library_dir,
     title,
@@ -76,6 +110,7 @@ def create_style_shelf_1_animated(
     animation_duration=8,
     animation_fps=24,
     animation_format="gif",
+    output_width=400,
     scroll_direction="alternate",
     image_count=None,
     departure_type=None,
@@ -91,21 +126,37 @@ def create_style_shelf_1_animated(
         primary_pool = _collect_primary_pool(folder)
         primary_by_slot = {s: p for s, p in primary_pool}
 
-        if fanart_pool:
-            bg_path, bg_slot, _ = _pick_fanart_background(fanart_pool)
-            if not bg_path:
-                return False
-        else:
-            bg_path = primary_by_slot.get(1)
-            if not bg_path:
-                logger.error("style_shelf_1_animated: no slot 1 primary in %s", library_dir)
-                return False
-            bg_slot = 1
+        bg_path = primary_by_slot.get(1)
+        if not bg_path:
+            logger.error("style_shelf_1_animated: no slot 1 primary in %s", library_dir)
+            return False
 
-        thumbs = _primary_strip_candidates_ordered(primary_by_slot, bg_slot)
-        kb_plane = _prepare_kb_plane(bg_path)
-
-        w, h = CANVAS_W, CANVAS_H
+        thumbs = _primary_strip_candidates_ordered(primary_by_slot, None)
+        out_w = max(120, int(output_width or 400))
+        scale = out_w / float(CANVAS_W)
+        w, h = out_w, max(68, int(CANVAS_H * scale))
+        tile_paths = _first_five_slot_paths(thumbs)
+        if not tile_paths:
+            logger.error(
+                "style_shelf_1_animated: require at least 5 slot media, got %d",
+                len(thumbs),
+            )
+            return False
+        bg_cycle = _background_cycle_paths(
+            tile_paths,
+            primary_pool,
+            fanart_pool,
+            bg_path,
+            max_count=5,
+        )
+        kb_planes: list[Image.Image] = []
+        for bpath in bg_cycle:
+            kb_src = _prepare_kb_plane(bpath)
+            kb_plane = kb_src.resize(
+                (max(w + 4, int(kb_src.width * scale)), max(h + 4, int(kb_src.height * scale))),
+                _LANCZOS,
+            )
+            kb_planes.append(kb_plane)
         bottom_margin = max(14, int(h * 0.022))
         g0 = max(10, int(w * 0.0098))
         max_h = int(min(h * 0.48, 520))
@@ -142,7 +193,6 @@ def create_style_shelf_1_animated(
             if p not in fb_unique:
                 fb_unique.append(p)
 
-        tile_paths = _tile_paths_for_five_deduped(thumbs, bg_path)
         tiles_rgba: list[Image.Image] = []
         for slot in range(5):
             tile = _make_tile_rgba(
@@ -152,9 +202,10 @@ def create_style_shelf_1_animated(
                 logger.error("style_shelf_1_animated: tile build failed at slot %s", slot)
                 return False
             tiles_rgba.append(tile)
-
-        zh_size = max(_SHELF_ZH_SIZE_MIN, int(h * _SHELF_ZH_H_RATIO * zh_ratio))
-        en_size = max(_SHELF_EN_SIZE_MIN, int(h * _SHELF_EN_H_RATIO * en_ratio))
+        zh_size_min = max(10, int(_SHELF_ZH_SIZE_MIN * scale))
+        en_size_min = max(8, int(_SHELF_EN_SIZE_MIN * scale))
+        zh_size = max(zh_size_min, int(h * _SHELF_ZH_H_RATIO * zh_ratio))
+        en_size = max(en_size_min, int(h * _SHELF_EN_H_RATIO * en_ratio))
         try:
             zh_font = ImageFont.truetype(zh_font_path, zh_size)
         except Exception:
@@ -165,7 +216,8 @@ def create_style_shelf_1_animated(
             en_font = ImageFont.load_default()
 
         margin_left = int(w * 0.042)
-        zh_en_gap = max(_SHELF_ZH_EN_GAP_MIN, int(h * _SHELF_ZH_EN_GAP_H_RATIO))
+        zh_en_gap_min = max(8, int(_SHELF_ZH_EN_GAP_MIN * scale))
+        zh_en_gap = max(zh_en_gap_min, int(h * _SHELF_ZH_EN_GAP_H_RATIO))
         block_h = _shelf_title_block_height(
             title_zh, title_en or "", zh_font, en_font, zh_en_gap
         )
@@ -178,7 +230,19 @@ def create_style_shelf_1_animated(
         frames: list[Image.Image] = []
         for fi in range(n_frames):
             p = fi / float(n_frames)
-            canvas = _crop_kb_frame(kb_plane, p)
+            seg_pos = (fi * len(kb_planes)) / float(max(1, n_frames))
+            seg_idx = min(int(seg_pos), len(kb_planes) - 1)
+            seg_p = seg_pos - float(seg_idx)
+            # scaled Ken Burns crop at target output size
+            kb_plane = kb_planes[seg_idx]
+            pw, ph = kb_plane.size
+            max_x = max(0, pw - w)
+            max_y = max(0, ph - h)
+            u = 2.0 * math.pi * seg_p
+            amp = 0.35
+            px = int(max_x * (0.5 + 0.5 * amp * math.sin(u)))
+            py = int(max_y * (0.5 + 0.5 * amp * math.cos(u * 0.73)))
+            canvas = kb_plane.crop((px, py, px + w, py + h)).convert("RGBA")
             canvas = Image.alpha_composite(
                 canvas,
                 _black_vertical_mask((w, h), max_alpha_ratio=_breathing_alpha(p)),

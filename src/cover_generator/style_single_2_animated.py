@@ -22,6 +22,7 @@ def create_style_single_2_animated(
     animation_duration=8,
     animation_fps=12,
     animation_format="gif",
+    output_width=400,
     image_count=6,
 ):
     try:
@@ -43,6 +44,7 @@ def create_style_single_2_animated(
         duration = max(2, int(animation_duration))
         total_frames = max(12, fps * duration)
         seg = max(1, total_frames // len(keyframes))
+        target_w = max(120, int(output_width or 400))
         frames = []
         for i, current in enumerate(keyframes):
             nxt = keyframes[(i + 1) % len(keyframes)]
@@ -56,7 +58,12 @@ def create_style_single_2_animated(
                 scaled = frame.resize((sw, sh), Image.Resampling.BICUBIC)
                 left = (sw - w) // 2
                 top = (sh - h) // 2
-                frames.append(scaled.crop((left, top, left + w, top + h)).convert("RGBA"))
+                rgba = scaled.crop((left, top, left + w, top + h)).convert("RGBA")
+                w0, h0 = rgba.size
+                if w0 > 0 and w0 != target_w:
+                    h1 = max(1, int(h0 * (target_w / float(w0))))
+                    rgba = rgba.resize((target_w, h1), Image.Resampling.BICUBIC)
+                frames.append(rgba)
 
         fmt = str(animation_format or "gif").lower()
         if fmt == "apng":

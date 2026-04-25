@@ -131,7 +131,7 @@
             @update:modelValue="(v) => (store.config.cover_style_variant = v)"
             :options="coverVariantOptions"
             label="封面类型"
-            hint="可选静态图、动态 GIF 或动态 APNG。"
+            hint="可选静态图、动态 GIF 或动态 APNG（APNG 文件体积通常会更大）。"
           />
           <BaseInput
             v-if="isAnimatedVariant"

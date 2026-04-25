@@ -136,7 +136,17 @@ async def generate_poster_in_background(
             return
             
         style_name = _resolve_cover_worker_style(config, config.default_cover_style)
-        selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
+        unique_items: list[dict] = []
+        seen_ids: set[str] = set()
+        for it in random.sample(items_with_images, len(items_with_images)):
+            iid = str(it.get("Id") or "").strip()
+            if not iid or iid in seen_ids:
+                continue
+            seen_ids.add(iid)
+            unique_items.append(it)
+            if len(unique_items) >= 9:
+                break
+        selected_items = unique_items
 
         # --- 3. 下载图片（样式四：1～9=Primary + fanart_n=Fanart→Backdrop；无宽屏时生成器用槽1 Primary 作底图；其余样式：全 Primary）---
         output_dir = Path("/app/config/images/")
@@ -191,6 +201,7 @@ async def generate_poster_in_background(
             "en_font_path": en_font_path,
             "library_dir": str(temp_dir),
             "output_path": str(final_path),
+            "output_width": 400,
             "crop_16_9": False,
             "output_format": animation_format,
             "animation_format": animation_format,

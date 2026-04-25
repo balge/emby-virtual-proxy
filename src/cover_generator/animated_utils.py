@@ -52,6 +52,5 @@ def encode_apng_base64(frames: Iterable[Image.Image], fps: int = 12) -> str:
         duration=duration,
         loop=0,
         optimize=False,
-        disposal=2,
     )
     return base64.b64encode(buf.getvalue()).decode("utf-8")

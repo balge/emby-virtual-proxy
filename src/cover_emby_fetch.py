@@ -73,6 +73,19 @@ async def download_cover_images_emby(
     """
     if not selected_items:
         return False
+    # 进入封面生成前统一按媒体 Id 去重（保序）：
+    # 样式层不再承担“是否去重”的职责，确保静态/动态样式 1/2/3/4 输入一致。
+    deduped_items: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for item in selected_items:
+        iid = str(item.get("Id") or "").strip()
+        if not iid or iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        deduped_items.append(item)
+    selected_items = deduped_items
+    if not selected_items:
+        return False
     emby_url = (emby_url or "").strip()
     if style_shelf_1:
         n = len(selected_items)
