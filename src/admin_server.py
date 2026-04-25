@@ -708,7 +708,7 @@ async def _fetch_images_from_vlib(
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
     Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前 9 条导致刷新封面变化不大。
 
-    style_shelf_1：1.jpg 为 Fanart→Art→Backdrop→Primary（首条）；2～6.jpg 为连续 5 条 Primary，与多图主图接口一致。
+    style_shelf_1：1.jpg 为媒体[0] 的 Fanart→Art→Backdrop→Primary；2～6.jpg 为媒体[1]～[5] 的 Primary（不足 6 条时底栏从索引 1 起循环）。
     """
     scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
     vlib_meta = next((v for v in scoped_cfg.virtual_libraries if v.id == library_id), None)
