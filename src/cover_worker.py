@@ -17,7 +17,7 @@ from pathlib import Path
 
 from PIL import Image
 
-OUTPUT_WIDTH = 400
+OUTPUT_WIDTH = 500
 
 ALLOWED_STYLES = frozenset(
     {
@@ -54,7 +54,7 @@ def _build_kwargs(job: dict) -> dict:
     if "animated_scroll_direction" in job:
         kwargs["scroll_direction"] = str(job["animated_scroll_direction"])
     if style_name.endswith("_animated"):
-        kwargs["output_width"] = int(job.get("output_width", 400) or 300)
+        kwargs["output_width"] = int(job.get("output_width", 500) or OUTPUT_WIDTH)
     if style_name in ("style_shelf_1", "style_shelf_1_animated"):
         # shelf 与 multi 共用 worker 时不宜对英文用 1.2×；整体再收一档标题
         kwargs["font_size"] = (0.86, 0.94)

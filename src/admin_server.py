@@ -401,6 +401,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 图片代理等前缀匹配的公开路径
         if request.url.path.startswith("/api/emby/image-proxy/"):
             return await call_next(request)
+        if request.url.path.startswith("/api/covers/"):
+            return await call_next(request)
         # 验证 token
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
