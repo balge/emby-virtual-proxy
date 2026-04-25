@@ -891,9 +891,7 @@ async def _fetch_latest_images_for_real_library(
     users = await fetch_from_emby("/Users", config=config)
     if not users:
         return False
-    user_id = users[0].get("Id")
 
-    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
     params = {
         "ParentId": real_lib_id,
         "Recursive": "true",
@@ -904,16 +902,49 @@ async def _fetch_latest_images_for_real_library(
         "SortOrder": "Descending",
     }
 
+    items: list[dict] = []
+    hit_user_id: Optional[str] = None
+    def _user_probe_priority(u: dict) -> tuple[int, str]:
+        """
+        真实库封面拉图优先管理员用户（通常可见范围更完整），再回退其它用户。
+        """
+        policy = u.get("Policy") or {}
+        is_admin = bool(policy.get("IsAdministrator"))
+        name = str(u.get("Name") or "").strip().lower()
+        name_hint_admin = name in {"root", "admin", "administrator"}
+        # 0 = admin first, 1 = others; then by name for deterministic order
+        return (0 if (is_admin or name_hint_admin) else 1, name)
+
+    users_ordered = sorted(users, key=_user_probe_priority)
+
     try:
         async with create_client_session() as session:
-            async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: {resp.status}")
-                    return False
-                data = await resp.json()
-                items = data.get("Items", [])
+            for u in users_ordered:
+                user_id = str(u.get("Id") or "").strip()
+                if not user_id:
+                    continue
+                base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+                async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    items = data.get("Items", [])
+                    if items:
+                        hit_user_id = user_id
+                        logger.info(
+                            "Real lib %s cover probe hit user=%s name=%s admin=%s",
+                            real_lib_id,
+                            user_id,
+                            u.get("Name"),
+                            bool((u.get("Policy") or {}).get("IsAdministrator")),
+                        )
+                        break
     except Exception as e:
         logger.error(f"Failed to fetch latest items for real lib {real_lib_id}: {e}")
+        return False
+
+    if not items:
+        logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: no items for all users")
         return False
 
     def _has_cover_tag(item: dict) -> bool:
@@ -923,7 +954,9 @@ async def _fetch_latest_images_for_real_library(
 
     items_with_images = [item for item in items if _has_cover_tag(item)]
     if not items_with_images:
-        logger.warning(f"No items with cover images in real lib {real_lib_id}")
+        logger.warning(
+            f"No items with cover images in real lib {real_lib_id} (user={hit_user_id or 'unknown'})"
+        )
         return False
 
     selected_items = items_with_images[:9]
