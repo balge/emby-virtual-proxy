@@ -772,7 +772,11 @@ async def _fetch_images_from_vlib(
             )
             raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
 
-        items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
+        def _has_cover_tag(item: dict) -> bool:
+            tags = item.get("ImageTags", {}) or {}
+            return bool(tags.get("Primary") or tags.get("Thumb") or tags.get("Screenshot"))
+
+        items_with_images = [item for item in items if _has_cover_tag(item)]
         if not items_with_images:
             logger.warning(
                 "COVER_FETCH failed: cached items without primary images "
@@ -881,12 +885,12 @@ async def _fetch_latest_images_for_real_library(
     """从真实库中获取最新入库的媒体封面图片（按 DateCreated 降序）。"""
     if not config.emby_url or not config.emby_api_key:
         logger.warning("Cannot fetch images: Emby URL or API key not configured.")
-        return
+        return False
 
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
     users = await fetch_from_emby("/Users", config=config)
     if not users:
-        return
+        return False
     user_id = users[0].get("Id")
 
     base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
@@ -905,17 +909,22 @@ async def _fetch_latest_images_for_real_library(
             async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
                 if resp.status != 200:
                     logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: {resp.status}")
-                    return
+                    return False
                 data = await resp.json()
                 items = data.get("Items", [])
     except Exception as e:
         logger.error(f"Failed to fetch latest items for real lib {real_lib_id}: {e}")
-        return
+        return False
 
-    items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
+    def _has_cover_tag(item: dict) -> bool:
+        tags = item.get("ImageTags", {}) or {}
+        # Emby 某些库会把“截图封面”放在 Thumb / Screenshot，而非 Primary。
+        return bool(tags.get("Primary") or tags.get("Thumb") or tags.get("Screenshot"))
+
+    items_with_images = [item for item in items if _has_cover_tag(item)]
     if not items_with_images:
         logger.warning(f"No items with cover images in real lib {real_lib_id}")
-        return
+        return False
 
     selected_items = items_with_images[:9]
     async with create_client_session() as session:
@@ -929,6 +938,8 @@ async def _fetch_latest_images_for_real_library(
         )
     if not ok:
         logger.warning(f"Real lib {real_lib_id}: no cover images downloaded (style={cover_style!r})")
+        return False
+    return True
 
 
 async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppConfig):
@@ -970,7 +981,12 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         if config.custom_image_path:
             await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
         else:
-            await _fetch_latest_images_for_real_library(rl.id, image_gen_dir, config, cover_style=style_name)
+            fetched_ok = await _fetch_latest_images_for_real_library(
+                rl.id, image_gen_dir, config, cover_style=style_name
+            )
+            if not fetched_ok:
+                logger.warning(f"Real lib cover: no usable images fetched for {rl.name}")
+                return None
 
         zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
         en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
@@ -985,6 +1001,13 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 logger.warning(f"Real lib cover: no main image for {rl.name}")
+                return None
+        elif style_name == "style_shelf_1":
+            has_any_primary_slot = any(
+                (image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp")
+            )
+            if not has_any_primary_slot:
+                logger.warning(f"Real lib cover: no slot-1 image for shelf style in {rl.name}")
                 return None
 
         output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
