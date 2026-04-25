@@ -30,6 +30,13 @@ export const useMainStore = defineStore("main", {
       library: [],
       real_libraries: [],
       webhook: { enabled: false, secret: null, delay_seconds: 0 },
+      default_cover_style: "style_multi_1",
+      cover_style_variant: "static",
+      animation_duration: 8,
+      animation_fps: 24,
+      animated_image_count: 6,
+      animated_departure_type: "fly",
+      animated_scroll_direction: "alternate",
     },
     originalConfigForComparison: null,
     classifications: {},
@@ -110,6 +117,12 @@ export const useMainStore = defineStore("main", {
         hide: [],
         library: [],
         default_cover_style: "style_multi_1",
+        cover_style_variant: "static",
+        animation_duration: 8,
+        animation_fps: 24,
+        animated_image_count: 6,
+        animated_departure_type: "fly",
+        animated_scroll_direction: "alternate",
         show_missing_episodes: false,
         cache_refresh_interval: 12,
         webhook: { enabled: false, secret: null, delay_seconds: 0 },
@@ -162,6 +175,12 @@ export const useMainStore = defineStore("main", {
           ? JSON.parse(JSON.stringify(this.config.library))
           : [],
         default_cover_style: this.config.default_cover_style,
+        cover_style_variant: this.config.cover_style_variant,
+        animation_duration: this.config.animation_duration,
+        animation_fps: this.config.animation_fps,
+        animated_image_count: this.config.animated_image_count,
+        animated_departure_type: this.config.animated_departure_type,
+        animated_scroll_direction: this.config.animated_scroll_direction,
         show_missing_episodes: this.config.show_missing_episodes,
         cache_refresh_interval: this.config.cache_refresh_interval,
         webhook: this.config.webhook
@@ -193,6 +212,17 @@ export const useMainStore = defineStore("main", {
         : this.config.library || [];
       this.config.default_cover_style =
         p.default_cover_style ?? this.config.default_cover_style;
+      this.config.cover_style_variant =
+        p.cover_style_variant ?? this.config.cover_style_variant;
+      this.config.animation_duration =
+        p.animation_duration ?? this.config.animation_duration;
+      this.config.animation_fps = p.animation_fps ?? this.config.animation_fps;
+      this.config.animated_image_count =
+        p.animated_image_count ?? this.config.animated_image_count;
+      this.config.animated_departure_type =
+        p.animated_departure_type ?? this.config.animated_departure_type;
+      this.config.animated_scroll_direction =
+        p.animated_scroll_direction ?? this.config.animated_scroll_direction;
       this.config.show_missing_episodes =
         p.show_missing_episodes ?? this.config.show_missing_episodes;
       this.config.cache_refresh_interval =
@@ -843,6 +873,7 @@ export const useMainStore = defineStore("main", {
         fallback_tmdb_type: null,
         cache_refresh_interval: null,
         source_libraries: [],
+        random_hide_rating_and_above: null,
       };
       this.dialogVisible = true;
     },
@@ -851,6 +882,8 @@ export const useMainStore = defineStore("main", {
       this.currentLibrary = JSON.parse(JSON.stringify(library));
       if (this.currentLibrary.merge_by_tmdb_id === undefined)
         this.currentLibrary.merge_by_tmdb_id = false;
+      if (this.currentLibrary.random_hide_rating_and_above === undefined)
+        this.currentLibrary.random_hide_rating_and_above = null;
       if (!Array.isArray(this.currentLibrary.resource_ids))
         this.currentLibrary.resource_ids = [];
       if (

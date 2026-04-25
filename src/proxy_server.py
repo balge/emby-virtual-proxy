@@ -10,7 +10,7 @@ import aiohttp
 from http_client import create_client_session
 # 【【【 修改这一行 】】】
 from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, HTTPException, Query
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 from typing import Dict
@@ -65,6 +65,16 @@ if covers_dir.is_dir():
     logger.info(f"Successfully mounted generated covers directory at /covers")
 else:
     logger.warning(f"Generated covers directory not found at {covers_dir}, skipping mount.")
+
+
+@proxy_app.get("/api/covers/{item_id}")
+async def get_generated_cover_proxy(item_id: str):
+    """统一封面读取：按 gif -> png -> jpg 返回，供前端直连 proxy-core 端口使用。"""
+    for ext, media in (("gif", "image/gif"), ("png", "image/png"), ("jpg", "image/jpeg")):
+        p = covers_dir / f"{item_id}.{ext}"
+        if p.is_file():
+            return FileResponse(str(p), media_type=media)
+    raise HTTPException(status_code=404, detail="Cover not found")
 
 
 def _local_listen_port_from_scope(scope: dict) -> int | None:

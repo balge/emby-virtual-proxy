@@ -134,9 +134,14 @@ async def handle_home_latest_items(
 
     logger.info(f"HOME_LATEST_HANDLER: Intercepting request for latest items in vlib '{found_vlib.name}'.")
 
-    # Auto-generate cover if missing
-    image_file = COVERS_DIR / f"{found_vlib.id}.jpg"
-    if not image_file.is_file():
+    # Auto-generate cover if missing（动态封面为 .gif/.png，静态为 .jpg）
+    lid = str(found_vlib.id)
+    has_local_cover = (
+        (COVERS_DIR / f"{lid}.gif").is_file()
+        or (COVERS_DIR / f"{lid}.png").is_file()
+        or (COVERS_DIR / f"{lid}.jpg").is_file()
+    )
+    if not has_local_cover:
         logger.info(f"HOME_LATEST: Cover missing for vlib '{found_vlib.name}' ({found_vlib.id}), triggering auto-generation.")
         if found_vlib.id not in handler_autogen.GENERATION_IN_PROGRESS:
             api_key = params.get("X-Emby-Token") or config.emby_api_key

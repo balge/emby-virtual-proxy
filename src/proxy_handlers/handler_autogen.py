@@ -14,10 +14,36 @@ from urllib.parse import urlparse
 import config_manager
 from http_client import create_client_session
 import cover_subprocess
+from cover_emby_fetch import download_cover_images_emby
 
 logger = logging.getLogger(__name__)
 
 GENERATION_IN_PROGRESS = set()
+
+
+def _resolve_cover_worker_style(config, base_style: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if variant not in ("animated", "animated_apng"):
+        return base_style
+    return {
+        "style_single_1": "style_single_1_animated",
+        "style_single_2": "style_single_2_animated",
+        "style_multi_1": "style_multi_1_animated",
+        "style_shelf_1": "style_shelf_1_animated",
+    }.get(base_style, base_style)
+
+
+def _cover_output_extension(style_name: str) -> str:
+    return "gif" if style_name.endswith("_animated") else "jpg"
+
+
+def _resolve_animation_format(config, style_name: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if not style_name.endswith("_animated"):
+        return "jpeg"
+    if variant == "animated_apng":
+        return "apng"
+    return "gif"
 
 # 【【【 核心修正1：函数签名改变，接收用户ID和Token 】】】
 async def generate_poster_in_background(
@@ -109,34 +135,39 @@ async def generate_poster_in_background(
             logger.warning(f"后台任务：获取到的 {len(items)} 个项目中，没有带主图的项目，无法为库 '{vlib.name}' 生成封面。")
             return
             
-        selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
-        
-        # --- 3. 下载图片 ---
+        style_name = _resolve_cover_worker_style(config, config.default_cover_style)
+        unique_items: list[dict] = []
+        seen_ids: set[str] = set()
+        for it in random.sample(items_with_images, len(items_with_images)):
+            iid = str(it.get("Id") or "").strip()
+            if not iid or iid in seen_ids:
+                continue
+            seen_ids.add(iid)
+            unique_items.append(it)
+            if len(unique_items) >= 9:
+                break
+        selected_items = unique_items
+
+        # --- 3. 下载图片（样式四：1～9=Primary + fanart_n=Fanart→Backdrop；无宽屏时生成器用槽1 Primary 作底图；其余样式：全 Primary）---
         output_dir = Path("/app/config/images/")
         output_dir.mkdir(exist_ok=True)
         temp_dir = output_dir / f"temp_autogen_{library_id}"
         temp_dir.mkdir(exist_ok=True)
 
-        async def download_image(session, item, index):
-            image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-            download_headers = {'X-Emby-Token': api_key} # 使用正确的api_key
-            try:
-                async with session.get(image_url, headers=download_headers, timeout=20) as response:
-                    if response.status == 200:
-                        with open(temp_dir / f"{index}.jpg", "wb") as f: f.write(await response.read())
-                        return True
-            except Exception: return False
-            return False
-
         async with create_client_session() as session:
-            tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
-            results = await asyncio.gather(*tasks)
+            ok = await download_cover_images_emby(
+                session,
+                config.emby_url or "",
+                api_key,
+                selected_items,
+                temp_dir,
+                style_shelf_1=(style_name in ("style_shelf_1", "style_shelf_1_animated")),
+            )
 
-        if not any(results):
+        if not ok:
             logger.error(f"后台任务：为库 {library_id} 下载封面素材失败。")
             return
 
-        style_name = config.default_cover_style
         logger.info(f"后台任务：使用默认样式 '{style_name}' 为 '{vlib.name}' 生成封面...")
 
         if style_name not in cover_subprocess.ALLOWED_COVER_STYLES:
@@ -152,7 +183,16 @@ async def generate_poster_in_background(
                 logger.error(f"后台任务：无法找到用于单图模式的主素材图片 (1.jpg)。")
                 return
 
-        final_path = output_dir / f"{library_id}.jpg"
+        animation_format = _resolve_animation_format(config, style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(style_name)
+        final_path = output_dir / f"{library_id}.{output_ext}"
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                (output_dir / f"{library_id}.{ext}").unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
             "style_name": style_name,
             "title_zh": vlib.cover_title_zh or vlib.name,
@@ -161,7 +201,15 @@ async def generate_poster_in_background(
             "en_font_path": en_font_path,
             "library_dir": str(temp_dir),
             "output_path": str(final_path),
+            "output_width": 400,
             "crop_16_9": False,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             await cover_subprocess.run_cover_worker_job(job)

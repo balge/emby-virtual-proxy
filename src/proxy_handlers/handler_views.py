@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 # 【新增】定义封面存储路径
 COVERS_DIR = Path("/app/config/images")
 
+
+def _has_local_cover(item_id: str) -> bool:
+    sid = str(item_id)
+    return any((COVERS_DIR / f"{sid}.{ext}").is_file() for ext in ("gif", "png", "jpg"))
+
 async def handle_view_injection(
     request: Request,
     full_path: str,
@@ -74,9 +79,7 @@ async def handle_view_injection(
             }
             
             # 【【【 核心修改：在这里决定是否触发自动生成 】】】
-            image_file = COVERS_DIR / f"{vlib.id}.jpg"
-
-            if image_file.is_file():
+            if _has_local_cover(vlib.id):
                 # 图片已存在, 注入真实的 ImageTag
                 if vlib.image_tag:
                     vlib_data["ImageTags"]["Primary"] = vlib.image_tag

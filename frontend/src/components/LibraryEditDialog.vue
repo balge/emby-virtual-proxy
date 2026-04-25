@@ -69,6 +69,16 @@
         />
       </template>
 
+      <template v-if="store.currentLibrary.resource_type !== 'rsshub'">
+        <BaseSelect
+          v-model="store.currentLibrary.random_hide_rating_and_above"
+          :options="randomRatingThresholdOptions"
+          label="分级过滤"
+          hint="隐藏所选分级及以上内容；留空表示不过滤。"
+          placeholder="不过滤"
+        />
+      </template>
+
       <BaseSearchMultiSelect
         v-if="
           !['all', 'rsshub', 'random'].includes(
@@ -169,7 +179,7 @@
         </h3>
         <div v-if="store.currentLibrary.image_tag" class="mb-3">
           <img
-            :src="`/covers/${store.currentLibrary.id}.jpg?t=${store.currentLibrary.image_tag}`"
+            :src="`/api/covers/${store.currentLibrary.id}?t=${store.currentLibrary.image_tag}`"
             class="h-24 rounded-lg object-cover"
           />
         </div>
@@ -298,6 +308,7 @@ const coverStyleOptions = [
   { value: "style_multi_1", label: "样式一 (多图)" },
   { value: "style_single_1", label: "样式二 (单图)" },
   { value: "style_single_2", label: "样式三 (单图)" },
+  { value: "style_shelf_1", label: "样式四 (背景+底栏海报)" },
 ];
 const advancedFilterOptions = computed(() => [
   { value: null, label: "无" },
@@ -306,6 +317,23 @@ const advancedFilterOptions = computed(() => [
     label: f.name,
   })),
 ]);
+
+const randomRatingThresholdOptions = computed(() => {
+  const src = Array.isArray(store.classifications?.official_ratings)
+    ? store.classifications.official_ratings
+    : [];
+  const seen = new Set();
+  const items = [];
+
+  for (const x of src) {
+    const value = String(x?.id ?? x?.name ?? x ?? "").trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    items.push({ value, label: value });
+  }
+
+  return [{ value: null, label: "不过滤" }, ...items];
+});
 
 const realLibrariesList = computed(() => {
   const rlConfigs = store.config.real_libraries || [];

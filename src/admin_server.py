@@ -3,7 +3,7 @@
 import uvicorn
 from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 import uuid
 import random
@@ -39,6 +39,7 @@ from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
 from db_manager import DBManager, RSS_CACHE_DB
 from http_client import create_client_session
 from rss_subprocess import run_rss_refresh_job
+from cover_emby_fetch import download_cover_images_emby
 
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
@@ -400,6 +401,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # 图片代理等前缀匹配的公开路径
         if request.url.path.startswith("/api/emby/image-proxy/"):
             return await call_next(request)
+        if request.url.path.startswith("/api/covers/"):
+            return await call_next(request)
         # 验证 token
         auth_header = request.headers.get("Authorization", "")
         if auth_header.startswith("Bearer "):
@@ -424,7 +427,7 @@ class CoverRequest(BaseModel):
     library_id: str
     title_zh: str # 之前是 library_name，现在改为 title_zh
     title_en: Optional[str] = None
-    style_name: str # 新增：用于指定封面样式
+    style_name: Optional[str] = None  # 空则使用当前服务器 profile 的 default_cover_style
     temp_image_paths: Optional[List[str]] = None
 
 class LoginRequest(BaseModel):
@@ -660,89 +663,165 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
         logger.warning(f"No items fetched for '{vlib.name}', cache not updated.")
 
 
+def _list_rsshub_emby_item_ids(library_id: str, limit: int = 200) -> list[str]:
+    """
+    从 rss_library_items.db 读取 RSSHub 虚拟库中已匹配到 Emby 的条目 ID（按新到旧）。
+    这些 ID 可直接用于 /emby/Items/{id}/Images/Primary 下载封面，不依赖 vlib_items_cache。
+    """
+    try:
+        if not RSS_LIBRARY_ITEMS_DB.is_file():
+            return []
+        db = DBManager(RSS_LIBRARY_ITEMS_DB)
+        rows = db.fetchall(
+            """
+            SELECT emby_item_id
+            FROM rss_library_items
+            WHERE library_id = ?
+              AND emby_item_id IS NOT NULL
+              AND TRIM(emby_item_id) <> ''
+            ORDER BY rowid DESC
+            LIMIT ?
+            """,
+            (library_id, int(limit)),
+        )
+        ids: list[str] = []
+        seen: set[str] = set()
+        for row in rows:
+            iid = str(row["emby_item_id"]).strip()
+            if iid and iid not in seen:
+                seen.add(iid)
+                ids.append(iid)
+        return ids
+    except Exception as e:
+        logger.warning("Read rss_library_items failed for vlib=%s: %s", library_id, e)
+        return []
+
+
 # 【【【 最终版本的 _fetch_images_from_vlib 函数 】】】
-async def _fetch_images_from_vlib(library_id: str, temp_dir: Path, config: AppConfig, server_id: Optional[str] = None):
+async def _fetch_images_from_vlib(
+    library_id: str,
+    temp_dir: Path,
+    config: AppConfig,
+    server_id: Optional[str] = None,
+    cover_style: Optional[str] = None,
+):
     """
     Read items from proxy cache via internal API and download cover images.
     Uses the first user who has on-disk cache for this vlib (not Emby /Users order).
-    Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前 9 条导致刷新封面变化不大。
+    Random 虚拟库：从带主图的条目中随机抽最多 9 张，避免总用列表前几条导致刷新封面变化不大。
+
+    style_shelf_1：与其它样式一致只取 9 条；`n.jpg`=Primary，`fanart_n.jpg`=Fanart→Backdrop（可无）；有 fanart_* 时从中选底图，**九槽皆无宽屏图时用槽 1 Primary 作底图**；底栏用 Primary（内容去重）。
     """
     scoped_cfg, resolved_sid = _load_server_scoped_config(server_id)
-    cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
-    cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
-    if not cache_uid:
-        logger.warning(
-            "COVER_FETCH failed: no cache user resolved "
-            "server_id=%s vlib=%s cache_user_ids=%s",
-            resolved_sid,
-            library_id,
-            cache_user_ids,
-        )
-        raise HTTPException(
-            status_code=404,
-            detail="No cached items found for this virtual library. Please refresh data first.",
-        )
-    logger.info(
-        "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
-        resolved_sid,
-        library_id,
-        cache_uid,
-        cache_user_ids,
-        (scoped_cfg.emby_url or "").rstrip("/"),
-    )
-
-    items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=resolved_sid)
-    if not items:
-        logger.warning(
-            "COVER_FETCH failed: cached items empty "
-            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s",
-            resolved_sid,
-            library_id,
-            cache_uid,
-            cache_user_ids,
-        )
-        raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
-
-    items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
-
-    if not items_with_images:
-        logger.warning(
-            "COVER_FETCH failed: cached items without primary images "
-            "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s items=%s",
-            resolved_sid,
-            library_id,
-            cache_uid,
-            cache_user_ids,
-            len(items),
-        )
-        raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
-
     vlib_meta = next((v for v in scoped_cfg.virtual_libraries if v.id == library_id), None)
-    if vlib_meta and vlib_meta.resource_type == "random":
-        k = min(9, len(items_with_images))
-        selected_items = random.sample(items_with_images, k)
+    selected_items: list[dict]
+    if vlib_meta and vlib_meta.resource_type == "rsshub":
+        # RSSHub 数据不走 vlib_items_cache，而是保存在 rss_library_items.db。
+        # 这里直接使用已匹配到 Emby 的 item id 作为封面素材来源。
+        rss_item_ids = _list_rsshub_emby_item_ids(library_id)
+        if not rss_item_ids:
+            logger.warning(
+                "COVER_FETCH failed: rsshub emby ids empty server_id=%s vlib=%s",
+                resolved_sid,
+                library_id,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="No matched Emby items found for this RSS library. Please refresh RSS data first.",
+            )
+        selected_ids = rss_item_ids[:9]
+        selected_items = [{"Id": iid} for iid in selected_ids]
+        logger.info(
+            "COVER_FETCH rsshub source server_id=%s vlib=%s candidates=%s selected=%s",
+            resolved_sid,
+            library_id,
+            len(rss_item_ids),
+            len(selected_items),
+        )
     else:
-        selected_items = items_with_images[:9]
+        cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=resolved_sid)
+        cache_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
+        if not cache_uid:
+            logger.warning(
+                "COVER_FETCH failed: no cache user resolved "
+                "server_id=%s vlib=%s cache_user_ids=%s",
+                resolved_sid,
+                library_id,
+                cache_user_ids,
+            )
+            raise HTTPException(
+                status_code=404,
+                detail="No cached items found for this virtual library. Please refresh data first.",
+            )
+        logger.info(
+            "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
+            resolved_sid,
+            library_id,
+            cache_uid,
+            cache_user_ids,
+            (scoped_cfg.emby_url or "").rstrip("/"),
+        )
 
-    async def download_image(session, item, index):
-        image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-        headers = {'X-Emby-Token': config.emby_api_key}
-        try:
-            async with session.get(image_url, headers=headers, timeout=20) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    image_path = temp_dir / f"{index}.jpg"
-                    with open(image_path, "wb") as f:
-                        f.write(content)
-                    return True
-        except Exception:
-            return False
+        items = await _get_cached_items_from_proxy(library_id, user_id=cache_uid, server_id=resolved_sid)
+        if not items:
+            logger.warning(
+                "COVER_FETCH failed: cached items empty "
+                "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s",
+                resolved_sid,
+                library_id,
+                cache_uid,
+                cache_user_ids,
+            )
+            raise HTTPException(status_code=404, detail="No cached items found for this virtual library. Please refresh data first.")
+
+        def _has_cover_tag(item: dict) -> bool:
+            tags = item.get("ImageTags", {}) or {}
+            return bool(tags.get("Primary") or tags.get("Thumb") or tags.get("Screenshot"))
+
+        items_with_images = [item for item in items if _has_cover_tag(item)]
+        if not items_with_images:
+            logger.warning(
+                "COVER_FETCH failed: cached items without primary images "
+                "server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s items=%s",
+                resolved_sid,
+                library_id,
+                cache_uid,
+                cache_user_ids,
+                len(items),
+            )
+            raise HTTPException(status_code=404, detail="Cached items contain no items with cover images.")
+
+        def _pick_unique_items(source: list[dict], target: int, random_mode: bool) -> list[dict]:
+            unique: list[dict] = []
+            seen_ids: set[str] = set()
+            pool = random.sample(source, len(source)) if random_mode else source
+            for it in pool:
+                iid = str(it.get("Id") or "").strip()
+                if not iid or iid in seen_ids:
+                    continue
+                seen_ids.add(iid)
+                unique.append(it)
+                if len(unique) >= target:
+                    break
+            return unique
+
+        selected_items = _pick_unique_items(
+            items_with_images,
+            target=9,
+            random_mode=bool(vlib_meta and vlib_meta.resource_type == "random"),
+        )
 
     async with create_client_session() as session:
-        tasks = [download_image(session, item, i + 1) for i, item in enumerate(selected_items)]
-        results = await asyncio.gather(*tasks)
+        ok = await download_cover_images_emby(
+            session,
+            scoped_cfg.emby_url or "",
+            scoped_cfg.emby_api_key or "",
+            selected_items,
+            temp_dir,
+            style_shelf_1=(cover_style in ("style_shelf_1", "style_shelf_1_animated")),
+        )
 
-    if not any(results):
+    if not ok:
         raise HTTPException(status_code=500, detail="所有封面素材下载失败，无法生成海报。")
 
 @api_router.post("/upload_temp_image", tags=["Cover Generator"])
@@ -813,62 +892,112 @@ async def _admin_emby_get_json(
         return None
 
 
-async def _fetch_latest_images_for_real_library(real_lib_id: str, temp_dir: Path, config: AppConfig):
+async def _fetch_latest_images_for_real_library(
+    real_lib_id: str,
+    temp_dir: Path,
+    config: AppConfig,
+    cover_style: Optional[str] = None,
+):
     """从真实库中获取最新入库的媒体封面图片（按 DateCreated 降序）。"""
     if not config.emby_url or not config.emby_api_key:
         logger.warning("Cannot fetch images: Emby URL or API key not configured.")
-        return
+        return False
 
     headers = {'X-Emby-Token': config.emby_api_key, 'Accept': 'application/json'}
     users = await fetch_from_emby("/Users", config=config)
     if not users:
-        return
-    user_id = users[0].get("Id")
+        return False
 
-    base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
     params = {
         "ParentId": real_lib_id,
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
         "Fields": "ImageTags,DateCreated",
-        "Limit": "9",
+        "Limit": "100",
         "SortBy": "DateCreated",
         "SortOrder": "Descending",
     }
 
+    items: list[dict] = []
+    hit_user_id: Optional[str] = None
+    def _user_probe_priority(u: dict) -> tuple[int, str]:
+        """
+        真实库封面拉图优先管理员用户（通常可见范围更完整），再回退其它用户。
+        """
+        policy = u.get("Policy") or {}
+        is_admin = bool(policy.get("IsAdministrator"))
+        name = str(u.get("Name") or "").strip().lower()
+        name_hint_admin = name in {"root", "admin", "administrator"}
+        # 0 = admin first, 1 = others; then by name for deterministic order
+        return (0 if (is_admin or name_hint_admin) else 1, name)
+
+    users_ordered = sorted(users, key=_user_probe_priority)
+
     try:
         async with create_client_session() as session:
-            async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
-                if resp.status != 200:
-                    logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: {resp.status}")
-                    return
-                data = await resp.json()
-                items = data.get("Items", [])
+            for u in users_ordered:
+                user_id = str(u.get("Id") or "").strip()
+                if not user_id:
+                    continue
+                base_url = f"{config.emby_url.rstrip('/')}/emby/Users/{user_id}/Items"
+                async with session.get(base_url, params=params, headers=headers, timeout=30) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    items = data.get("Items", [])
+                    if items:
+                        hit_user_id = user_id
+                        logger.info(
+                            "Real lib %s cover probe hit user=%s name=%s admin=%s",
+                            real_lib_id,
+                            user_id,
+                            u.get("Name"),
+                            bool((u.get("Policy") or {}).get("IsAdministrator")),
+                        )
+                        break
     except Exception as e:
         logger.error(f"Failed to fetch latest items for real lib {real_lib_id}: {e}")
-        return
+        return False
 
-    items_with_images = [item for item in items if item.get("ImageTags", {}).get("Primary")]
+    if not items:
+        logger.warning(f"Fetch latest items for real lib {real_lib_id} failed: no items for all users")
+        return False
+
+    def _has_cover_tag(item: dict) -> bool:
+        tags = item.get("ImageTags", {}) or {}
+        # Emby 某些库会把“截图封面”放在 Thumb / Screenshot，而非 Primary。
+        return bool(tags.get("Primary") or tags.get("Thumb") or tags.get("Screenshot"))
+
+    items_with_images = [item for item in items if _has_cover_tag(item)]
     if not items_with_images:
-        logger.warning(f"No items with cover images in real lib {real_lib_id}")
-        return
+        logger.warning(
+            f"No items with cover images in real lib {real_lib_id} (user={hit_user_id or 'unknown'})"
+        )
+        return False
 
-    async def download_image(sess, item, index):
-        image_url = f"{config.emby_url.rstrip('/')}/emby/Items/{item['Id']}/Images/Primary"
-        try:
-            async with sess.get(image_url, headers=headers, timeout=20) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    image_path = temp_dir / f"{index}.jpg"
-                    with open(image_path, "wb") as f:
-                        f.write(content)
-                    return True
-        except Exception:
-            return False
-
+    selected_items: list[dict] = []
+    seen_ids: set[str] = set()
+    for it in items_with_images:
+        iid = str(it.get("Id") or "").strip()
+        if not iid or iid in seen_ids:
+            continue
+        seen_ids.add(iid)
+        selected_items.append(it)
+        if len(selected_items) >= 9:
+            break
     async with create_client_session() as session:
-        tasks = [download_image(session, item, i + 1) for i, item in enumerate(items_with_images)]
-        await asyncio.gather(*tasks)
+        ok = await download_cover_images_emby(
+            session,
+            config.emby_url or "",
+            config.emby_api_key or "",
+            selected_items,
+            temp_dir,
+            style_shelf_1=(cover_style in ("style_shelf_1", "style_shelf_1_animated")),
+        )
+    if not ok:
+        logger.warning(f"Real lib {real_lib_id}: no cover images downloaded (style={cover_style!r})")
+        return False
+    return True
 
 
 async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppConfig):
@@ -878,9 +1007,15 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         return
     url = f"{config.emby_url.rstrip('/')}/emby/Items/{item_id}/Images/Primary"
     image_b64 = base64.b64encode(image_bytes).decode('ascii')
+    if image_bytes.startswith((b"GIF87a", b"GIF89a")):
+        mime = "image/gif"
+    elif image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    else:
+        mime = "image/jpeg"
     headers = {
         'X-Emby-Token': config.emby_api_key,
-        'Content-Type': 'image/jpeg',
+        'Content-Type': mime,
     }
     try:
         async with create_client_session() as session:
@@ -894,11 +1029,43 @@ async def _upload_image_to_emby(item_id: str, image_bytes: bytes, config: AppCon
         logger.error(f"Failed to upload image to Emby for {item_id}: {e}")
 
 
+def _resolve_cover_worker_style(config: AppConfig, base_style: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if variant not in ("animated", "animated_apng"):
+        return base_style
+    animated_map = {
+        # 参考插件映射：
+        # 参考样式1 -> 本项目样式2(style_single_1)
+        # 参考样式2 -> 本项目样式3(style_single_2)
+        # 参考样式3 -> 本项目样式1(style_multi_1)
+        "style_single_1": "style_single_1_animated",
+        "style_single_2": "style_single_2_animated",
+        "style_multi_1": "style_multi_1_animated",
+        "style_shelf_1": "style_shelf_1_animated",
+    }
+    return animated_map.get(base_style, base_style)
+
+
+def _cover_output_extension(style_name: str) -> str:
+    if not style_name.endswith("_animated"):
+        return "jpg"
+    return "gif"
+
+
+def _resolve_animation_format(config: AppConfig, style_name: str) -> str:
+    variant = str(getattr(config, "cover_style_variant", "static") or "static").strip().lower()
+    if not style_name.endswith("_animated"):
+        return "jpeg"
+    if variant == "animated_apng":
+        return "apng"
+    return "gif"
+
+
 async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig) -> Optional[str]:
     """为真实库生成封面，复用虚拟库封面生成逻辑。"""
     title_zh = rl.cover_title_zh or rl.name
     title_en = rl.cover_title_en or ""
-    style_name = config.default_cover_style
+    style_name = _resolve_cover_worker_style(config, config.default_cover_style)
 
     FONT_DIR = "/app/src/assets/fonts/"
     OUTPUT_DIR = "/app/config/images/"
@@ -910,7 +1077,12 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
         if config.custom_image_path:
             await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
         else:
-            await _fetch_latest_images_for_real_library(rl.id, image_gen_dir, config)
+            fetched_ok = await _fetch_latest_images_for_real_library(
+                rl.id, image_gen_dir, config, cover_style=style_name
+            )
+            if not fetched_ok:
+                logger.warning(f"Real lib cover: no usable images fetched for {rl.name}")
+                return None
 
         zh_font_path = config.custom_zh_font_path if config.custom_zh_font_path else os.path.join(FONT_DIR, "multi_1_zh.ttf")
         en_font_path = config.custom_en_font_path if config.custom_en_font_path else os.path.join(FONT_DIR, "multi_1_en.ttf")
@@ -926,8 +1098,24 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             if not main_image_path.is_file():
                 logger.warning(f"Real lib cover: no main image for {rl.name}")
                 return None
+        elif style_name in ("style_shelf_1", "style_shelf_1_animated"):
+            has_any_primary_slot = any(
+                (image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp")
+            )
+            if not has_any_primary_slot:
+                logger.warning(f"Real lib cover: no slot-1 image for shelf style in {rl.name}")
+                return None
 
-        output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.jpg")
+        animation_format = _resolve_animation_format(config, style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(style_name)
+        output_path = os.path.join(OUTPUT_DIR, f"{rl.id}.{output_ext}")
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                Path(os.path.join(OUTPUT_DIR, f"{rl.id}.{ext}")).unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
             "style_name": style_name,
             "title_zh": title_zh,
@@ -936,7 +1124,15 @@ async def _generate_real_library_cover(rl: RealLibraryConfig, config: AppConfig)
             "en_font_path": en_font_path,
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
+            "output_width": 400,
             "crop_16_9": True,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             await cover_subprocess.run_cover_worker_job(job)
@@ -1350,11 +1546,13 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
     素材来自现有磁盘缓存（_resolve_cover_cache_user_id）；无缓存时需先「刷新数据」。
     """
     config, resolved_sid = _load_server_scoped_config(server_id)
-    style_name = config.default_cover_style
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
-        image_tag = await _generate_library_cover(vlib.id, title_zh, title_en, style_name, server_id=resolved_sid)
+        # style_name=None：在 _generate_library_cover 内用当前 server profile 的 default_cover_style + variant
+        image_tag = await _generate_library_cover(
+            vlib.id, title_zh, title_en, None, server_id=resolved_sid
+        )
         if image_tag:
             current_config = config_manager.load_config(apply_active_profile=False)
             sid = resolved_sid or str(config.admin_active_server_id or "")
@@ -1379,12 +1577,21 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
 async def refresh_library_cover(library_id: str):
     """Regenerate cover for a single virtual library."""
     config = config_manager.load_config()
+    raw = config_manager.load_config(apply_active_profile=False)
     vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
+    resolved_sid = str(raw.admin_active_server_id or "")
+    if not vlib:
+        for s in raw.servers:
+            p = raw.get_server_profile(str(s.id))
+            libs = p.get("library") or []
+            found = next((x for x in libs if str(x.get("id")) == str(library_id)), None)
+            if found:
+                vlib = VirtualLibrary.model_validate(found)
+                resolved_sid = str(s.id)
+                break
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
-    cfg = config_manager.load_config(apply_active_profile=False)
-    sid = str(cfg.admin_active_server_id or "")
-    asyncio.create_task(_regenerate_cover_for_vlib(vlib, server_id=sid))
+    asyncio.create_task(_regenerate_cover_for_vlib(vlib, server_id=resolved_sid or None))
     return {"message": f"Cover refresh started for '{vlib.name}'."}
 
 
@@ -1436,8 +1643,16 @@ async def refresh_all_covers():
 @api_router.post("/generate-cover", tags=["Cover Generator"])
 async def generate_cover(body: CoverRequest):
     try:
-        # 调用核心生成逻辑，并传递样式名称
-        image_tag = await _generate_library_cover(body.library_id, body.title_zh, body.title_en, body.style_name, body.temp_image_paths)
+        raw = config_manager.load_config(apply_active_profile=False)
+        sid = str(raw.admin_active_server_id or "") or None
+        image_tag = await _generate_library_cover(
+            body.library_id,
+            body.title_zh,
+            body.title_en,
+            body.style_name,
+            body.temp_image_paths,
+            server_id=sid,
+        )
         if image_tag:
             # 成功后，需要找到对应的虚拟库并更新其 image_tag
             config = config_manager.load_config()
@@ -1488,11 +1703,12 @@ async def _generate_library_cover(
     library_id: str,
     title_zh: str,
     title_en: Optional[str],
-    style_name: str,
+    style_name: Optional[str] = None,
     temp_image_paths: Optional[List[str]] = None,
     server_id: Optional[str] = None,
 ) -> Optional[str]:
     config, resolved_sid = _load_server_scoped_config(server_id)
+    base_style = (style_name or "").strip() or (config.default_cover_style or "style_multi_1")
     # --- 1. 定义路径 ---
     FONT_DIR = "/app/src/assets/fonts/"
     OUTPUT_DIR = "/app/config/images/"
@@ -1520,10 +1736,24 @@ async def _generate_library_cover(
             elif config.custom_image_path:
                 await _fetch_images_from_custom_path(config.custom_image_path, image_gen_dir)
             else:
-                await _fetch_images_from_vlib(library_id, image_gen_dir, config, server_id=resolved_sid)
+                await _fetch_images_from_vlib(
+                    library_id,
+                    image_gen_dir,
+                    config,
+                    resolved_sid,
+                    cover_style=base_style,
+                )
 
         # --- 3. 【核心改动】: 动态调用所选的样式生成函数 ---
-        logger.info(f"素材准备完毕，开始使用样式 '{style_name}' 为 '{title_zh}' ({library_id}) 生成封面...")
+        worker_style_name = _resolve_cover_worker_style(config, base_style)
+        logger.info(
+            "素材准备完毕，library=%s base_style=%s variant=%s worker=%s server_id=%s",
+            library_id,
+            base_style,
+            getattr(config, "cover_style_variant", None),
+            worker_style_name,
+            resolved_sid,
+        )
 
         # --- 字体选择逻辑 ---
         vlib = next((lib for lib in config.virtual_libraries if lib.id == library_id), None)
@@ -1544,24 +1774,53 @@ async def _generate_library_cover(
         else:
             en_font_path = os.path.join(FONT_DIR, "multi_1_en.ttf")
 
-        if style_name in ['style_single_1', 'style_single_2']:
+        if worker_style_name in ['style_single_1', 'style_single_2']:
             main_image_path = image_gen_dir / "1.jpg"
             if not main_image_path.is_file():
                 raise HTTPException(status_code=404, detail="无法找到用于单图模式的主素材图片 (1.jpg)。")
-        elif style_name != 'style_multi_1':
-            raise HTTPException(status_code=400, detail=f"未知的样式名称: {style_name}")
+        elif worker_style_name in ("style_shelf_1", "style_shelf_1_animated"):
+            bg_ok = any((image_gen_dir / f"1{ext}").is_file() for ext in (".jpg", ".jpeg", ".png", ".webp"))
+            if not bg_ok:
+                raise HTTPException(
+                    status_code=404,
+                    detail="无法找到用于背景+底栏样式的首图 (1.jpg / 1.png 等)。",
+                )
+        elif worker_style_name not in (
+            'style_multi_1',
+            'style_multi_1_animated',
+            'style_single_1_animated',
+            'style_single_2_animated',
+        ):
+            raise HTTPException(status_code=400, detail=f"未知的样式名称: {worker_style_name}")
 
-        final_filename = f"{library_id}.jpg"
+        animation_format = _resolve_animation_format(config, worker_style_name)
+        output_ext = "png" if animation_format == "apng" else _cover_output_extension(worker_style_name)
+        final_filename = f"{library_id}.{output_ext}"
         output_path = os.path.join(OUTPUT_DIR, final_filename)
+        for ext in ("jpg", "gif", "png"):
+            if ext == output_ext:
+                continue
+            try:
+                Path(os.path.join(OUTPUT_DIR, f"{library_id}.{ext}")).unlink(missing_ok=True)
+            except OSError:
+                pass
         job = {
-            "style_name": style_name,
+            "style_name": worker_style_name,
             "title_zh": title_zh,
             "title_en": title_en or "",
             "zh_font_path": zh_font_path,
             "en_font_path": en_font_path,
             "library_dir": str(image_gen_dir),
             "output_path": output_path,
+            "output_width": 400,
             "crop_16_9": False,
+            "output_format": animation_format,
+            "animation_format": animation_format,
+            "animation_duration": int(getattr(config, "animation_duration", 8) or 8),
+            "animation_fps": int(getattr(config, "animation_fps", 24) or 24),
+            "animated_image_count": int(getattr(config, "animated_image_count", 6) or 6),
+            "animated_departure_type": str(getattr(config, "animated_departure_type", "fly") or "fly"),
+            "animated_scroll_direction": str(getattr(config, "animated_scroll_direction", "alternate") or "alternate"),
         }
         try:
             import cover_subprocess
@@ -1868,10 +2127,37 @@ async def proxy_emby_image(item_id: str):
         raise HTTPException(status_code=502, detail=f"Emby connection error: {e}")
 
 
+@api_router.get("/covers/{item_id}", tags=["Cover Generator"])
+async def get_generated_cover(item_id: str):
+    """按优先级返回已生成封面：GIF -> APNG(PNG) -> JPG。"""
+    covers_dir = Path("/app/config/images")
+    for ext, media in (("gif", "image/gif"), ("png", "image/png"), ("jpg", "image/jpeg")):
+        p = covers_dir / f"{item_id}.{ext}"
+        if p.is_file():
+            return FileResponse(str(p), media_type=media)
+    raise HTTPException(status_code=404, detail="Cover not found")
+
+
 @api_router.get("/emby/classifications", tags=["Emby Helper"])
 async def get_emby_classifications():
     def format_items(items_list: List) -> List:
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
+
+    def format_rating_items(items_list: List) -> List:
+        """按 Emby 官方 /OfficialRatings（Items: OfficialRatingItem[]）格式转换。"""
+        if not isinstance(items_list, list):
+            return []
+        out = []
+        seen = set()
+        for item in items_list:
+            if not isinstance(item, dict):
+                continue
+            s = str(item.get("Name") or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append({"name": s, "id": s})
+        return out
 
     scoped, _sid = _load_server_scoped_config()
     try:
@@ -1880,11 +2166,20 @@ async def get_emby_classifications():
             "genres": fetch_from_emby("/Genres", config=scoped),
             "tags": fetch_from_emby("/Tags", config=scoped),
             "studios": fetch_from_emby("/Studios", config=scoped),
+            "official_ratings": fetch_from_emby("/OfficialRatings", config=scoped),
         }
         results_list = await asyncio.gather(*tasks.values())
         results_dict = dict(zip(tasks.keys(), results_list))
         results_dict["persons"] = []
-        return {key: format_items(value) for key, value in results_dict.items()}
+
+        return {
+            "collections": format_items(results_dict["collections"]),
+            "genres": format_items(results_dict["genres"]),
+            "tags": format_items(results_dict["tags"]),
+            "studios": format_items(results_dict["studios"]),
+            "persons": [],
+            "official_ratings": format_rating_items(results_dict.get("official_ratings") or []),
+        }
     except HTTPException as e:
         raise e
 
