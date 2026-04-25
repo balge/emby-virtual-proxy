@@ -19,10 +19,15 @@
         @keydown.escape.prevent="close"
         @keydown.down.prevent="openAndFocusFirst"
       >
-        <span
-          class="min-w-0 flex-1 truncate text-left"
-          :class="labelTextClass"
-        >{{ displayLabel }}</span>
+        <span class="min-w-0 flex flex-1 items-center gap-2 text-left">
+          <img
+            v-if="selectedOption?.preview"
+            :src="selectedOption.preview"
+            :alt="selectedOption.label"
+            class="h-6 w-10 shrink-0 rounded object-cover border border-gray-200 dark:border-gray-600"
+          />
+          <span class="min-w-0 flex-1 truncate" :class="labelTextClass">{{ displayLabel }}</span>
+        </span>
         <ChevronDownIcon
           class="h-4 w-4 shrink-0 text-gray-500 dark:text-gray-400 transition-transform"
           :class="{ 'rotate-180': open }"
@@ -44,15 +49,25 @@
             type="button"
             role="option"
             :aria-selected="isSelected(opt.value)"
-            class="flex w-full items-center px-3 py-2 text-left text-sm transition-colors"
-            :class="optionRowClass(opt.value, idx)"
+            class="flex w-full px-3 py-2 text-left text-sm transition-colors"
+            :class="[
+              opt.preview ? 'relative flex-col items-start' : 'items-center',
+              optionRowClass(opt.value, idx),
+            ]"
             @click="selectOption(opt.value)"
             @mouseenter="highlightIndex = idx"
           >
-            <span class="min-w-0 flex-1 truncate">{{ opt.label }}</span>
+            <img
+              v-if="opt.preview"
+              :src="opt.preview"
+              :alt="opt.label"
+              class="mb-1.5 max-h-40 w-full rounded object-contain border border-gray-200 dark:border-gray-600 bg-gray-50 dark:bg-gray-900"
+            />
+            <span class="min-w-0 w-full truncate">{{ opt.label }}</span>
             <CheckIcon
               v-if="isSelected(opt.value)"
               class="ml-2 h-4 w-4 shrink-0 text-primary-600 dark:text-primary-400"
+              :class="opt.preview ? 'absolute right-3 top-3' : ''"
               aria-hidden="true"
             />
           </button>
@@ -109,6 +124,10 @@ const displayLabel = computed(() => {
   if (o) return o.label
   return props.placeholder
 })
+
+const selectedOption = computed(() =>
+  props.options.find((x) => valuesEqual(x.value, props.modelValue)),
+)
 
 /** 当前值未对应任何 option 时展示 placeholder（含空字符串），用浅色与已选项区分 */
 const isPlaceholderState = computed(

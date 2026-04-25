@@ -279,14 +279,34 @@ import BaseButton from "@/components/ui/BaseButton.vue";
 import BaseSwitch from "@/components/ui/BaseSwitch.vue";
 import ConfirmPopover from "@/components/ui/ConfirmPopover.vue";
 import SwitchCard from "@/components/SwitchCard.vue";
+import previewMulti1 from "@/images/style_preview_style_multi_1.jpg";
+import previewSingle1 from "@/images/style_preview_style_single_1.jpg";
+import previewSingle2 from "@/images/style_preview_style_single_2.jpg";
+import previewShelf1 from "@/images/style_preview_style_shelf_1.jpg";
 
 const store = useMainStore();
 
 const coverStyleOptions = [
-  { value: "style_multi_1", label: "样式一 (多图)" },
-  { value: "style_single_1", label: "样式二 (单图)" },
-  { value: "style_single_2", label: "样式三 (单图)" },
-  { value: "style_shelf_1", label: "样式四 (背景+底栏海报)" },
+  {
+    value: "style_multi_1",
+    label: "样式一 (多图)",
+    preview: previewMulti1,
+  },
+  {
+    value: "style_single_1",
+    label: "样式二 (单图)",
+    preview: previewSingle1,
+  },
+  {
+    value: "style_single_2",
+    label: "样式三 (单图)",
+    preview: previewSingle2,
+  },
+  {
+    value: "style_shelf_1",
+    label: "样式四 (背景+底栏海报)",
+    preview: previewShelf1,
+  },
 ];
 
 const webhookCallbackUrl = computed(() =>
