@@ -110,11 +110,10 @@ async def generate_poster_in_background(
             logger.warning(f"后台任务：获取到的 {len(items)} 个项目中，没有带主图的项目，无法为库 '{vlib.name}' 生成封面。")
             return
             
+        style_name = config.default_cover_style
         selected_items = random.sample(items_with_images, min(9, len(items_with_images)))
 
-        style_name = config.default_cover_style
-
-        # --- 3. 下载图片（样式四：1=Fanart 链 + 2～6=Primary；其余样式：全 Primary）---
+        # --- 3. 下载图片（样式四：1=Fanart 链 + 2～9=Primary 预选；其余样式：全 Primary）---
         output_dir = Path("/app/config/images/")
         output_dir.mkdir(exist_ok=True)
         temp_dir = output_dir / f"temp_autogen_{library_id}"

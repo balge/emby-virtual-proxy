@@ -28,6 +28,9 @@ def _build_kwargs(job: dict) -> dict:
         "font_path": (job["zh_font_path"], job["en_font_path"]),
         "font_size": (1, 1.2),
     }
+    if style_name == "style_shelf_1":
+        # shelf 与 multi 共用 worker 时不宜对英文用 1.2×；整体再收一档标题
+        kwargs["font_size"] = (0.86, 0.94)
     if style_name in ("style_multi_1", "style_shelf_1"):
         kwargs["library_dir"] = str(library_dir)
     elif style_name in ("style_single_1", "style_single_2"):

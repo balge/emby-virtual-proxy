@@ -3,7 +3,7 @@ Emby 封面素材下载：供虚拟库 / 真实库拉取及后台自动生成共
 
 style_shelf_1（样式四）：
 - 1.jpg：第 **1** 条媒体的 Fanart → Art → Backdrop → Primary（底图）
-- 2～6.jpg：第 **2～6** 条媒体的 Primary（底栏五槽）；不足 6 条时底栏从索引 1 起循环，**不再复用索引 0**，避免与底图同源。
+- 2～9.jpg：第 **2～9** 条媒体的 Primary，**最多 8 张**预选（与其它样式一致共取 9 条）；生成器按内容去重后取底栏 5 槽，不足用底图补齐。
 其他样式：1～N 均为各条目的 Primary（与历史逻辑一致）。
 """
 
@@ -71,7 +71,7 @@ async def download_cover_images_emby(
     """
     将图片写入 temp_dir 的 1.jpg、2.jpg…
     非 shelf：最多 len(selected_items) 张，均为 Primary。
-    shelf：必须成功写入 1.jpg（媒体[0] 底图）；2～6.jpg 为媒体[1]～[5] 的 Primary（可部分失败，由生成器用底图补齐）。
+    shelf：必须成功写入 1.jpg（媒体[0] 底图）；2～9.jpg 为媒体[1]～[min(8,n-1)] 的 Primary，最多 8 张预选（可部分失败，由生成器去重后取 5 槽并用底图补齐）。
     """
     if not selected_items:
         return False
@@ -91,15 +91,12 @@ async def download_cover_images_emby(
         if not bg_ok:
             return False
         n = len(selected_items)
-        if n == 1:
-            tile_indices = [0, 0, 0, 0, 0]
-        elif n < 6:
-            pool = list(range(1, n))
-            tile_indices = [pool[i % len(pool)] for i in range(5)]
-        else:
-            tile_indices = [1, 2, 3, 4, 5]
-        for i in range(5):
-            item = selected_items[tile_indices[i]]
+        # 2.jpg … 9.jpg：最多 8 个条目（索引 1…8），与其它封面同样只拉 9 条；不写索引 0，避免与 1.jpg 同源。
+        for j in range(8):
+            item_idx = 1 + j
+            if item_idx >= n:
+                break
+            item = selected_items[item_idx]
             iid = str(item.get("Id") or "").strip()
             if not iid:
                 continue
@@ -109,7 +106,7 @@ async def download_cover_images_emby(
                 api_key,
                 iid,
                 ("Primary",),
-                temp_dir / f"{i + 2}.jpg",
+                temp_dir / f"{j + 2}.jpg",
             )
         return True
 
