@@ -104,7 +104,7 @@ const store = useMainStore()
 const libs = computed(() => store.config.real_libraries || [])
 
 const getCoverUrl = (row) => {
-  if (row.image_tag) return `/covers/${row.id}.jpg?t=${row.image_tag}`
+  if (row.image_tag) return `/api/covers/${row.id}?t=${row.image_tag}`
   return `/api/emby/image-proxy/${row.id}`
 }
 

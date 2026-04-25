@@ -3,7 +3,7 @@
 import uvicorn
 from fastapi import FastAPI, APIRouter, HTTPException, Response, Query, File, UploadFile
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from pathlib import Path
 import uuid
 import random
@@ -2123,6 +2123,17 @@ async def proxy_emby_image(item_id: str):
                 return Response(content=content, media_type=content_type)
     except aiohttp.ClientError as e:
         raise HTTPException(status_code=502, detail=f"Emby connection error: {e}")
+
+
+@api_router.get("/covers/{item_id}", tags=["Cover Generator"])
+async def get_generated_cover(item_id: str):
+    """按优先级返回已生成封面：GIF -> APNG(PNG) -> JPG。"""
+    covers_dir = Path("/app/config/images")
+    for ext, media in (("gif", "image/gif"), ("png", "image/png"), ("jpg", "image/jpeg")):
+        p = covers_dir / f"{item_id}.{ext}"
+        if p.is_file():
+            return FileResponse(str(p), media_type=media)
+    raise HTTPException(status_code=404, detail="Cover not found")
 
 
 @api_router.get("/emby/classifications", tags=["Emby Helper"])

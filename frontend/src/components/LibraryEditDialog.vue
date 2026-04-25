@@ -179,7 +179,7 @@
         </h3>
         <div v-if="store.currentLibrary.image_tag" class="mb-3">
           <img
-            :src="`/covers/${store.currentLibrary.id}.jpg?t=${store.currentLibrary.image_tag}`"
+            :src="`/api/covers/${store.currentLibrary.id}?t=${store.currentLibrary.image_tag}`"
             class="h-24 rounded-lg object-cover"
           />
         </div>

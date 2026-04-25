@@ -166,7 +166,7 @@
                 class="w-36 mx-auto aspect-video rounded-lg overflow-hidden bg-gray-100 dark:bg-gray-700"
               >
                 <img
-                  :src="`/covers/${row.id}.jpg?t=${row.image_tag}`"
+                  :src="`/api/covers/${row.id}?t=${row.image_tag}`"
                   class="w-full h-full object-cover"
                 />
               </div>
@@ -331,7 +331,7 @@
           class="w-full aspect-video bg-gray-100 dark:bg-gray-700"
         >
           <img
-            :src="`/covers/${row.id}.jpg?t=${row.image_tag}`"
+            :src="`/api/covers/${row.id}?t=${row.image_tag}`"
             class="w-full h-full object-cover"
           />
         </div>
