@@ -225,7 +225,9 @@ def create_style_shelf_1_animated(
 
         fps = max(1, int(animation_fps))
         duration = max(2, int(animation_duration))
-        n_frames = min(240, max(12, fps * duration))
+        # 让配置时长真正生效：此前 240 帧上限会把长时长截短（例如 25s@24fps 被截到约 10s）。
+        # 保留较高的安全上限以避免异常配置导致内存飙升。
+        n_frames = min(2400, max(12, fps * duration))
 
         frames: list[Image.Image] = []
         for fi in range(n_frames):
