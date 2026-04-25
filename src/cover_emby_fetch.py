@@ -2,8 +2,9 @@
 Emby 封面素材下载：供虚拟库 / 真实库拉取及后台自动生成共用。
 
 style_shelf_1（样式四）：
-- 九条媒体各写 **`n.jpg`=Primary**、**`fanart_n.jpg`=宽屏图（Fanart→Backdrop）**。若九槽均无宽屏图，生成器 **退回用槽 1 的 Primary** 作全屏底图；下载侧只需 **至少一张 Primary** 成功即可继续。
-其他样式：1～N 均为各条目的 Primary（与历史逻辑一致）。
+- 九条媒体各写 **`n.jpg`=主封面图（Primary→Thumb→Screenshot）**、**`fanart_n.jpg`=宽屏图（Fanart→Backdrop）**。
+- 若九槽均无宽屏图，生成器 **退回用槽 1 的主封面图** 作全屏底图；下载侧只需 **至少一张主封面图** 成功即可继续。
+其他样式：1～N 均为各条目的主封面图（Primary→Thumb→Screenshot）。
 """
 
 from __future__ import annotations
@@ -66,8 +67,9 @@ async def download_cover_images_emby(
 ) -> bool:
     """
     将图片写入 temp_dir 的 1.jpg、2.jpg…
-    非 shelf：最多 len(selected_items) 张，均为 Primary。
-    shelf：各槽 Primary 写入 `n.jpg`；`fanart_n.jpg` 为 **Fanart → Backdrop**（可全部失败）。须至少成功 **一张 Primary**（通常 `1.jpg`）。
+    非 shelf：最多 len(selected_items) 张，写入主封面图（Primary→Thumb→Screenshot）。
+    shelf：各槽主封面图写入 `n.jpg`；`fanart_n.jpg` 为 **Fanart → Backdrop**（可全部失败）。
+    须至少成功 **一张主封面图**（通常 `1.jpg`）。
     """
     if not selected_items:
         return False
@@ -92,7 +94,7 @@ async def download_cover_images_emby(
                 emby_url,
                 api_key,
                 iid,
-                ("Primary",),
+                ("Primary", "Thumb", "Screenshot"),
                 temp_dir / f"{i + 1}.jpg",
             )
             primary_any = primary_any or ok
@@ -108,7 +110,7 @@ async def download_cover_images_emby(
             emby_url,
             api_key,
             iid,
-            ("Primary",),
+            ("Primary", "Thumb", "Screenshot"),
             temp_dir / f"{i + 1}.jpg",
         )
         ok_any = ok_any or ok
