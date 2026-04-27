@@ -36,30 +36,29 @@ ALLOWED_STYLES = frozenset(
 def _build_kwargs(job: dict) -> dict:
     style_name = job["style_name"]
     library_dir = Path(job["library_dir"])
+    is_animated = style_name.endswith("_animated")
     kwargs: dict = {
         "title": (job["title_zh"], job["title_en"]),
         "font_path": (job["zh_font_path"], job["en_font_path"]),
         "font_size": (1, 1.2),
     }
-    if "animation_duration" in job:
-        kwargs["animation_duration"] = int(job["animation_duration"])
-    if "animation_fps" in job:
-        kwargs["animation_fps"] = int(job["animation_fps"])
-    if "animation_format" in job:
-        kwargs["animation_format"] = str(job["animation_format"])
-    if "animated_image_count" in job:
-        kwargs["image_count"] = int(job["animated_image_count"])
-    if "animated_departure_type" in job:
-        kwargs["departure_type"] = str(job["animated_departure_type"])
-    if "animated_scroll_direction" in job:
-        kwargs["scroll_direction"] = str(job["animated_scroll_direction"])
-    if style_name.endswith("_animated"):
+    if is_animated:
+        if "animation_duration" in job:
+            kwargs["animation_duration"] = int(job["animation_duration"])
+        if "animation_fps" in job:
+            kwargs["animation_fps"] = int(job["animation_fps"])
+        if "animation_format" in job:
+            kwargs["animation_format"] = str(job["animation_format"])
+        if "animated_image_count" in job:
+            kwargs["image_count"] = int(job["animated_image_count"])
+        if style_name != "style_single_2_animated" and "animated_departure_type" in job:
+            kwargs["departure_type"] = str(job["animated_departure_type"])
+        if style_name in ("style_multi_1_animated", "style_shelf_1_animated") and "animated_scroll_direction" in job:
+            kwargs["scroll_direction"] = str(job["animated_scroll_direction"])
         kwargs["output_width"] = int(job.get("output_width", 500) or OUTPUT_WIDTH)
     if style_name in ("style_shelf_1", "style_shelf_1_animated"):
         # shelf 与 multi 共用 worker 时不宜对英文用 1.2×；整体再收一档标题
         kwargs["font_size"] = (0.86, 0.94)
-    if "output_width" in job:
-        kwargs["output_width"] = int(job["output_width"] or OUTPUT_WIDTH)
     if style_name in ("style_multi_1", "style_shelf_1", "style_multi_1_animated", "style_shelf_1_animated"):
         kwargs["library_dir"] = str(library_dir)
     elif style_name in ("style_single_1", "style_single_2"):

@@ -42,11 +42,16 @@ except AttributeError:
     _LANCZOS = Image.LANCZOS
 
 
-def _prepare_kb_plane(bg_path: Path, cover_scale: float = 1.06) -> Image.Image:
+def _prepare_kb_plane(
+    bg_path: Path,
+    canvas_size: tuple[int, int] = (CANVAS_W, CANVAS_H),
+    cover_scale: float = 1.06,
+) -> Image.Image:
     """比画布略大的整图（不模糊），供低幅度 Ken Burns 裁切。"""
     im = Image.open(bg_path).convert("RGB")
-    tw = max(CANVAS_W + 4, int(CANVAS_W * cover_scale))
-    th = max(CANVAS_H + 4, int(CANVAS_H * cover_scale))
+    canvas_w, canvas_h = canvas_size
+    tw = max(canvas_w + 4, int(canvas_w * cover_scale))
+    th = max(canvas_h + 4, int(canvas_h * cover_scale))
     return ImageOps.fit(im, (tw, th), method=_LANCZOS).convert("RGBA")
 
 
@@ -151,12 +156,7 @@ def create_style_shelf_1_animated(
         )
         kb_planes: list[Image.Image] = []
         for bpath in bg_cycle:
-            kb_src = _prepare_kb_plane(bpath)
-            kb_plane = kb_src.resize(
-                (max(w + 4, int(kb_src.width * scale)), max(h + 4, int(kb_src.height * scale))),
-                _LANCZOS,
-            )
-            kb_planes.append(kb_plane)
+            kb_planes.append(_prepare_kb_plane(bpath, canvas_size=(w, h)))
         bottom_margin = max(14, int(h * 0.022))
         g0 = max(10, int(w * 0.0098))
         max_h = int(min(h * 0.48, 520))

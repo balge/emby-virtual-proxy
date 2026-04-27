@@ -14,6 +14,15 @@ def _list_images(folder: Path) -> list[Path]:
     return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in exts])
 
 
+def _resize_to_width(img: Image.Image, target_w: int) -> Image.Image:
+    rgba = img.convert("RGBA")
+    w, h = rgba.size
+    if w <= 0 or h <= 0 or w == target_w:
+        return rgba
+    target_h = max(1, int(h * (target_w / float(w))))
+    return rgba.resize((target_w, target_h), Image.Resampling.BICUBIC)
+
+
 def create_style_single_1_animated(
     library_dir,
     title,
@@ -33,12 +42,13 @@ def create_style_single_1_animated(
             logger.warning("style_single_1_animated: not enough source images")
             return False
 
+        target_w = max(120, int(output_width or 400))
         keyframes: list[Image.Image] = []
         for p in images:
             b64 = create_style_single_1(str(p), title, font_path, font_size=font_size)
             if not b64:
                 continue
-            keyframes.append(pil_image_from_base64(b64))
+            keyframes.append(_resize_to_width(pil_image_from_base64(b64), target_w))
         if len(keyframes) < 2:
             return False
 
@@ -47,7 +57,6 @@ def create_style_single_1_animated(
         total_frames = max(12, fps * duration)
         seg = max(1, total_frames // len(keyframes))
 
-        target_w = max(120, int(output_width or 400))
         frames: list[Image.Image] = []
         for i, current in enumerate(keyframes):
             nxt = keyframes[(i + 1) % len(keyframes)]
@@ -72,12 +81,7 @@ def create_style_single_1_animated(
                     layer.paste(current, (-dx, 0), current)
                     layer.paste(nxt, (w - dx, 0), nxt)
                     frame = layer
-                rgba = frame.convert("RGBA")
-                w0, h0 = rgba.size
-                if w0 > 0 and w0 != target_w:
-                    h1 = max(1, int(h0 * (target_w / float(w0))))
-                    rgba = rgba.resize((target_w, h1), Image.Resampling.BICUBIC)
-                frames.append(rgba)
+                frames.append(frame.convert("RGBA"))
 
         fmt = str(animation_format or "gif").lower()
         if fmt == "apng":
