@@ -3,6 +3,7 @@ import logging
 import json
 from fastapi import Request, Response
 from models import AppConfig
+from cover_identity import extract_user_id_from_request, resolve_cover_tag
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,12 @@ async def handle_get_virtual_item_info(request: Request, full_path: str, config:
     if found_vlib.hidden:
         logger.info(f"VLIB_ITEM_INFO: Virtual library '{found_vlib.name}' is hidden; 404.")
         return Response(status_code=404, content=b"{}", media_type="application/json")
-    # 如果没找到 image_tag，则不处理
-    if not found_vlib.image_tag:
-        return None
-
+    request_user_id = extract_user_id_from_request(request, full_path)
+    image_tag = resolve_cover_tag(
+        found_vlib,
+        request_user_id if found_vlib.resource_type == "random" else None,
+        fallback_to_default=False if found_vlib.resource_type == "random" else True,
+    )
     logger.info(f"✅ VLIB_ITEM_INFO: Intercepting request for virtual library '{found_vlib.name}' info.")
 
     # 获取 ServerId 以便伪造响应 (从任意一个真实库中获取)
@@ -46,7 +49,7 @@ async def handle_get_virtual_item_info(request: Request, full_path: str, config:
         "CollectionType": "folder", # 标记为通用文件夹类型
         "IsFolder": True,
         "ImageTags": {
-            "Primary": found_vlib.image_tag
+            "Primary": image_tag or "generating_placeholder"
         },
         "HasPrimaryImage": True,
         # 添加一些客户端可能需要的其他默认字段

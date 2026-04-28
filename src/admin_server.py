@@ -38,6 +38,7 @@ import config_manager
 from emby_api_client import fetch_from_emby, get_real_libraries_hybrid_mode
 from db_manager import DBManager, RSS_CACHE_DB
 from http_client import create_client_session
+from cover_identity import cover_file_stem
 from rss_subprocess import run_rss_refresh_job
 from cover_emby_fetch import download_cover_images_emby
 
@@ -102,6 +103,34 @@ async def _list_vlib_cache_user_ids_from_proxy(library_id: str, server_id: Optio
     return []
 
 
+def _user_priority_admin_first(user: dict) -> tuple[int, str]:
+    policy = user.get("Policy") or {}
+    is_admin = bool(policy.get("IsAdministrator"))
+    name = str(user.get("Name") or "").strip().lower()
+    name_hint_admin = name in {"root", "admin", "administrator"}
+    return (0 if (is_admin or name_hint_admin) else 1, name)
+
+
+async def _resolve_random_cover_source_user_id(server_id: Optional[str] = None) -> Optional[str]:
+    scoped, sid = _load_server_scoped_config(server_id)
+    users = await fetch_from_emby("/Users", config=scoped)
+    if not users:
+        return None
+    for user in sorted(users, key=_user_priority_admin_first):
+        user_id = str(user.get("Id") or "").strip()
+        if user_id:
+            return user_id
+    return None
+
+
+def _store_vlib_cover_tag(vlib_data: dict, image_tag: str, cover_user_id: Optional[str] = None) -> None:
+    vlib_data["image_tag"] = image_tag
+    if str(vlib_data.get("resource_type") or "") == "random" and cover_user_id:
+        tags = dict(vlib_data.get("cover_image_tags") or {})
+        tags[str(cover_user_id)] = image_tag
+        vlib_data["cover_image_tags"] = tags
+
+
 async def _resolve_cover_cache_user_id(library_id: str, server_id: Optional[str] = None) -> Optional[str]:
     """
     封面素材：优先使用「该库磁盘缓存里第一个用户」（真正访问过该库的人），
@@ -109,6 +138,9 @@ async def _resolve_cover_cache_user_id(library_id: str, server_id: Optional[str]
     若尚无任何缓存，再退回 Emby 首个用户（与旧行为一致，便于无访问记录时的兜底刷新）。
     """
     scoped, sid = _load_server_scoped_config(server_id)
+    vlib = next((v for v in scoped.virtual_libraries if v.id == library_id), None)
+    if vlib and vlib.resource_type == "random":
+        return await _resolve_random_cover_source_user_id(server_id=sid)
     uids = await _list_vlib_cache_user_ids_from_proxy(library_id, server_id=sid)
     if uids:
         return uids[0]
@@ -753,6 +785,23 @@ async def _fetch_images_from_vlib(
                 status_code=404,
                 detail="No cached items found for this virtual library. Please refresh data first.",
             )
+        if vlib_meta and vlib_meta.resource_type == "random" and cache_uid not in cache_user_ids:
+            logger.info(
+                "COVER_FETCH random prewarm server_id=%s vlib=%s target_user_id=%s cached_users=%s",
+                resolved_sid,
+                library_id,
+                cache_uid,
+                cache_user_ids,
+            )
+            await _notify_proxy_refresh_cache(
+                library_id,
+                user_ids=[cache_uid],
+                server_id=resolved_sid,
+            )
+            cache_user_ids = await _list_vlib_cache_user_ids_from_proxy(
+                library_id,
+                server_id=resolved_sid,
+            )
         logger.info(
             "COVER_FETCH start server_id=%s vlib=%s hit_user_id=%s cache_user_ids=%s emby=%s",
             resolved_sid,
@@ -1203,13 +1252,19 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
     if vlib.resource_type == "rsshub":
         await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
     else:
-        # 默认对「此前已有磁盘缓存」的用户重拉；若是新库无人缓存，则回退用首个 Emby 用户预热一次，
-        # 这样封面生成不再因为“无缓存素材”而报 404。
-        target_users = had_users
-        if not target_users:
-            fallback_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
-            if fallback_uid:
-                target_users = [fallback_uid]
+        if vlib.resource_type == "random":
+            target_users = []
+            preferred_uid = await _resolve_random_cover_source_user_id(server_id=server_id)
+            if preferred_uid:
+                target_users = [preferred_uid]
+        else:
+            # 默认对「此前已有磁盘缓存」的用户重拉；若是新库无人缓存，则回退用首个 Emby 用户预热一次，
+            # 这样封面生成不再因为“无缓存素材”而报 404。
+            target_users = had_users
+            if not target_users:
+                fallback_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
+                if fallback_uid:
+                    target_users = [fallback_uid]
         await _notify_proxy_refresh_cache(library_id, user_ids=target_users, server_id=server_id)
 
     await _regenerate_cover_for_vlib(vlib, server_id=server_id)
@@ -1549,9 +1604,17 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
     title_zh = vlib.cover_title_zh or vlib.name
     title_en = vlib.cover_title_en or ""
     try:
+        cover_user_id = None
+        if vlib.resource_type == "random":
+            cover_user_id = await _resolve_random_cover_source_user_id(server_id=resolved_sid)
         # style_name=None：在 _generate_library_cover 内用当前 server profile 的 default_cover_style + variant
         image_tag = await _generate_library_cover(
-            vlib.id, title_zh, title_en, None, server_id=resolved_sid
+            vlib.id,
+            title_zh,
+            title_en,
+            None,
+            server_id=resolved_sid,
+            cover_user_id=cover_user_id,
         )
         if image_tag:
             current_config = config_manager.load_config(apply_active_profile=False)
@@ -1560,7 +1623,7 @@ async def _regenerate_cover_for_vlib(vlib: VirtualLibrary, server_id: Optional[s
             libs = list(profile.get("library") or [])
             for v in libs:
                 if str(v.get("id")) == str(vlib.id):
-                    v["image_tag"] = image_tag
+                    _store_vlib_cover_tag(v, image_tag, cover_user_id=cover_user_id)
                     break
             profile["library"] = libs
             if sid:
@@ -1660,6 +1723,8 @@ async def generate_cover(body: CoverRequest):
             for vlib in config.virtual_libraries:
                 if vlib.id == body.library_id:
                     vlib.image_tag = image_tag
+                    if vlib.resource_type == "random" and not vlib.cover_image_tags:
+                        vlib.cover_image_tags = {}
                     vlib_found = True
                     break
             if vlib_found:
@@ -1690,6 +1755,7 @@ async def clear_all_covers():
         config = config_manager.load_config()
         for vlib in config.virtual_libraries:
             vlib.image_tag = None
+            vlib.cover_image_tags = {}
         config_manager.save_config(config)
         
         logger.info("所有封面及配置已成功清除。")
@@ -1706,6 +1772,7 @@ async def _generate_library_cover(
     style_name: Optional[str] = None,
     temp_image_paths: Optional[List[str]] = None,
     server_id: Optional[str] = None,
+    cover_user_id: Optional[str] = None,
 ) -> Optional[str]:
     config, resolved_sid = _load_server_scoped_config(server_id)
     base_style = (style_name or "").strip() or (config.default_cover_style or "style_multi_1")
@@ -1795,13 +1862,18 @@ async def _generate_library_cover(
 
         animation_format = _resolve_animation_format(config, worker_style_name)
         output_ext = "png" if animation_format == "apng" else _cover_output_extension(worker_style_name)
-        final_filename = f"{library_id}.{output_ext}"
+        stem = cover_file_stem(
+            library_id,
+            getattr(vlib, "resource_type", "") if vlib else "",
+            cover_user_id,
+        )
+        final_filename = f"{stem}.{output_ext}"
         output_path = os.path.join(OUTPUT_DIR, final_filename)
         for ext in ("jpg", "gif", "png"):
             if ext == output_ext:
                 continue
             try:
-                Path(os.path.join(OUTPUT_DIR, f"{library_id}.{ext}")).unlink(missing_ok=True)
+                Path(os.path.join(OUTPUT_DIR, f"{stem}.{ext}")).unlink(missing_ok=True)
             except OSError:
                 pass
         job = {
@@ -1829,6 +1901,16 @@ async def _generate_library_cover(
         except RuntimeError as e:
             logger.error(f"封面生成子进程失败: {e}")
             raise HTTPException(status_code=500, detail="封面生成失败，请稍后重试或查看服务端日志。")
+        if stem != str(library_id):
+            shared_path = Path(OUTPUT_DIR) / f"{library_id}.{output_ext}"
+            shutil.copyfile(output_path, shared_path)
+            for ext in ("jpg", "gif", "png"):
+                if ext == output_ext:
+                    continue
+                try:
+                    Path(os.path.join(OUTPUT_DIR, f"{library_id}.{ext}")).unlink(missing_ok=True)
+                except OSError:
+                    pass
 
         image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
 
@@ -1917,6 +1999,9 @@ async def update_library(library_id: str, updated_library_data: VirtualLibrary):
         # 如果客户端传来的数据中没有 image_tag，或者为 null，我们强制使用旧的
         if 'image_tag' not in update_data or not update_data['image_tag']:
             update_data['image_tag'] = lib_to_update.image_tag
+    if lib_to_update.cover_image_tags:
+        if 'cover_image_tags' not in update_data or not update_data['cover_image_tags']:
+            update_data['cover_image_tags'] = lib_to_update.cover_image_tags
 
     # 使用 Pydantic 的 model_copy 方法安全地更新模型
     updated_lib = lib_to_update.model_copy(update=update_data)

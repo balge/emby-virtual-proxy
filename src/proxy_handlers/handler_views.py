@@ -7,6 +7,7 @@ from aiohttp import ClientSession
 from models import AppConfig
 import asyncio
 from pathlib import Path
+from cover_identity import cover_path_for, extract_user_id_from_request, resolve_cover_tag
 
 # 【新增】导入后台生成处理器和任务锁
 from . import handler_autogen
@@ -17,9 +18,11 @@ logger = logging.getLogger(__name__)
 COVERS_DIR = Path("/app/config/images")
 
 
-def _has_local_cover(item_id: str) -> bool:
-    sid = str(item_id)
-    return any((COVERS_DIR / f"{sid}.{ext}").is_file() for ext in ("gif", "png", "jpg"))
+def _has_local_cover(vlib, user_id: str | None = None) -> bool:
+    for ext in ("gif", "png", "jpg"):
+        if cover_path_for(COVERS_DIR, vlib.id, vlib.resource_type, user_id, ext).is_file():
+            return True
+    return False
 
 async def handle_view_injection(
     request: Request,
@@ -40,6 +43,7 @@ async def handle_view_injection(
     
     target_url = f"{real_emby_url}/{full_path}"
     params = request.query_params
+    request_user_id = extract_user_id_from_request(request, full_path)
     
     # 采用更稳健的白名单策略转发必要的请求头，确保认证信息不丢失
     headers_to_forward = {
@@ -79,17 +83,20 @@ async def handle_view_injection(
             }
             
             # 【【【 核心修改：在这里决定是否触发自动生成 】】】
-            if _has_local_cover(vlib.id):
+            cover_user_id = request_user_id if vlib.resource_type == "random" else None
+            if _has_local_cover(vlib, cover_user_id):
                 # 图片已存在, 注入真实的 ImageTag
-                if vlib.image_tag:
-                    vlib_data["ImageTags"]["Primary"] = vlib.image_tag
+                image_tag = resolve_cover_tag(vlib, cover_user_id, fallback_to_default=False)
+                if image_tag:
+                    vlib_data["ImageTags"]["Primary"] = image_tag
                     vlib_data["HasPrimaryImage"] = True
             else:
                 # 图片不存在, 触发后台生成并注入假Tag
                 logger.info(f"主页视图：发现虚拟库 '{vlib.name}' ({vlib.id}) 缺少封面。")
                 
                 # 检查任务是否已在运行，防止重复触发
-                if vlib.id not in handler_autogen.GENERATION_IN_PROGRESS:
+                generation_key = handler_autogen.generation_key(vlib.id, request_user_id, vlib.resource_type)
+                if generation_key not in handler_autogen.GENERATION_IN_PROGRESS:
                     # 【【【 核心修正2：传递用户ID和API Key 】】】
                     # 从当前请求中提取必要信息
                     user_id = params.get("UserId")

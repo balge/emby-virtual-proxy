@@ -240,8 +240,8 @@ def create_style_shelf_1_animated(
             pw, ph = kb_plane.size
             max_x = max(0, pw - w)
             max_y = max(0, ph - h)
-            u = 2.0 * math.pi * seg_p
-            amp = 0.35
+            u = 2.0 * math.pi * (seg_p * 0.72)
+            amp = 0.26
             px = int(max_x * (0.5 + 0.5 * amp * math.sin(u)))
             py = int(max_y * (0.5 + 0.5 * amp * math.cos(u * 0.73)))
             canvas = kb_plane.crop((px, py, px + w, py + h)).convert("RGBA")

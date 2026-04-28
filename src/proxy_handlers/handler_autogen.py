@@ -15,10 +15,17 @@ import config_manager
 from http_client import create_client_session
 import cover_subprocess
 from cover_emby_fetch import download_cover_images_emby
+from cover_identity import cover_file_stem
 
 logger = logging.getLogger(__name__)
 
 GENERATION_IN_PROGRESS = set()
+
+
+def generation_key(library_id: str, user_id: str | None, resource_type: str | None) -> str:
+    if resource_type == "random" and user_id:
+        return f"{library_id}::{user_id}"
+    return str(library_id)
 
 
 def _resolve_cover_worker_style(config, base_style: str) -> str:
@@ -55,14 +62,9 @@ async def generate_poster_in_background(
     """
     在后台异步生成海报。此版本使用触发时传入的身份信息来确保权限正确。
     """
-    if library_id in GENERATION_IN_PROGRESS:
-        return
-
-    GENERATION_IN_PROGRESS.add(library_id)
-    logger.info(f"✅ 已启动库 {library_id} (用户: {user_id}) 的封面自动生成后台任务。")
-    
     config = None
     temp_dir = None
+    lock_key = None
     
     try:
         raw_config = config_manager.load_config(apply_active_profile=False)
@@ -82,6 +84,11 @@ async def generate_poster_in_background(
         if not vlib:
             logger.error(f"后台任务：配置中未找到 vlib {library_id}。")
             return
+        lock_key = generation_key(library_id, user_id, vlib.resource_type)
+        if lock_key in GENERATION_IN_PROGRESS:
+            return
+        GENERATION_IN_PROGRESS.add(lock_key)
+        logger.info(f"✅ 已启动库 {library_id} (用户: {user_id}) 的封面自动生成后台任务。")
 
         # --- 不再需要自己获取用户ID，直接使用传入的 ---
         
@@ -185,12 +192,13 @@ async def generate_poster_in_background(
 
         animation_format = _resolve_animation_format(config, style_name)
         output_ext = "png" if animation_format == "apng" else _cover_output_extension(style_name)
-        final_path = output_dir / f"{library_id}.{output_ext}"
+        stem = cover_file_stem(library_id, vlib.resource_type, user_id)
+        final_path = output_dir / f"{stem}.{output_ext}"
         for ext in ("jpg", "gif", "png"):
             if ext == output_ext:
                 continue
             try:
-                (output_dir / f"{library_id}.{ext}").unlink(missing_ok=True)
+                (output_dir / f"{stem}.{ext}").unlink(missing_ok=True)
             except OSError:
                 pass
         job = {
@@ -216,18 +224,38 @@ async def generate_poster_in_background(
         except RuntimeError as e:
             logger.error(f"后台任务：封面子进程失败 (库 {library_id}): {e}")
             return
+        if stem != str(library_id):
+            shared_path = output_dir / f"{library_id}.{output_ext}"
+            shutil.copyfile(final_path, shared_path)
+            for ext in ("jpg", "gif", "png"):
+                if ext == output_ext:
+                    continue
+                try:
+                    (output_dir / f"{library_id}.{ext}").unlink(missing_ok=True)
+                except OSError:
+                    pass
         
         new_image_tag = hashlib.md5(str(time.time()).encode()).hexdigest()
-        current_config = config_manager.load_config()
+        current_config = config_manager.load_config(apply_active_profile=False)
+        sid = str(active_server.id)
+        profile = current_config.get_server_profile(sid)
+        libs = list(profile.get("library") or [])
         vlib_found_and_updated = False
-        for vlib_in_config in current_config.virtual_libraries:
-            if vlib_in_config.id == library_id:
-                vlib_in_config.image_tag = new_image_tag
-                vlib_found_and_updated = True
-                break
-        
+        for vlib_data in libs:
+            if str(vlib_data.get("id")) != str(library_id):
+                continue
+            vlib_data["image_tag"] = new_image_tag
+            if str(vlib_data.get("resource_type") or "") == "random":
+                tags = dict(vlib_data.get("cover_image_tags") or {})
+                tags[str(user_id)] = new_image_tag
+                vlib_data["cover_image_tags"] = tags
+            vlib_found_and_updated = True
+            break
+
         if vlib_found_and_updated:
-            config_manager.save_config(current_config)
+            profile["library"] = libs
+            current_config.set_server_profile(sid, profile)
+            config_manager.save_config(current_config, sync_active_profile=False)
             logger.info(f"🎉 封面自动生成成功！已保存至 {final_path} 并更新了 config.json 的 ImageTag 为 {new_image_tag}")
         else:
             logger.error(f"自动生成封面后，无法在 config.json 中找到虚拟库 {library_id} 以更新 ImageTag。")
@@ -237,5 +265,6 @@ async def generate_poster_in_background(
     finally:
         if temp_dir and temp_dir.exists():
             shutil.rmtree(temp_dir)
-        GENERATION_IN_PROGRESS.remove(library_id)
+        if lock_key in GENERATION_IN_PROGRESS:
+            GENERATION_IN_PROGRESS.remove(lock_key)
         logger.info(f"后台任务结束，已释放库 {library_id} 的生成锁。")

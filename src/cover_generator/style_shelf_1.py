@@ -371,7 +371,6 @@ def create_style_shelf_1(
         w, h = CANVAS_W, CANVAS_H
         bg = Image.open(bg_path).convert("RGB")
         canvas = ImageOps.fit(bg, (w, h), method=Image.LANCZOS).convert("RGBA")
-        canvas = _full_canvas_gaussian_blur(canvas, blur_radius=13, scale=3)
 
         bottom_margin = max(14, int(h * 0.022))
         g0 = max(10, int(w * 0.0098))

@@ -21,6 +21,7 @@ from .handler_items import (
 )
 from vlib_cache_manager import effective_cache_ttl_seconds, populate_random_vlib_items
 from emby_api_client import get_real_libraries_hybrid_mode
+from cover_identity import cover_path_for, extract_user_id_from_request
 
 logger = logging.getLogger(__name__)
 
@@ -135,15 +136,15 @@ async def handle_home_latest_items(
     logger.info(f"HOME_LATEST_HANDLER: Intercepting request for latest items in vlib '{found_vlib.name}'.")
 
     # Auto-generate cover if missing（动态封面为 .gif/.png，静态为 .jpg）
-    lid = str(found_vlib.id)
-    has_local_cover = (
-        (COVERS_DIR / f"{lid}.gif").is_file()
-        or (COVERS_DIR / f"{lid}.png").is_file()
-        or (COVERS_DIR / f"{lid}.jpg").is_file()
+    cover_user_id = extract_user_id_from_request(request, full_path) if found_vlib.resource_type == "random" else None
+    has_local_cover = any(
+        cover_path_for(COVERS_DIR, found_vlib.id, found_vlib.resource_type, cover_user_id, ext).is_file()
+        for ext in ("gif", "png", "jpg")
     )
     if not has_local_cover:
         logger.info(f"HOME_LATEST: Cover missing for vlib '{found_vlib.name}' ({found_vlib.id}), triggering auto-generation.")
-        if found_vlib.id not in handler_autogen.GENERATION_IN_PROGRESS:
+        generation_key = handler_autogen.generation_key(found_vlib.id, user_id, found_vlib.resource_type)
+        if generation_key not in handler_autogen.GENERATION_IN_PROGRESS:
             api_key = params.get("X-Emby-Token") or config.emby_api_key
             server_id_ctx = getattr(getattr(request, "state", None), "server_id", None)
             if user_id and api_key:

@@ -1,7 +1,7 @@
 # src/models.py (Final Corrected Version)
 
 from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Literal, Optional
+from typing import Dict, List, Literal, Optional
 import uuid
 
 
@@ -45,6 +45,7 @@ class VirtualLibrary(BaseModel):
     resource_ids: List[str] = Field(default_factory=list)
     # image: Optional[str] = None  <-- 我们不再需要这个字段了，可以删除或注释掉
     image_tag: Optional[str] = None # <-- 【新增】用于存储图片的唯一标签
+    cover_image_tags: Dict[str, str] = Field(default_factory=dict)
     rsshub_url: Optional[str] = None # <-- 【新增】RSSHUB链接
     rss_type: Optional[Literal["douban", "bangumi"]] = None # <-- 【新增】RSS类型
     cache_refresh_interval: Optional[int] = Field(
