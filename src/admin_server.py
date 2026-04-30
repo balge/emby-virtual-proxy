@@ -41,6 +41,7 @@ from http_client import create_client_session
 from cover_identity import cover_file_stem
 from rss_subprocess import run_rss_refresh_job
 from cover_emby_fetch import download_cover_images_emby
+from library_binding_sync import prune_source_library_ids, sync_real_library_configs
 
 # 【【【 在这里添加或者确认你有这几行 】】】
 import logging
@@ -316,6 +317,59 @@ def _load_server_scoped_config(server_id: Optional[str] = None) -> tuple[AppConf
     raw.emby_api_key = server.emby_api_key
     raw.emby_server_id = server.emby_server_id or raw.emby_server_id
     return raw, str(server.id)
+
+
+async def _sync_real_library_state_for_refresh(
+    server_id: Optional[str] = None,
+) -> tuple[AppConfig, Optional[str]]:
+    """
+    在刷新前对当前 server 的真实库与虚拟库绑定做一次自愈同步：
+    - 删除 Emby 中已不存在的真实库配置
+    - 保留并更新仍存在的真实库配置名称
+    - 清理所有虚拟库中指向「已删除或已禁用真实库」的 source_libraries
+    """
+    scoped, sid = _load_server_scoped_config(server_id)
+    if not sid:
+        return scoped, sid
+
+    emby_libs = await get_real_libraries_hybrid_mode(config=scoped)
+    synced_real_libs = sync_real_library_configs(scoped.real_libraries, emby_libs)
+    valid_real_ids = {str(rl.id) for rl in synced_real_libs}
+    disabled_real_ids = {str(rl.id) for rl in synced_real_libs if not rl.enabled}
+
+    raw = config_manager.load_config(apply_active_profile=False)
+    profile = raw.get_server_profile(sid)
+    libs_raw = list(profile.get("library") or [])
+
+    changed = [rl.model_dump() for rl in synced_real_libs] != list(profile.get("real_libraries") or [])
+    removed_bindings = 0
+
+    for vlib_data in libs_raw:
+        old_source = [str(x).strip() for x in (vlib_data.get("source_libraries") or []) if str(x).strip()]
+        new_source = prune_source_library_ids(
+            old_source,
+            valid_real_ids=valid_real_ids,
+            disabled_real_ids=disabled_real_ids,
+        )
+        if new_source != old_source:
+            removed_bindings += len(old_source) - len(new_source)
+            vlib_data["source_libraries"] = new_source
+            changed = True
+
+    if changed:
+        profile["real_libraries"] = [rl.model_dump() for rl in synced_real_libs]
+        profile["library"] = libs_raw
+        raw.set_server_profile(sid, profile)
+        config_manager.save_config(raw, sync_active_profile=False)
+        logger.info(
+            "Refresh pre-sync applied: server=%s real_libraries=%s removed_bindings=%s",
+            sid,
+            len(synced_real_libs),
+            removed_bindings,
+        )
+        return _load_server_scoped_config(sid)
+
+    return scoped, sid
 
 
 def _extract_webhook_token(request: Request) -> str:
@@ -1233,6 +1287,11 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
     random 库条目按用户随机，封面仍用 _resolve_cover_cache_user_id 对应用户的缓存素材合成，
     可能与其它用户看到的列表不一致，但保留刷新封面以便更新展示图。
     """
+    config, resolved_sid = await _sync_real_library_state_for_refresh(server_id)
+    refreshed_vlib = next((lib for lib in config.virtual_libraries if lib.id == vlib.id), None)
+    if refreshed_vlib:
+        vlib = refreshed_vlib
+
     library_id = vlib.id
     logger.info(
         f"VLIB_REFRESH START vlib={library_id} name='{vlib.name}' "
@@ -1241,7 +1300,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
     keys_to_remove = [k for k in api_cache if library_id in str(k)]
     for k in keys_to_remove:
         api_cache.pop(k, None)
-    inv = await _notify_proxy_invalidate_cache(library_id, server_id=server_id)
+    inv = await _notify_proxy_invalidate_cache(library_id, server_id=resolved_sid)
     had_users = list(inv.get("user_ids") or [])
 
     logger.info(
@@ -1254,7 +1313,7 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
     else:
         if vlib.resource_type == "random":
             target_users = []
-            preferred_uid = await _resolve_random_cover_source_user_id(server_id=server_id)
+            preferred_uid = await _resolve_random_cover_source_user_id(server_id=resolved_sid)
             if preferred_uid:
                 target_users = [preferred_uid]
         else:
@@ -1262,12 +1321,12 @@ async def refresh_virtual_library_data_and_cover(vlib: VirtualLibrary, server_id
             # 这样封面生成不再因为“无缓存素材”而报 404。
             target_users = had_users
             if not target_users:
-                fallback_uid = await _resolve_cover_cache_user_id(library_id, server_id=server_id)
+                fallback_uid = await _resolve_cover_cache_user_id(library_id, server_id=resolved_sid)
                 if fallback_uid:
                     target_users = [fallback_uid]
-        await _notify_proxy_refresh_cache(library_id, user_ids=target_users, server_id=server_id)
+        await _notify_proxy_refresh_cache(library_id, user_ids=target_users, server_id=resolved_sid)
 
-    await _regenerate_cover_for_vlib(vlib, server_id=server_id)
+    await _regenerate_cover_for_vlib(vlib, server_id=resolved_sid)
     logger.info(f"VLIB_REFRESH DONE vlib={library_id} name='{vlib.name}' type={vlib.resource_type}")
 
 
@@ -2114,19 +2173,7 @@ async def sync_real_libraries():
     if not sid:
         raise HTTPException(status_code=400, detail="No active server selected")
     emby_libs = await get_real_libraries_hybrid_mode(config=scoped)
-
-    existing_map = {rl.id: rl for rl in scoped.real_libraries}
-    synced: List[RealLibraryConfig] = []
-
-    for lib in emby_libs:
-        lib_id = lib.get("Id")
-        lib_name = lib.get("Name", "")
-        if lib_id in existing_map:
-            rl = existing_map[lib_id]
-            rl.name = lib_name  # 同步最新名称
-            synced.append(rl)
-        else:
-            synced.append(RealLibraryConfig(id=lib_id, name=lib_name, enabled=True))
+    synced = sync_real_library_configs(scoped.real_libraries, emby_libs)
 
     raw = config_manager.load_config(apply_active_profile=False)
     profile = raw.get_server_profile(sid)
@@ -2421,13 +2468,7 @@ async def scheduled_refresh_virtual_library(server_id: str, library_id: str):
     logger.info(
         f"SCHEDULED_VLIB_REFRESH START server={sid} vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
     )
-    if vlib.resource_type == "rsshub":
-        # RSS 库仍走 RSS 队列刷新；随后重生成封面
-        await enqueue_rss_refresh(vlib, manual=False, wait_for_completion=True)
-        await _regenerate_cover_for_vlib(vlib, server_id=sid)
-    else:
-        # 非 RSS：与手动「刷新数据」保持完全一致的语义（刷新磁盘缓存 + 刷新封面）
-        await refresh_virtual_library_data_and_cover(vlib, server_id=sid)
+    await refresh_virtual_library_data_and_cover(vlib, server_id=sid)
     logger.info(
         f"SCHEDULED_VLIB_REFRESH DONE server={sid} vlib={vlib.id} name='{vlib.name}' type={vlib.resource_type}"
     )
