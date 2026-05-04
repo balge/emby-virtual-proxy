@@ -57,6 +57,12 @@ export const useMainStore = defineStore("main", {
 
   getters: {
     virtualLibraries: (state) => state.config.library || [],
+    hasConfiguredServer: (state) =>
+      (state.config.servers || []).some(
+        (s) =>
+          String(s?.emby_url || "").trim() &&
+          String(s?.emby_api_key || "").trim(),
+      ),
     serverOptions: (state) =>
       (state.config.servers || []).map((s) => ({
         value: s.id,
@@ -128,6 +134,13 @@ export const useMainStore = defineStore("main", {
         webhook: { enabled: false, secret: null, delay_seconds: 0 },
         force_merge_by_tmdb_id: false,
       };
+    },
+
+    _isServerConfigured(server) {
+      return !!(
+        String(server?.emby_url || "").trim() &&
+        String(server?.emby_api_key || "").trim()
+      );
     },
 
     _ensureServersShape() {
@@ -434,11 +447,7 @@ export const useMainStore = defineStore("main", {
       this.dataLoading = true;
       this.dataStatus = null;
       try {
-        const [configRes, classificationsRes, allLibsRes] = await Promise.all([
-          api.getConfig(),
-          api.getClassifications(),
-          api.getAllLibraries(),
-        ]);
+        const configRes = await api.getConfig();
         this.config = configRes.data;
         this._ensureServersShape();
         await this._loadAndApplyActiveServerProfile();
@@ -457,6 +466,21 @@ export const useMainStore = defineStore("main", {
         this.originalConfigForComparison = JSON.parse(
           JSON.stringify(configRes.data),
         );
+
+        if (!this.hasConfiguredServer || !this._isServerConfigured(this.activeServer)) {
+          this.classifications = {};
+          this.allLibrariesForSorting = [];
+          this.dataStatus = {
+            type: "info",
+            text: "请先完成 Emby 服务器配置",
+          };
+          return;
+        }
+
+        const [classificationsRes, allLibsRes] = await Promise.all([
+          api.getClassifications(),
+          api.getAllLibraries(),
+        ]);
         this.classifications = classificationsRes.data;
         this.allLibrariesForSorting = allLibsRes.data;
 
@@ -655,6 +679,12 @@ export const useMainStore = defineStore("main", {
     },
 
     async fetchAllEmbyData() {
+      if (!this.hasConfiguredServer || !this._isServerConfigured(this.activeServer)) {
+        this.classifications = {};
+        this.allLibrariesForSorting = [];
+        this.dataStatus = { type: "info", text: "请先完成 Emby 服务器配置" };
+        return;
+      }
       this.dataLoading = true;
       this.dataStatus = { type: "info", text: "正在刷新..." };
       try {
@@ -690,8 +720,10 @@ export const useMainStore = defineStore("main", {
         await api.saveDisplayOrder(this.config.display_order);
         toast.success("主页布局已保存！");
         await this._reloadConfigAndAllLibs();
+        return true;
       } catch (error) {
         this._handleApiError(error, "保存布局失败");
+        return false;
       } finally {
         this.saving = false;
       }

@@ -2012,9 +2012,25 @@ async def get_all_libraries():
     
 @api_router.post("/display-order", status_code=204, tags=["Display Management"])
 async def save_display_order(ordered_ids: List[str]):
-    config = config_manager.load_config()
-    config.display_order = ordered_ids
-    config_manager.save_config(config)
+    normalized_ids = []
+    seen = set()
+    for item in ordered_ids or []:
+        sid = str(item).strip()
+        if sid and sid not in seen:
+            seen.add(sid)
+            normalized_ids.append(sid)
+
+    raw = config_manager.load_config(apply_active_profile=False)
+    sid = str(raw.admin_active_server_id or "")
+    if sid:
+        profile = raw.get_server_profile(sid)
+        profile["display_order"] = normalized_ids
+        raw.set_server_profile(sid, profile)
+        config_manager.save_config(raw, sync_active_profile=False)
+    else:
+        config = config_manager.load_config()
+        config.display_order = normalized_ids
+        config_manager.save_config(config)
     return Response(status_code=204)
 
 @api_router.post("/libraries", response_model=VirtualLibrary, tags=["Libraries"])

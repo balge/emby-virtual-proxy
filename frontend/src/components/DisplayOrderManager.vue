@@ -60,7 +60,9 @@ watch(() => store.layoutManagerVisible, (val) => {
 }, { immediate: true })
 
 const saveLayout = async () => {
-  await store.saveDisplayOrder(displayedLibs.value.map(l => l.id))
-  store.layoutManagerVisible = false
+  const saved = await store.saveDisplayOrder(displayedLibs.value.map(l => l.id))
+  if (saved) {
+    store.layoutManagerVisible = false
+  }
 }
 </script>

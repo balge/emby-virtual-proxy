@@ -7,6 +7,25 @@
       Emby Virtual Proxy 配置面板
     </p>
 
+    <div
+      v-if="!store.hasConfiguredServer"
+      class="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 rounded-2xl p-5 mb-8"
+    >
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <h2 class="text-base font-semibold text-amber-900 dark:text-amber-100">
+            先连接一个 Emby 服务器
+          </h2>
+          <p class="text-sm text-amber-800/90 dark:text-amber-200/90 mt-1">
+            当前还没有可用的 Emby 配置。先填写服务器地址、API Key 和代理端口，保存后系统会继续加载媒体库与后续页面数据。
+          </p>
+        </div>
+        <BaseButton variant="primary" @click="openCreateServerDialog">
+          立即配置
+        </BaseButton>
+      </div>
+    </div>
+
     <!-- Server management -->
     <div
       v-if="store.config?.servers?.length"
@@ -166,7 +185,7 @@
 
     <BaseDialog
       :open="createServerDialogOpen"
-      title="添加服务器"
+      :title="store.hasConfiguredServer ? '添加服务器' : '配置 Emby 服务器'"
       @close="createServerDialogOpen = false"
     >
       <div class="space-y-3">
@@ -269,7 +288,7 @@
 </template>
 
 <script setup>
-import { reactive, ref, onMounted } from "vue";
+import { reactive, ref, onMounted, watch } from "vue";
 import { useMainStore } from "@/stores/main";
 import BaseButton from "@/components/ui/BaseButton.vue";
 import BaseDialog from "@/components/ui/BaseDialog.vue";
@@ -321,16 +340,35 @@ function openCreateServerDialog() {
 async function onCreateServer() {
   creatingServer.value = true;
   try {
-    await store.createServer(
-      {
-        name: newServer.name,
-        emby_url: newServer.emby_url,
-        emby_api_key: newServer.emby_api_key,
-        proxy_port: newServer.proxy_port,
-      },
-      { switchToNew: false, persist: true },
-    );
-    toast.success("服务器已添加（未切换当前服务器）");
+    const payload = {
+      name: newServer.name,
+      emby_url: newServer.emby_url,
+      emby_api_key: newServer.emby_api_key,
+      proxy_port: newServer.proxy_port,
+    };
+    const bootstrapMode = !store.hasConfiguredServer;
+
+    if (
+      bootstrapMode &&
+      store.activeServer &&
+      !store._isServerConfigured(store.activeServer)
+    ) {
+      await store.updateServer(store.activeServer.id, payload);
+      if (
+        String(store.config.admin_active_server_id) !==
+        String(store.activeServer.id)
+      ) {
+        await store.setActiveServer(store.activeServer.id);
+      }
+    } else {
+      await store.createServer(payload, {
+        switchToNew: bootstrapMode,
+        persist: true,
+      });
+    }
+
+    await store.fetchAllInitialData();
+    toast.success(bootstrapMode ? "Emby 服务器已配置" : "服务器已添加");
     createServerDialogOpen.value = false;
   } catch (e) {
     toast.error(e?.message || "添加服务器失败");
@@ -436,7 +474,19 @@ const quickLinks = [
   },
 ];
 
-onMounted(() => {
-  if (!store.dataStatus) store.fetchAllInitialData();
+onMounted(async () => {
+  if (!store.dataStatus) await store.fetchAllInitialData();
+  if (!store.hasConfiguredServer) openCreateServerDialog();
 });
+
+watch(
+  () => store.hasConfiguredServer,
+  (configured) => {
+    if (!store.dataLoading && !configured) {
+      openCreateServerDialog();
+    } else if (configured) {
+      createServerDialogOpen.value = false;
+    }
+  }
+);
 </script>
