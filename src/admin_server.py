@@ -332,7 +332,16 @@ async def _sync_real_library_state_for_refresh(
     if not sid:
         return scoped, sid
 
-    emby_libs = await get_real_libraries_hybrid_mode(config=scoped)
+    try:
+        emby_libs = await get_real_libraries_hybrid_mode(config=scoped)
+    except HTTPException as e:
+        logger.warning(
+            "Refresh pre-sync skipped for server=%s because Emby real libraries are unavailable: %s",
+            sid,
+            e.detail,
+        )
+        return scoped, sid
+
     synced_real_libs = sync_real_library_configs(scoped.real_libraries, emby_libs)
     valid_real_ids = {str(rl.id) for rl in synced_real_libs}
     disabled_real_ids = {str(rl.id) for rl in synced_real_libs if not rl.enabled}

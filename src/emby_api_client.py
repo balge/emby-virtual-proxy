@@ -68,8 +68,11 @@ async def get_real_libraries_hybrid_mode(*, config=None) -> List[Dict[str, Any]]
     {Id, Name, CollectionType} (used when source_libraries is empty but ignore filters apply).
     """
     all_real_libs: Dict[str, Dict[str, Any]] = {}
+    succeeded_sources = 0
+    errors: List[str] = []
     try:
         media_folders = await fetch_from_emby("/Library/MediaFolders", config=config)
+        succeeded_sources += 1
         for lib in media_folders:
             lib_id = lib.get("Id")
             if lib_id:
@@ -79,14 +82,17 @@ async def get_real_libraries_hybrid_mode(*, config=None) -> List[Dict[str, Any]]
                     "CollectionType": lib.get("CollectionType"),
                 }
     except HTTPException as e:
+        errors.append(str(e.detail))
         logger.warning("从 /Library/MediaFolders 获取数据失败: %s", e.detail)
 
     try:
         user_items = await fetch_from_emby("/Users", config=config)
+        succeeded_sources += 1
         if user_items:
             ref_user_id = user_items[0].get("Id")
             if ref_user_id:
                 views = await fetch_from_emby(f"/Users/{ref_user_id}/Views", config=config)
+                succeeded_sources += 1
                 for lib in views:
                     lib_id = lib.get("Id")
                     if lib_id and lib_id not in all_real_libs:
@@ -96,6 +102,14 @@ async def get_real_libraries_hybrid_mode(*, config=None) -> List[Dict[str, Any]]
                             "CollectionType": lib.get("CollectionType"),
                         }
     except HTTPException as e:
+        errors.append(str(e.detail))
         logger.warning("从 /Users/.../Views 获取数据失败: %s", e.detail)
+
+    if succeeded_sources == 0 and errors:
+        detail = "；".join(errors)
+        raise HTTPException(
+            status_code=502,
+            detail=f"获取 Emby 真实库列表失败：{detail}",
+        )
 
     return list(all_real_libs.values())
