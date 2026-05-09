@@ -23,6 +23,11 @@ services:
       - AIOHTTP_POOL_LIMIT=32
       # 单主机最大并发连接数（通常指向 Emby；默认 8）
       - AIOHTTP_POOL_PER_HOST=8
+      # 后台虚拟库刷新专用连接池；保持更小，给前台代理请求让路
+      - AIOHTTP_REFRESH_POOL_LIMIT=8
+      - AIOHTTP_REFRESH_POOL_PER_HOST=2
+      # 后台刷新在 proxy 内的最大并发数；建议保持 1
+      - BACKGROUND_REFRESH_MAX_CONCURRENCY=1
       # 管理面板登录认证（留空或不设置则不启用认证）
       - ADMIN_USERNAME=admin
       - ADMIN_PASSWORD=admin123

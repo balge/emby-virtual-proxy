@@ -30,6 +30,9 @@ from random_rating_filter import filter_items_by_official_rating_threshold
 
 logger = logging.getLogger(__name__)
 
+_refresh_tasks: dict[str, asyncio.Task[int]] = {}
+_refresh_tasks_lock = asyncio.Lock()
+
 
 def effective_cache_ttl_seconds(vlib: VirtualLibrary, config: AppConfig) -> Optional[float]:
     """
@@ -561,7 +564,54 @@ async def _fetch_by_ids_chunked(session, url, headers, ids, fields):
 # Core: refresh a single virtual library's full cache
 # ---------------------------------------------------------------------------
 
+def _refresh_task_key(
+    vlib: VirtualLibrary,
+    *,
+    user_id: str | None,
+    server_id: str | None,
+) -> str:
+    return f"{_server_bucket_id(server_id)}:{user_id or '__default__'}:{vlib.id}"
+
+
 async def refresh_vlib_cache(
+    vlib: VirtualLibrary,
+    config: AppConfig,
+    *,
+    session: aiohttp.ClientSession | None = None,
+    user_id: str | None = None,
+    server_id: str | None = None,
+) -> int:
+    """
+    Coalesce same-user same-library refreshes so background refresh and foreground MISS
+    won't stampede Emby at the same time.
+    """
+    key = _refresh_task_key(vlib, user_id=user_id, server_id=server_id)
+
+    async with _refresh_tasks_lock:
+        task = _refresh_tasks.get(key)
+        if task is None or task.done():
+            task = asyncio.create_task(
+                _refresh_vlib_cache_impl(
+                    vlib,
+                    config,
+                    session=session,
+                    user_id=user_id,
+                    server_id=server_id,
+                ),
+                name=f"refresh_vlib_cache:{key}",
+            )
+            _refresh_tasks[key] = task
+
+    try:
+        return await task
+    finally:
+        async with _refresh_tasks_lock:
+            current = _refresh_tasks.get(key)
+            if current is task and task.done():
+                _refresh_tasks.pop(key, None)
+
+
+async def _refresh_vlib_cache_impl(
     vlib: VirtualLibrary,
     config: AppConfig,
     *,

@@ -40,20 +40,43 @@ logging.basicConfig(level=_LOG_LEVEL, format='%(asctime)s - %(levelname)s - %(me
 logger = logging.getLogger(__name__)
 logger.info(f"Proxy logger initialized with LOG_LEVEL={_LOG_LEVEL_NAME}")
 
+
+def _build_background_refresh_session() -> aiohttp.ClientSession:
+    """
+    后台刷新单独使用更小的连接池，避免与前台代理请求争抢 Emby 上游连接。
+    """
+    return create_client_session(
+        cookie_jar=aiohttp.DummyCookieJar(),
+        limit=int(os.environ.get("AIOHTTP_REFRESH_POOL_LIMIT", "8")),
+        limit_per_host=int(os.environ.get("AIOHTTP_REFRESH_POOL_PER_HOST", "2")),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # This app may be mounted by multiple uvicorn.Server instances (multi-port).
-    # Make lifespan idempotent so we don't double-close the shared session.
+    # Make lifespan idempotent so we don't double-close the shared sessions.
     refcnt = getattr(app.state, "_lifespan_refcnt", 0)
     if refcnt == 0 or not hasattr(app.state, "aiohttp_session"):
         app.state.aiohttp_session = create_client_session(cookie_jar=aiohttp.DummyCookieJar())
+        app.state.aiohttp_refresh_session = _build_background_refresh_session()
+        app.state.background_refresh_semaphore = asyncio.Semaphore(
+            max(1, int(os.environ.get("BACKGROUND_REFRESH_MAX_CONCURRENCY", "1")))
+        )
         logger.info("Global AIOHTTP ClientSession created.")
+        logger.info(
+            "Background refresh session created (limit=%s, per_host=%s, max_concurrency=%s).",
+            os.environ.get("AIOHTTP_REFRESH_POOL_LIMIT", "8"),
+            os.environ.get("AIOHTTP_REFRESH_POOL_PER_HOST", "2"),
+            os.environ.get("BACKGROUND_REFRESH_MAX_CONCURRENCY", "1"),
+        )
     app.state._lifespan_refcnt = refcnt + 1
 
     yield
     app.state._lifespan_refcnt = max(0, getattr(app.state, "_lifespan_refcnt", 1) - 1)
     if app.state._lifespan_refcnt == 0 and hasattr(app.state, "aiohttp_session"):
         await app.state.aiohttp_session.close()
+        await app.state.aiohttp_refresh_session.close()
         logger.info("Global AIOHTTP ClientSession closed.")
 
 proxy_app = FastAPI(title="Emby Virtual Proxy - Core", lifespan=lifespan)
@@ -275,7 +298,8 @@ async def internal_refresh_vlib_cache(
     if not vlib:
         raise HTTPException(status_code=404, detail="Virtual library not found")
 
-    session = request.app.state.aiohttp_session
+    session = request.app.state.aiohttp_refresh_session
+    refresh_gate = request.app.state.background_refresh_semaphore
     from vlib_cache_manager import refresh_vlib_cache
 
     body_user_ids = None
@@ -310,17 +334,18 @@ async def internal_refresh_vlib_cache(
         )
 
     counts: Dict[str, int] = {}
-    for uid in to_refresh:
-        try:
-            if not server:
+    async with refresh_gate:
+        for uid in to_refresh:
+            try:
+                if not server:
+                    counts[uid] = 0
+                else:
+                    counts[uid] = await refresh_vlib_cache(
+                        vlib, config, session=session, user_id=uid, server_id=server.id
+                    )
+            except Exception as e:
+                logger.error(f"refresh_vlib_cache user={uid} vlib={library_id}: {e}", exc_info=True)
                 counts[uid] = 0
-            else:
-                counts[uid] = await refresh_vlib_cache(
-                    vlib, config, session=session, user_id=uid, server_id=server.id
-                )
-        except Exception as e:
-            logger.error(f"refresh_vlib_cache user={uid} vlib={library_id}: {e}", exc_info=True)
-            counts[uid] = 0
 
     total = sum(counts.values())
     logger.info(
