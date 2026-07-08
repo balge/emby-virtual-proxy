@@ -83,7 +83,7 @@ def _server_bucket_id(server_id: Optional[str]) -> str:
 # Fields to request from Emby (superset for poster wall + filter + sort)
 # ---------------------------------------------------------------------------
 FETCH_FIELDS = ",".join([
-    "ProviderIds", "Genres", "Tags", "Studios", "OfficialRatings",
+    "ProviderIds", "Genres", "Tags", "Studios", "OfficialRating",
     "CommunityRating", "ProductionYear", "VideoRange", "Container",
     "ProductionLocations", "DateLastMediaAdded", "DateCreated",
     "ImageTags", "BackdropImageTags", "SortName", "PremiereDate",

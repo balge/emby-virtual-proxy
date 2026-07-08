@@ -217,7 +217,7 @@
                 placeholder="选择地区"
               />
               <div
-                v-else-if="['Genres', 'Tags', 'Studios'].includes(rule.field)"
+                v-else-if="['Genres', 'Tags', 'Studios', 'OfficialRating'].includes(rule.field)"
                 class="w-full sm:max-w-md min-w-0"
               >
                 <BaseSearchMultiSelect
@@ -468,6 +468,7 @@ const classificationKeyByField = {
   Genres: "genres",
   Tags: "tags",
   Studios: "studios",
+  OfficialRating: "official_ratings",
 };
 
 /** 规则里只存一条字符串（展示名）；兼容旧数据里误存的逗号分隔，仅取首段 */

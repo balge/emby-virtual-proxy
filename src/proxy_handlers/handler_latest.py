@@ -19,7 +19,11 @@ from .handler_items import (
     _fetch_all_items_for_parent,
     _deduplicate_by_id,
 )
-from vlib_cache_manager import effective_cache_ttl_seconds, populate_random_vlib_items
+from vlib_cache_manager import (
+    _apply_official_rating_threshold_if_needed,
+    effective_cache_ttl_seconds,
+    populate_random_vlib_items,
+)
 from emby_api_client import get_real_libraries_hybrid_mode
 from cover_identity import cover_path_for, extract_user_id_from_request
 
@@ -181,7 +185,8 @@ async def handle_home_latest_items(
             custom_sort_order = adv_filter.sort_order
 
     is_tmdb_merge_enabled = found_vlib.merge_by_tmdb_id or config.force_merge_by_tmdb_id
-    if post_filter_rules or is_tmdb_merge_enabled:
+    is_rating_filter_enabled = bool((found_vlib.random_hide_rating_and_above or "").strip())
+    if post_filter_rules or is_tmdb_merge_enabled or is_rating_filter_enabled:
         fetch_limit = 200
         client_limit = int(params.get("Limit", 20))
         try: fetch_limit = min(max(client_limit * 10, 50), 200)
@@ -189,6 +194,8 @@ async def handle_home_latest_items(
         new_params["Limit"] = fetch_limit
 
     required_fields = set(["ProviderIds"])
+    if is_rating_filter_enabled:
+        required_fields.add("OfficialRating")
     if post_filter_rules:
         for rule in post_filter_rules: required_fields.add(rule.field.split('.')[0])
     if required_fields:
@@ -249,6 +256,13 @@ async def handle_home_latest_items(
 
         if post_filter_rules:
             all_items = _apply_post_filter(all_items, post_filter_rules, filter_match_all)
+        all_items = await _apply_official_rating_threshold_if_needed(
+            session,
+            real_emby_url,
+            headers_to_forward,
+            found_vlib,
+            all_items,
+        )
         if is_tmdb_merge_enabled:
             all_items = await handler_merger.merge_items_by_tmdb(all_items)
 
@@ -292,6 +306,14 @@ async def handle_home_latest_items(
 
     if post_filter_rules:
         items_list = _apply_post_filter(items_list, post_filter_rules, filter_match_all)
+
+    items_list = await _apply_official_rating_threshold_if_needed(
+        session,
+        real_emby_url,
+        headers_to_forward,
+        found_vlib,
+        items_list,
+    )
 
     if is_tmdb_merge_enabled:
         items_list = await handler_merger.merge_items_by_tmdb(items_list)

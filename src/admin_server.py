@@ -642,7 +642,7 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
     params = {
         "Recursive": "true",
         "IncludeItemTypes": "Movie,Series,Video",
-        "Fields": "ImageTags,ProviderIds,Genres,Tags,Studios,OfficialRatings,"
+        "Fields": "ImageTags,ProviderIds,Genres,Tags,Studios,OfficialRating,"
                   "CommunityRating,ProductionYear,VideoRange,Container,"
                   "ProductionLocations,DateLastMediaAdded,DateCreated,"
                   "BackdropImageTags,SortName,PremiereDate,CriticRating,"
@@ -737,6 +737,18 @@ async def _populate_vlib_cache(vlib: VirtualLibrary, config: AppConfig):
         if iid and iid not in seen:
             seen.add(iid)
             deduped.append(item)
+
+    if vlib.random_hide_rating_and_above and deduped:
+        from vlib_cache_manager import _apply_official_rating_threshold_if_needed
+
+        async with create_client_session() as session:
+            deduped = await _apply_official_rating_threshold_if_needed(
+                session,
+                config.emby_url,
+                headers,
+                vlib,
+                deduped,
+            )
 
     # Match virtual library browse order: advanced filter custom sort (e.g. DateLastMediaAdded).
     # Without this, cover generation always used DateCreated order from the fetch, ignoring sort_field/sort_order.
@@ -2300,16 +2312,25 @@ async def get_emby_classifications():
     def format_items(items_list: List) -> List:
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
-    def format_rating_items(items_list: List) -> List:
+    def format_rating_items(items_list: Any) -> List:
         """按 Emby 官方 /OfficialRatings（Items: OfficialRatingItem[]）格式转换。"""
+        if isinstance(items_list, dict):
+            items_list = items_list.get("Items", [])
         if not isinstance(items_list, list):
             return []
         out = []
         seen = set()
         for item in items_list:
-            if not isinstance(item, dict):
-                continue
-            s = str(item.get("Name") or "").strip()
+            if isinstance(item, dict):
+                s = str(
+                    item.get("Name")
+                    or item.get("Id")
+                    or item.get("Value")
+                    or item.get("Rating")
+                    or ""
+                ).strip()
+            else:
+                s = str(item or "").strip()
             if not s or s in seen:
                 continue
             seen.add(s)
