@@ -20,7 +20,7 @@ def filter_items_by_official_rating_threshold(
     """
     Hide items whose OfficialRating is at or above `hide_from_rating`.
 
-    `ordered_ratings` should be in ascending maturity order from Emby /OfficialRatings.
+    `ordered_ratings` should be in ascending maturity order.
     Items with unknown or missing rating are kept (fail-open).
     """
     threshold_key = _normalize_rating(hide_from_rating)

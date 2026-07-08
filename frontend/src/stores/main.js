@@ -713,16 +713,6 @@ export const useMainStore = defineStore("main", {
       }
     },
 
-    ensureOfficialRatingsLoaded() {
-      if (
-        Array.isArray(this.classifications?.official_ratings) &&
-        this.classifications.official_ratings.length
-      ) {
-        return;
-      }
-      this.refreshClassificationsOnly();
-    },
-
     async saveDisplayOrder(orderedIds) {
       this.saving = true;
       try {
@@ -918,7 +908,6 @@ export const useMainStore = defineStore("main", {
         random_hide_rating_and_above: null,
       };
       this.dialogVisible = true;
-      this.ensureOfficialRatingsLoaded();
     },
     openEditDialog(library) {
       this.isEditing = true;
@@ -935,7 +924,6 @@ export const useMainStore = defineStore("main", {
       ) {
         this.currentLibrary.resource_ids = [this.currentLibrary.resource_id];
       }
-      this.ensureOfficialRatingsLoaded();
       if (this.currentLibrary.resource_type === "person") {
         for (const pid of effectiveResourceIds(this.currentLibrary)) {
           this.resolvePersonName(pid);

@@ -141,82 +141,6 @@ async def _fetch_user_genre_preferences(
     return [g for g, _ in genre_counter.most_common(10)]
 
 
-async def _fetch_official_ratings_order(
-    session: aiohttp.ClientSession,
-    real_emby_url: str,
-    headers: Dict[str, str],
-) -> List[str]:
-    """Read ordered official ratings from Emby /OfficialRatings endpoint."""
-    def _sort_discovered_ratings(values: List[str]) -> List[str]:
-        rank = {name: idx for idx, name in enumerate(COMMON_OFFICIAL_RATING_ORDER)}
-        return sorted(values, key=lambda x: (rank.get(x, 1000), x))
-
-    url = f"{real_emby_url.rstrip('/')}/emby/OfficialRatings"
-    data: Any = {}
-    try:
-        async with session.get(
-            url,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=15),
-        ) as resp:
-            if resp.status != 200:
-                data = {}
-            else:
-                data = await resp.json()
-    except Exception as e:
-        logger.warning("Failed to fetch official ratings: %s", e)
-        data = {}
-
-    # 严格遵循 Emby 官方格式：/OfficialRatings 返回 QueryResult，分级在 Items[].Name。
-    out: List[str] = []
-    if not isinstance(data, dict):
-        items = []
-    else:
-        items = data.get("Items")
-
-    if isinstance(items, list):
-        for x in items:
-            if not isinstance(x, dict):
-                continue
-            s = str(x.get("Name") or x.get("Id") or x.get("Value") or x.get("Rating") or "").strip()
-            if s and s not in out:
-                out.append(s)
-    if out:
-        return out
-
-    fallback_url = f"{real_emby_url.rstrip('/')}/emby/Items"
-    fallback_params = {
-        "Recursive": "true",
-        "IncludeItemTypes": "Movie,Series,Video",
-        "Fields": "OfficialRating",
-        "Limit": "1000",
-    }
-    try:
-        async with session.get(
-            fallback_url,
-            params=fallback_params,
-            headers=headers,
-            timeout=aiohttp.ClientTimeout(total=20),
-        ) as resp:
-            if resp.status != 200:
-                return []
-            fallback_data = await resp.json()
-    except Exception as e:
-        logger.warning("Failed to derive official ratings from items: %s", e)
-        return []
-
-    fallback_items = fallback_data.get("Items") if isinstance(fallback_data, dict) else []
-    if not isinstance(fallback_items, list):
-        return []
-    for item in fallback_items:
-        if not isinstance(item, dict):
-            continue
-        s = str(item.get("OfficialRating") or "").strip()
-        if s and s not in out:
-            out.append(s)
-    return _sort_discovered_ratings(out)
-
-
 async def _apply_official_rating_threshold_if_needed(
     session: aiohttp.ClientSession,
     real_emby_url: str,
@@ -228,14 +152,10 @@ async def _apply_official_rating_threshold_if_needed(
     if not hide_from_rating:
         return items
 
-    ordered_ratings = await _fetch_official_ratings_order(session, real_emby_url, headers)
-    if not ordered_ratings:
-        return items
-
     filtered = filter_items_by_official_rating_threshold(
         items,
         hide_from_rating,
-        ordered_ratings,
+        COMMON_OFFICIAL_RATING_ORDER,
     )
     logger.info(
         "Virtual library '%s': rating filter enabled, hide %s and above (%d -> %d)",

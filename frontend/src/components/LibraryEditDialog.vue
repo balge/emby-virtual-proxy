@@ -318,20 +318,22 @@ const advancedFilterOptions = computed(() => [
   })),
 ]);
 
+const commonOfficialRatings = [
+  "G",
+  "TV-Y",
+  "TV-Y7",
+  "TV-G",
+  "PG",
+  "TV-PG",
+  "PG-13",
+  "TV-14",
+  "R",
+  "TV-MA",
+  "NC-17",
+];
+
 const randomRatingThresholdOptions = computed(() => {
-  const src = Array.isArray(store.classifications?.official_ratings)
-    ? store.classifications.official_ratings
-    : [];
-  const seen = new Set();
-  const items = [];
-
-  for (const x of src) {
-    const value = String(x?.id ?? x?.name ?? x ?? "").trim();
-    if (!value || seen.has(value)) continue;
-    seen.add(value);
-    items.push({ value, label: value });
-  }
-
+  const items = commonOfficialRatings.map((value) => ({ value, label: value }));
   return [{ value: null, label: "不过滤" }, ...items];
 });
 
