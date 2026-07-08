@@ -2312,6 +2312,20 @@ async def get_emby_classifications():
     def format_items(items_list: List) -> List:
         return [{"name": item.get("Name", 'N/A'), "id": item.get("Id", 'N/A')} for item in items_list]
 
+    rating_order = {
+        "G": 10,
+        "TV-Y": 20,
+        "TV-Y7": 30,
+        "TV-G": 40,
+        "PG": 50,
+        "TV-PG": 60,
+        "PG-13": 70,
+        "TV-14": 80,
+        "R": 90,
+        "TV-MA": 100,
+        "NC-17": 110,
+    }
+
     def format_rating_items(items_list: Any) -> List:
         """按 Emby 官方 /OfficialRatings（Items: OfficialRatingItem[]）格式转换。"""
         if isinstance(items_list, dict):
@@ -2337,6 +2351,31 @@ async def get_emby_classifications():
             out.append({"name": s, "id": s})
         return out
 
+    def derive_rating_items_from_media(items_list: Any) -> List:
+        if isinstance(items_list, dict):
+            items_list = items_list.get("Items", [])
+        if not isinstance(items_list, list):
+            return []
+        seen = set()
+        out = []
+        for item in items_list:
+            if not isinstance(item, dict):
+                continue
+            s = str(item.get("OfficialRating") or "").strip()
+            if not s or s in seen:
+                continue
+            seen.add(s)
+            out.append({"name": s, "id": s})
+        out.sort(key=lambda x: (rating_order.get(x["name"], 1000), x["name"]))
+        return out
+
+    async def fetch_optional_from_emby(endpoint: str, params: Optional[Dict] = None) -> List:
+        try:
+            return await fetch_from_emby(endpoint, params=params, config=scoped)
+        except Exception as e:
+            logger.warning("Optional Emby helper fetch failed endpoint=%s: %s", endpoint, e)
+            return []
+
     scoped, _sid = _load_server_scoped_config()
     try:
         tasks = {
@@ -2344,11 +2383,26 @@ async def get_emby_classifications():
             "genres": fetch_from_emby("/Genres", config=scoped),
             "tags": fetch_from_emby("/Tags", config=scoped),
             "studios": fetch_from_emby("/Studios", config=scoped),
-            "official_ratings": fetch_from_emby("/OfficialRatings", config=scoped),
+            "official_ratings": fetch_optional_from_emby("/OfficialRatings"),
+            "media_rating_items": fetch_optional_from_emby(
+                "/Items",
+                params={
+                    "Recursive": "true",
+                    "IncludeItemTypes": "Movie,Series,Video",
+                    "Fields": "OfficialRating",
+                    "Limit": "1000",
+                },
+                config=scoped,
+            ),
         }
         results_list = await asyncio.gather(*tasks.values())
         results_dict = dict(zip(tasks.keys(), results_list))
         results_dict["persons"] = []
+        official_ratings = format_rating_items(results_dict.get("official_ratings") or [])
+        if not official_ratings:
+            official_ratings = derive_rating_items_from_media(
+                results_dict.get("media_rating_items") or []
+            )
 
         return {
             "collections": format_items(results_dict["collections"]),
@@ -2356,7 +2410,7 @@ async def get_emby_classifications():
             "tags": format_items(results_dict["tags"]),
             "studios": format_items(results_dict["studios"]),
             "persons": [],
-            "official_ratings": format_rating_items(results_dict.get("official_ratings") or []),
+            "official_ratings": official_ratings,
         }
     except HTTPException as e:
         raise e
